@@ -10,9 +10,11 @@ use std::time::Duration;
 
 use clap::Parser;
 use tracing::{debug, info};
+use zbus::export::futures_core::Stream;
 
 use noirpass::gpg::Gpg;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
+use noirpass::session::Session;
 use noirpass::store::Store;
 
 /// Minimal on-demand GPG-backed freedesktop Secret Service.
@@ -77,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
     register_existing(connection.object_server(), &state).await?;
+    tokio::spawn(reap_vanished_clients(connection.clone(), state.clone()));
     connection.request_name(cli.bus_name.as_str()).await?;
     info!(name = %cli.bus_name, "secret service ready");
 
@@ -88,6 +91,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(connection);
     info!("exiting");
     Ok(())
+}
+
+/// Reap sessions whose owning client left the bus without calling
+/// `Session.Close` (most clients don't). Watches `NameOwnerChanged` for
+/// unique names losing their owner; leaked sessions would otherwise block
+/// idle-exit forever and accumulate cipher state.
+async fn reap_vanished_clients(connection: zbus::Connection, state: Arc<ServiceState>) {
+    let Ok(proxy) = zbus::fdo::DBusProxy::new(&connection).await else {
+        return;
+    };
+    let Ok(stream) = proxy.receive_name_owner_changed().await else {
+        return;
+    };
+    let mut stream = std::pin::pin!(stream);
+    while let Some(signal) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+        let Ok(args) = signal.args() else { continue };
+        // A unique name (":x.y") with no new owner means the client is gone.
+        if args.new_owner().is_none() && args.name().starts_with(':') {
+            for path in state.remove_sessions_owned_by(args.name().as_str()) {
+                debug!(%path, owner = %args.name(), "reaping session of vanished client");
+                let _ = connection.object_server().remove::<Session, _>(&path).await;
+            }
+        }
+    }
 }
 
 /// Wait until SIGTERM/SIGINT, or (when `idle_exit > 0`) until the bus has

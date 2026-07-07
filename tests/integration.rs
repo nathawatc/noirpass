@@ -707,13 +707,28 @@ async fn idle_exit_daemon_exits() {
     let store = tempfile::tempdir().unwrap();
     let mut daemon = spawn_daemon(&address, &h.gnupg_home, store.path(), "1");
 
+    // Exercise the daemon with a real client that exits WITHOUT calling
+    // Session.Close (secret-tool never does): its leaked session must not
+    // block idle-exit — the NameOwnerChanged reaper has to collect it.
+    let out = std::process::Command::new("secret-tool")
+        .args(["lookup", "idle", "probe"])
+        .env("DBUS_SESSION_BUS_ADDRESS", &address)
+        .env("GNUPGHOME", &h.gnupg_home)
+        .output()
+        .expect("run secret-tool against idle-exit daemon");
+    // No such item — lookup "fails" with empty output, but it opened a session.
+    assert!(out.stdout.is_empty());
+
     // Idle ticker runs every 10s; the second tick (~10s) sees idle >= 1s.
     let status = tokio::task::spawn_blocking(move || {
-        wait_with_timeout(&mut daemon, Duration::from_secs(20))
+        wait_with_timeout(&mut daemon, Duration::from_secs(25))
     })
     .await
     .unwrap();
-    assert!(status.success(), "idle daemon exited with {status}");
+    assert!(
+        status.success(),
+        "daemon should idle-exit cleanly after client disconnect, got {status}"
+    );
 
     dbus.kill().expect("kill private dbus-daemon");
     let _ = dbus.wait();

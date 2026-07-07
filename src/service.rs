@@ -134,11 +134,18 @@ impl From<crate::Error> for SecretError {
 
 // --- shared state -----------------------------------------------------------
 
+/// A registered session: its transport cipher and the unique bus name of the
+/// client that opened it (used to reap sessions of vanished clients).
+struct SessionEntry {
+    cipher: Arc<SessionCipher>,
+    owner: Option<String>,
+}
+
 /// State shared by every D-Bus object of the daemon.
 pub struct ServiceState {
     store: Store,
     gpg: Gpg,
-    sessions: Mutex<HashMap<OwnedObjectPath, Arc<SessionCipher>>>,
+    sessions: Mutex<HashMap<OwnedObjectPath, SessionEntry>>,
     session_counter: AtomicU64,
     last_activity: Mutex<Instant>,
 }
@@ -195,12 +202,38 @@ impl ServiceState {
         session_path(n)
     }
 
-    /// Register a session cipher under its object path.
-    pub fn register_session(&self, path: OwnedObjectPath, cipher: SessionCipher) {
-        self.sessions
-            .lock()
-            .expect("session lock poisoned")
-            .insert(path, Arc::new(cipher));
+    /// Register a session cipher under its object path, remembering the
+    /// unique bus name of the opening client when known.
+    pub fn register_session(
+        &self,
+        path: OwnedObjectPath,
+        cipher: SessionCipher,
+        owner: Option<String>,
+    ) {
+        self.sessions.lock().expect("session lock poisoned").insert(
+            path,
+            SessionEntry {
+                cipher: Arc::new(cipher),
+                owner,
+            },
+        );
+    }
+
+    /// Drop every session owned by `owner` (a unique bus name that vanished),
+    /// returning the object paths so their D-Bus objects can be removed.
+    /// Without this, clients that exit without calling `Session.Close` (most
+    /// of them) would pin `session_count` above zero and block idle-exit.
+    pub fn remove_sessions_owned_by(&self, owner: &str) -> Vec<OwnedObjectPath> {
+        let mut sessions = self.sessions.lock().expect("session lock poisoned");
+        let paths: Vec<OwnedObjectPath> = sessions
+            .iter()
+            .filter(|(_, entry)| entry.owner.as_deref() == Some(owner))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in &paths {
+            sessions.remove(path);
+        }
+        paths
     }
 
     /// Remove a session; returns whether it existed.
@@ -219,7 +252,7 @@ impl ServiceState {
             .lock()
             .expect("session lock poisoned")
             .get(path)
-            .cloned()
+            .map(|entry| entry.cipher.clone())
     }
 
     /// Decrypt an incoming [`Secret`] with its session cipher, `gpg`-encrypt
@@ -382,6 +415,7 @@ impl Service {
         algorithm: &str,
         input: Value<'_>,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
         self.state.touch();
         let (output, cipher) = match algorithm {
@@ -415,7 +449,8 @@ impl Service {
         };
 
         let path = self.state.next_session_path();
-        self.state.register_session(path.clone(), cipher);
+        let owner = header.sender().map(ToString::to_string);
+        self.state.register_session(path.clone(), cipher, owner);
         server
             .at(&path, Session::new(self.state.clone(), path.clone()))
             .await?;
@@ -680,7 +715,7 @@ mod tests {
         assert_ne!(p1, p2);
         assert_eq!(state.session_count(), 0);
 
-        state.register_session(p1.clone(), SessionCipher::Plain);
+        state.register_session(p1.clone(), SessionCipher::Plain, Some(":1.7".into()));
         assert_eq!(state.session_count(), 1);
         assert!(state.session_cipher(&p1).is_some());
         assert!(state.session_cipher(&p2).is_none());
@@ -688,6 +723,32 @@ mod tests {
         assert!(state.remove_session(&p1));
         assert!(!state.remove_session(&p1));
         assert_eq!(state.session_count(), 0);
+    }
+
+    #[test]
+    fn sessions_of_vanished_owner_are_reaped() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let (p1, p2, p3) = (
+            state.next_session_path(),
+            state.next_session_path(),
+            state.next_session_path(),
+        );
+
+        state.register_session(p1.clone(), SessionCipher::Plain, Some(":1.7".into()));
+        state.register_session(p2.clone(), SessionCipher::Plain, Some(":1.8".into()));
+        state.register_session(p3.clone(), SessionCipher::Plain, None);
+        assert_eq!(state.session_count(), 3);
+
+        let reaped = state.remove_sessions_owned_by(":1.7");
+        assert_eq!(reaped, vec![p1.clone()]);
+        assert_eq!(state.session_count(), 2);
+        assert!(state.session_cipher(&p1).is_none());
+
+        // Unknown owners and owner-less sessions are untouched.
+        assert!(state.remove_sessions_owned_by(":9.9").is_empty());
+        assert_eq!(state.session_count(), 2);
     }
 
     /// In-process p2p bus serving the real `Service` interface.

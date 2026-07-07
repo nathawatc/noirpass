@@ -35,8 +35,8 @@ pub struct Secret {
 
 /// A `org.freedesktop.Secret.Session` D-Bus object.
 ///
-/// Client-disconnect cleanup is not implemented (a leaked session persists
-/// until the daemon exits); clients are expected to call `Close`.
+/// Clients should call `Close`; sessions of clients that leave the bus
+/// without closing are reaped by the daemon's `NameOwnerChanged` watcher.
 pub struct Session {
     state: Arc<ServiceState>,
     path: OwnedObjectPath,
