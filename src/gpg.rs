@@ -312,22 +312,25 @@ fn default_secret_fingerprint(homedir: Option<&Path>) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    //! Shared test fixture: an ephemeral, hermetic `GnuPG` home.
+
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::process::Command;
 
     /// An ephemeral `GnuPG` home with a freshly generated, empty-passphrase key.
     ///
     /// Never touches the user's real `~/.gnupg`: every `gpg`/`gpgconf` call and
     /// every Sequoia context is scoped to this temporary directory. The agent
     /// is killed on drop.
-    struct TestGnupg {
+    pub(crate) struct TestGnupg {
         dir: tempfile::TempDir,
     }
 
     impl TestGnupg {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -360,7 +363,7 @@ mod tests {
             Self { dir }
         }
 
-        fn path(&self) -> &Path {
+        pub(crate) fn path(&self) -> &Path {
             self.dir.path()
         }
     }
@@ -374,6 +377,12 @@ mod tests {
                 .status();
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::TestGnupg;
+    use super::*;
 
     #[tokio::test]
     async fn encrypt_decrypt_roundtrip_via_agent() {

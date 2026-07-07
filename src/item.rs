@@ -1,0 +1,179 @@
+//! `org.freedesktop.Secret.Item` objects.
+//!
+//! One object per stored secret, served at
+//! `/org/freedesktop/secrets/collection/<col>/<item>`. Secret values only
+//! exist in plaintext transiently, between the session cipher and the
+//! `OpenPGP` layer.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use zbus::object_server::{ObjectServer, SignalEmitter};
+use zbus::zvariant::OwnedObjectPath;
+use zbus::{fdo, interface};
+
+use crate::collection::Collection;
+use crate::service::{SecretError, ServiceState, collection_path, item_path};
+use crate::session::Secret;
+
+/// The "no prompt" object path.
+fn no_prompt() -> OwnedObjectPath {
+    OwnedObjectPath::try_from("/").expect("/ is a valid object path")
+}
+
+/// A `org.freedesktop.Secret.Item` D-Bus object.
+pub struct Item {
+    state: Arc<ServiceState>,
+    collection_id: String,
+    id: String,
+}
+
+impl Item {
+    /// Create an item object for stored item `id` in `collection_id`.
+    #[must_use]
+    pub fn new(state: Arc<ServiceState>, collection_id: String, id: String) -> Self {
+        Self {
+            state,
+            collection_id,
+            id,
+        }
+    }
+
+    /// This item's D-Bus path.
+    fn path(&self) -> OwnedObjectPath {
+        item_path(&self.collection_id, &self.id)
+    }
+}
+
+#[interface(name = "org.freedesktop.Secret.Item")]
+impl Item {
+    /// Retrieve the secret, decrypted via `gpg-agent` and encoded for the
+    /// given session.
+    #[zbus(out_args("secret"))]
+    async fn get_secret(&self, session: OwnedObjectPath) -> Result<(Secret,), SecretError> {
+        self.state.touch();
+        let meta = self.state.store().get_item(&self.id)?;
+        let ciphertext = self.state.store().read_secret_file(&self.id)?;
+        let secret = self
+            .state
+            .ciphertext_to_secret(&session, &ciphertext, &meta.content_type)
+            .await?;
+        Ok((secret,))
+    }
+
+    /// Replace the secret value (and content type) of this item.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "zbus deserializes method arguments by value"
+    )]
+    fn set_secret(&self, secret: Secret) -> Result<(), SecretError> {
+        self.state.touch();
+        let ciphertext = self.state.secret_to_ciphertext(&secret)?;
+        self.state.store().update_item(
+            &self.id,
+            None,
+            None,
+            Some(&secret.content_type),
+            Some(&ciphertext),
+        )?;
+        Ok(())
+    }
+
+    /// Delete this item and its secret file.
+    #[zbus(out_args("prompt"))]
+    async fn delete(
+        &self,
+        #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<OwnedObjectPath, SecretError> {
+        self.state.touch();
+        self.state.store().delete_item(&self.id)?;
+
+        server
+            .remove::<Self, _>(&self.path())
+            .await
+            .map_err(SecretError::ZBus)?;
+
+        // ItemDeleted is a Collection signal, emitted from the collection path.
+        let emitter = SignalEmitter::new(connection, collection_path(&self.collection_id))
+            .map_err(SecretError::ZBus)?;
+        Collection::item_deleted(&emitter, self.path())
+            .await
+            .map_err(SecretError::ZBus)?;
+
+        Ok(no_prompt())
+    }
+
+    /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).
+    #[zbus(property)]
+    #[allow(clippy::unused_self, reason = "zbus property getters take &self")]
+    fn locked(&self) -> bool {
+        false
+    }
+
+    /// Lookup attributes.
+    #[zbus(property)]
+    fn attributes(&self) -> fdo::Result<HashMap<String, String>> {
+        let meta = self
+            .state
+            .store()
+            .get_item(&self.id)
+            .map_err(fdo::Error::from)?;
+        Ok(meta.attributes)
+    }
+
+    /// Replace the lookup attributes (bumps the modified timestamp).
+    #[zbus(property)]
+    fn set_attributes(&self, attributes: HashMap<String, String>) -> fdo::Result<()> {
+        self.state.touch();
+        self.state
+            .store()
+            .update_item(&self.id, None, Some(attributes), None, None)
+            .map_err(fdo::Error::from)?;
+        Ok(())
+    }
+
+    /// Human-readable label.
+    #[zbus(property)]
+    fn label(&self) -> fdo::Result<String> {
+        let meta = self
+            .state
+            .store()
+            .get_item(&self.id)
+            .map_err(fdo::Error::from)?;
+        Ok(meta.label)
+    }
+
+    /// Relabel the item (bumps the modified timestamp).
+    #[zbus(property)]
+    fn set_label(&self, label: &str) -> fdo::Result<()> {
+        self.state.touch();
+        self.state
+            .store()
+            .update_item(&self.id, Some(label), None, None, None)
+            .map_err(fdo::Error::from)?;
+        Ok(())
+    }
+
+    /// Creation time, seconds since the Unix epoch.
+    #[zbus(property)]
+    fn created(&self) -> fdo::Result<u64> {
+        let meta = self
+            .state
+            .store()
+            .get_item(&self.id)
+            .map_err(fdo::Error::from)?;
+        Ok(meta.created)
+    }
+
+    /// Last modification time, seconds since the Unix epoch.
+    #[zbus(property)]
+    fn modified(&self) -> fdo::Result<u64> {
+        let meta = self
+            .state
+            .store()
+            .get_item(&self.id)
+            .map_err(fdo::Error::from)?;
+        Ok(meta.modified)
+    }
+}

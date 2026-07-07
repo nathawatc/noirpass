@@ -259,6 +259,21 @@ impl Store {
         self.get_collection(DEFAULT_COLLECTION_ID)
     }
 
+    /// Change a collection's label and bump its modified timestamp.
+    pub fn set_collection_label(&self, id: &str, label: &str) -> Result<CollectionMeta> {
+        let mut meta = self.get_collection(id)?;
+        meta.label = label.to_string();
+        meta.modified = now_secs();
+        let txn = self.db.begin_write()?;
+        {
+            let mut collections = txn.open_table(COLLECTIONS)?;
+            let bytes = serde_json::to_vec(&meta)?;
+            collections.insert(meta.id.as_str(), bytes.as_slice())?;
+        }
+        txn.commit()?;
+        Ok(meta)
+    }
+
     // --- aliases ---------------------------------------------------------
 
     /// Set (`Some`) or remove (`None`) the alias `name`.
@@ -392,14 +407,15 @@ impl Store {
         Ok(out)
     }
 
-    /// Update an item's label, attributes and/or secret and bump its modified
-    /// timestamp. `None` fields are left unchanged; a `Some` secret rewrites
-    /// the `.gpg` file.
+    /// Update an item's label, attributes, content type and/or secret and bump
+    /// its modified timestamp. `None` fields are left unchanged; a `Some`
+    /// secret rewrites the `.gpg` file.
     pub fn update_item(
         &self,
         id: &str,
         label: Option<&str>,
         attributes: Option<HashMap<String, String>>,
+        content_type: Option<&str>,
         secret_ciphertext: Option<&[u8]>,
     ) -> Result<ItemMeta> {
         let mut meta = self.get_item(id)?;
@@ -408,6 +424,9 @@ impl Store {
         }
         if let Some(attrs) = attributes {
             meta.attributes = attrs;
+        }
+        if let Some(ct) = content_type {
+            meta.content_type = ct.to_string();
         }
         meta.modified = now_secs();
 
@@ -508,6 +527,11 @@ mod tests {
         let all = store.list_collections().unwrap();
         assert_eq!(all.len(), 1);
 
+        let relabelled = store.set_collection_label(&c.id, "Work").unwrap();
+        assert_eq!(relabelled.label, "Work");
+        assert!(relabelled.modified >= c.modified);
+        assert_eq!(store.get_collection(&c.id).unwrap().label, "Work");
+
         store.delete_collection(&c.id).unwrap();
         assert!(matches!(
             store.get_collection(&c.id),
@@ -569,7 +593,13 @@ mod tests {
         assert_eq!(store.list_items(&c.id).unwrap().len(), 1);
 
         let updated = store
-            .update_item(&item.id, Some("wifi-home"), None, Some(b"CIPHERTEXT-2"))
+            .update_item(
+                &item.id,
+                Some("wifi-home"),
+                None,
+                None,
+                Some(b"CIPHERTEXT-2"),
+            )
             .unwrap();
         assert_eq!(updated.label, "wifi-home");
         assert!(updated.modified >= item.modified);

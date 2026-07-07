@@ -1,0 +1,33 @@
+[Unit]
+Description=noirpass Secret Service (GPG-backed org.freedesktop.secrets)
+Documentation=https://specifications.freedesktop.org/secret-service-spec/latest/
+# Do not start if another secret service (e.g. gnome-keyring) owns the name.
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.secrets
+# Adjust to the installed binary location (systemd requires an absolute path).
+ExecStart=%h/.local/bin/noirpass
+Restart=on-failure
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/noirpass
+PrivateTmp=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=default.target
