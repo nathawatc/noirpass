@@ -1,7 +1,11 @@
 //! `org.freedesktop.Secret.Collection` objects.
 //!
 //! One object per stored collection, served at
-//! `/org/freedesktop/secrets/collection/<id>`. Collections are always
+//! `/org/freedesktop/secrets/collection/<id>`. The same interface is *also*
+//! served at the spec's alias paths (`/org/freedesktop/secrets/aliases/<name>`,
+//! e.g. `aliases/default`, which libsecret uses directly): an alias-backed
+//! instance resolves the target collection through the store on every call, so
+//! re-pointing an alias is reflected immediately. Collections are always
 //! unlocked (see [`crate::service`] module docs for the locking rationale).
 
 use std::collections::HashMap;
@@ -12,7 +16,8 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{fdo, interface};
 
 use crate::service::{
-    SERVICE_PATH, SecretError, Service, ServiceState, collection_path, item_path, register_item,
+    SERVICE_PATH, SecretError, Service, ServiceState, alias_path, collection_path, item_path,
+    register_item,
 };
 use crate::session::Secret;
 
@@ -21,22 +26,54 @@ fn no_prompt() -> OwnedObjectPath {
     OwnedObjectPath::try_from("/").expect("/ is a valid object path")
 }
 
+/// What a served collection object points at.
+enum Target {
+    /// A collection by id (the canonical `/collection/<id>` object).
+    Collection(String),
+    /// An alias resolved through the store on every call
+    /// (the `/aliases/<name>` objects).
+    Alias(String),
+}
+
 /// A `org.freedesktop.Secret.Collection` D-Bus object.
 pub struct Collection {
     state: Arc<ServiceState>,
-    id: String,
+    target: Target,
 }
 
 impl Collection {
     /// Create a collection object for the stored collection `id`.
     #[must_use]
     pub fn new(state: Arc<ServiceState>, id: String) -> Self {
-        Self { state, id }
+        Self {
+            state,
+            target: Target::Collection(id),
+        }
     }
 
-    /// This collection's D-Bus path.
-    fn path(&self) -> OwnedObjectPath {
-        collection_path(&self.id)
+    /// Create a collection object that resolves the alias `name` at call time.
+    #[must_use]
+    pub fn for_alias(state: Arc<ServiceState>, name: String) -> Self {
+        Self {
+            state,
+            target: Target::Alias(name),
+        }
+    }
+
+    /// The id of the collection this object currently points at.
+    ///
+    /// For alias-backed objects this re-reads the alias, so a dangling or
+    /// removed alias yields `UnknownObject`.
+    fn resolve_id(&self) -> fdo::Result<String> {
+        match &self.target {
+            Target::Collection(id) => Ok(id.clone()),
+            Target::Alias(name) => self
+                .state
+                .store()
+                .read_alias(name)
+                .map_err(fdo::Error::from)?
+                .ok_or_else(|| fdo::Error::UnknownObject(format!("alias {name} is not set"))),
+        }
     }
 }
 
@@ -54,13 +91,14 @@ impl Collection {
         attributes: HashMap<String, String>,
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
         self.state.touch();
+        let id = self.resolve_id()?;
         let results = self
             .state
             .store()
             .search_items(&attributes)
             .map_err(fdo::Error::from)?
             .into_iter()
-            .filter(|meta| meta.collection == self.id)
+            .filter(|meta| meta.collection == id)
             .map(|meta| item_path(&meta.collection, &meta.id))
             .collect();
         Ok(results)
@@ -72,6 +110,8 @@ impl Collection {
     /// re-encrypted to the user's `OpenPGP` key before it touches disk. With
     /// `replace = true`, an item whose attributes match exactly is updated in
     /// place (`ItemChanged`); otherwise a new item is created (`ItemCreated`).
+    /// Signals are emitted from the canonical collection path, also when this
+    /// call arrives via an alias path.
     #[zbus(out_args("item", "prompt"))]
     async fn create_item(
         &self,
@@ -79,9 +119,10 @@ impl Collection {
         secret: Secret,
         replace: bool,
         #[zbus(object_server)] server: &ObjectServer,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
         self.state.touch();
+        let id = self.resolve_id()?;
 
         let label = properties
             .get("org.freedesktop.Secret.Item.Label")
@@ -94,10 +135,15 @@ impl Collection {
 
         let ciphertext = self.state.secret_to_ciphertext(&secret)?;
 
+        // Emit from the canonical collection path regardless of how we were
+        // addressed (id or alias).
+        let emitter =
+            SignalEmitter::new(connection, collection_path(&id)).map_err(SecretError::ZBus)?;
+
         let existing = if replace {
             self.state
                 .store()
-                .find_item_by_attrs_exact(&self.id, &attributes)?
+                .find_item_by_attrs_exact(&id, &attributes)?
         } else {
             None
         };
@@ -110,29 +156,33 @@ impl Collection {
                 Some(&secret.content_type),
                 Some(&ciphertext),
             )?;
-            let path = item_path(&self.id, &meta.id);
+            let path = item_path(&id, &meta.id);
             Self::item_changed(&emitter, path.clone()).await?;
+            self.items_changed(&emitter).await?;
             return Ok((path, no_prompt()));
         }
 
         let meta = self.state.store().create_item(
-            &self.id,
+            &id,
             &label,
             attributes,
             &secret.content_type,
             &ciphertext,
         )?;
-        let path = register_item(server, &self.state, &self.id, &meta.id)
+        let path = register_item(server, &self.state, &id, &meta.id)
             .await
             .map_err(SecretError::ZBus)?;
         Self::item_created(&emitter, path.clone()).await?;
+        // Refresh client-side caches of the `Items` property.
+        self.items_changed(&emitter).await?;
         Ok((path, no_prompt()))
     }
 
     /// Delete this collection, all its items and their secret files.
     ///
-    /// Deleting the default collection is allowed; `ensure_default` recreates
-    /// it on the next daemon startup.
+    /// Also unregisters any alias objects that pointed at it. Deleting the
+    /// default collection is allowed; `ensure_default` recreates it on the
+    /// next daemon startup.
     #[zbus(out_args("prompt"))]
     async fn delete(
         &self,
@@ -140,24 +190,47 @@ impl Collection {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
         self.state.touch();
+        let id = self.resolve_id()?;
+        let real_path = collection_path(&id);
 
-        let items = self.state.store().list_items(&self.id)?;
-        self.state.store().delete_collection(&self.id)?;
+        let items = self.state.store().list_items(&id)?;
+        // Snapshot the aliases pointing here before the cascade removes them.
+        let aliases = self.state.store().list_aliases()?;
+        self.state.store().delete_collection(&id)?;
 
-        // Unregister the item objects, then this collection object itself.
+        // Unregister the item objects, the canonical collection object and
+        // any alias objects that resolved to this collection.
         for item in items {
             let _ = server
-                .remove::<crate::item::Item, _>(&item_path(&self.id, &item.id))
+                .remove::<crate::item::Item, _>(&item_path(&id, &item.id))
                 .await;
         }
         server
-            .remove::<Self, _>(&self.path())
+            .remove::<Self, _>(&real_path)
             .await
             .map_err(SecretError::ZBus)?;
+        for (name, target) in aliases {
+            if target == id
+                && let Ok(path) = alias_path(&name)
+            {
+                let _ = server.remove::<Self, _>(&path).await;
+            }
+        }
 
         // CollectionDeleted is a Service signal, emitted from the service path.
         let emitter = SignalEmitter::new(connection, SERVICE_PATH).map_err(SecretError::ZBus)?;
-        Service::collection_deleted(&emitter, self.path())
+        Service::collection_deleted(&emitter, real_path)
+            .await
+            .map_err(SecretError::ZBus)?;
+        // Refresh client-side caches of the service's `Collections` property.
+        let service_ref = server
+            .interface::<_, Service>(SERVICE_PATH)
+            .await
+            .map_err(SecretError::ZBus)?;
+        service_ref
+            .get()
+            .await
+            .collections_changed(service_ref.signal_emitter())
             .await
             .map_err(SecretError::ZBus)?;
 
@@ -167,10 +240,11 @@ impl Collection {
     /// Object paths of the items in this collection.
     #[zbus(property)]
     fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
+        let id = self.resolve_id()?;
         let items = self
             .state
             .store()
-            .list_items(&self.id)
+            .list_items(&id)
             .map_err(fdo::Error::from)?;
         Ok(items
             .into_iter()
@@ -181,10 +255,11 @@ impl Collection {
     /// Human-readable label.
     #[zbus(property)]
     fn label(&self) -> fdo::Result<String> {
+        let id = self.resolve_id()?;
         let meta = self
             .state
             .store()
-            .get_collection(&self.id)
+            .get_collection(&id)
             .map_err(fdo::Error::from)?;
         Ok(meta.label)
     }
@@ -198,12 +273,13 @@ impl Collection {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
         self.state.touch();
+        let id = self.resolve_id()?;
         self.state
             .store()
-            .set_collection_label(&self.id, label)
+            .set_collection_label(&id, label)
             .map_err(fdo::Error::from)?;
         let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;
-        Service::collection_changed(&emitter, self.path()).await?;
+        Service::collection_changed(&emitter, collection_path(&id)).await?;
         Ok(())
     }
 
@@ -217,10 +293,11 @@ impl Collection {
     /// Creation time, seconds since the Unix epoch.
     #[zbus(property)]
     fn created(&self) -> fdo::Result<u64> {
+        let id = self.resolve_id()?;
         let meta = self
             .state
             .store()
-            .get_collection(&self.id)
+            .get_collection(&id)
             .map_err(fdo::Error::from)?;
         Ok(meta.created)
     }
@@ -228,10 +305,11 @@ impl Collection {
     /// Last modification time, seconds since the Unix epoch.
     #[zbus(property)]
     fn modified(&self) -> fdo::Result<u64> {
+        let id = self.resolve_id()?;
         let meta = self
             .state
             .store()
-            .get_collection(&self.id)
+            .get_collection(&id)
             .map_err(fdo::Error::from)?;
         Ok(meta.modified)
     }

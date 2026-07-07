@@ -100,6 +100,17 @@ impl Item {
         Collection::item_deleted(&emitter, self.path())
             .await
             .map_err(SecretError::ZBus)?;
+        // Refresh client-side caches of the collection's `Items` property.
+        let col_ref = server
+            .interface::<_, Collection>(collection_path(&self.collection_id))
+            .await
+            .map_err(SecretError::ZBus)?;
+        col_ref
+            .get()
+            .await
+            .items_changed(col_ref.signal_emitter())
+            .await
+            .map_err(SecretError::ZBus)?;
 
         Ok(no_prompt())
     }

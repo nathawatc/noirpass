@@ -76,3 +76,26 @@ impl From<Error> for zbus::fdo::Error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_found_maps_to_unknown_object() {
+        let err = Error::NotFound("collection x".into());
+        match zbus::fdo::Error::from(err) {
+            zbus::fdo::Error::UnknownObject(msg) => assert_eq!(msg, "collection x"),
+            other => panic!("expected UnknownObject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_errors_map_to_failed_with_message() {
+        let err = Error::Crypto("bad padding".into());
+        match zbus::fdo::Error::from(err) {
+            zbus::fdo::Error::Failed(msg) => assert!(msg.contains("bad padding")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+}

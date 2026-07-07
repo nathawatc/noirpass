@@ -301,6 +301,18 @@ impl Store {
         Ok(aliases.get(name)?.map(|v| v.value().to_string()))
     }
 
+    /// List every alias as `(name, collection_id)` pairs.
+    pub fn list_aliases(&self) -> Result<Vec<(String, String)>> {
+        let txn = self.db.begin_read()?;
+        let aliases = txn.open_table(ALIASES)?;
+        let mut out = Vec::new();
+        for entry in aliases.iter()? {
+            let (k, v) = entry?;
+            out.push((k.value().to_string(), v.value().to_string()));
+        }
+        Ok(out)
+    }
+
     // --- items -----------------------------------------------------------
 
     /// Create an item in `collection`, writing its ciphertext to a fresh
@@ -566,9 +578,14 @@ mod tests {
 
         store.set_alias("session", Some("abc")).unwrap();
         assert_eq!(store.read_alias("session").unwrap().as_deref(), Some("abc"));
+        assert_eq!(
+            store.list_aliases().unwrap(),
+            vec![("session".to_string(), "abc".to_string())]
+        );
 
         store.set_alias("session", None).unwrap();
         assert_eq!(store.read_alias("session").unwrap(), None);
+        assert!(store.list_aliases().unwrap().is_empty());
     }
 
     #[test]

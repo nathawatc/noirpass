@@ -69,6 +69,16 @@ pub fn session_path(n: u64) -> OwnedObjectPath {
         .expect("session numbers are valid path elements")
 }
 
+/// D-Bus alias path (`.../aliases/<name>`), per the Secret Service spec.
+///
+/// Fails for alias names that are not valid path elements; such aliases are
+/// still stored and resolvable through `ReadAlias`, they just get no object.
+pub fn alias_path(name: &str) -> zbus::Result<OwnedObjectPath> {
+    Ok(OwnedObjectPath::try_from(format!(
+        "{SERVICE_PATH}/aliases/{name}"
+    ))?)
+}
+
 /// Extract the collection id from a collection path, if it is one.
 #[must_use]
 pub fn parse_collection_path(path: &str) -> Option<String> {
@@ -283,7 +293,36 @@ pub async fn register_item(
     Ok(path)
 }
 
-/// Serve objects for every collection and item already in the store.
+/// Serve a [`crate::collection::Collection`] object at the alias path
+/// `/org/freedesktop/secrets/aliases/<name>` that resolves `name` at call
+/// time. Alias names that are not valid path elements are skipped.
+pub async fn register_alias(
+    server: &ObjectServer,
+    state: &Arc<ServiceState>,
+    name: &str,
+) -> zbus::Result<()> {
+    if let Ok(path) = alias_path(name) {
+        server
+            .at(
+                &path,
+                crate::collection::Collection::for_alias(state.clone(), name.to_string()),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Remove the alias object at `/org/freedesktop/secrets/aliases/<name>`,
+/// if it exists.
+pub async fn unregister_alias(server: &ObjectServer, name: &str) {
+    if let Ok(path) = alias_path(name) {
+        let _ = server
+            .remove::<crate::collection::Collection, _>(&path)
+            .await;
+    }
+}
+
+/// Serve objects for every collection, item and alias already in the store.
 ///
 /// Called once at startup, after the service object itself is up but before
 /// the well-known name is requested.
@@ -304,6 +343,13 @@ pub async fn register_existing(
         for item in items {
             register_item(server, state, &collection.id, &item.id).await?;
         }
+    }
+    let aliases = state
+        .store()
+        .list_aliases()
+        .map_err(|e| zbus::Error::FDO(Box::new(e.into())))?;
+    for (name, _) in aliases {
+        register_alias(server, state, &name).await?;
     }
     Ok(())
 }
@@ -410,7 +456,13 @@ impl Service {
             .map_err(fdo_err)?;
 
         let path = register_collection(server, &self.state, &meta.id).await?;
+        if let Some(alias) = alias_opt {
+            register_alias(server, &self.state, alias).await?;
+        }
         Self::collection_created(&emitter, path.clone()).await?;
+        // Invalidate client-side property caches (zbus proxies cache
+        // `Collections` and only refresh on PropertiesChanged).
+        self.collections_changed(&emitter).await?;
         Ok((path, root_path()))
     }
 
@@ -498,14 +550,22 @@ impl Service {
     }
 
     /// Point an alias at a collection, or remove it when `collection` is `/`.
+    ///
+    /// Also serves/removes the matching `.../aliases/<name>` object.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "zbus deserializes method arguments by value"
     )]
-    fn set_alias(&self, name: &str, collection: OwnedObjectPath) -> Result<(), SecretError> {
+    async fn set_alias(
+        &self,
+        name: &str,
+        collection: OwnedObjectPath,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> Result<(), SecretError> {
         self.state.touch();
         if collection.as_str() == "/" {
             self.state.store().set_alias(name, None)?;
+            unregister_alias(server, name).await;
             return Ok(());
         }
         let id = parse_collection_path(collection.as_str()).ok_or_else(|| {
@@ -514,6 +574,9 @@ impl Service {
         // Verify the collection exists before pointing an alias at it.
         self.state.store().get_collection(&id)?;
         self.state.store().set_alias(name, Some(&id))?;
+        register_alias(server, &self.state, name)
+            .await
+            .map_err(SecretError::ZBus)?;
         Ok(())
     }
 

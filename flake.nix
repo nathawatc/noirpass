@@ -20,6 +20,7 @@
             clippy
             rustfmt
             cargo-llvm-cov
+            llvm # llvm-profdata / llvm-cov binaries driven by cargo-llvm-cov
             gnupg
             capnproto # sequoia-ipc build script needs capnp
             nettle # sequoia crypto backend
@@ -32,6 +33,10 @@
           env = {
             RUST_BACKTRACE = "1";
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+            # cargo-llvm-cov looks for rustup's llvm-tools-preview unless the
+            # tools are named explicitly.
+            LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
+            LLVM_PROFDATA = "${pkgs.llvm}/bin/llvm-profdata";
           };
         };
       });
