@@ -3,7 +3,7 @@ name = "noirpass"
 version = "0.1.0"
 edition = "2024"
 description = "Minimal on-demand GPG-backed freedesktop Secret Service"
-license = "MIT"
+license = "Apache-2.0"
 
 [profile.release]
 lto = true
