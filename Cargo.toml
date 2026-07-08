@@ -6,6 +6,18 @@ description = "Minimal on-demand GPG-backed freedesktop Secret Service"
 readme = "README.md"
 repository = "https://codeberg.org/koharu/noirpass"
 license = "Apache-2.0"
+keywords = [
+    "secret-service",
+    "freedesktop",
+    "dbus",
+    "gpg",
+    "keyring",
+]
+categories = [
+    "command-line-utilities",
+    "cryptography",
+    "authentication",
+]
 
 [profile.release]
 opt-level = 3
