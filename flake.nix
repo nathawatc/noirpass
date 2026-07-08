@@ -22,9 +22,8 @@
             cargo-llvm-cov
             llvm # llvm-profdata / llvm-cov binaries driven by cargo-llvm-cov
             gnupg
+            openssl # sequoia crypto backend
             capnproto # sequoia-ipc build script needs capnp
-            nettle # sequoia crypto backend
-            clang # nettle-sys bindgen
             dbus # dbus-run-session, busctl for tests
             libsecret # secret-tool for optional smoke tests
             pkg-config
