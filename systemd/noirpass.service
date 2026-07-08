@@ -7,8 +7,7 @@ PartOf=graphical-session.target
 [Service]
 Type=dbus
 BusName=org.freedesktop.secrets
-# Adjust to the installed binary location (systemd requires an absolute path).
-ExecStart=%h/.local/bin/noirpass
+ExecStart=/usr/bin/noirpass
 Restart=on-failure
 
 # Hardening
@@ -17,7 +16,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 # Keep this at the XDG data parent, not the noirpass leaf: systemd resolves
 # ReadWritePaths before ExecStart, while noirpass creates the leaf itself.
-ReadWritePaths=%h/.local/share/
+ReadWritePaths=%h/.local/share
 PrivateTmp=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
