@@ -10,7 +10,7 @@ for the full rationale behind each design decision.
   `PATH`**. Every build/test/lint command must be run through the flake
   devShell:
 
-  ```
+  ```sh
   nix develop -c cargo <subcommand> ...
   ```
 
@@ -25,9 +25,9 @@ for the full rationale behind each design decision.
   `DBUS_SESSION_BUS_ADDRESS`. Unit tests that need GnuPG use the same
   pattern (`src/gpg.rs::test_support::TestGnupg`).
 
-## Build / test / lint / coverage
+## Build / Test / Lint / Coverage
 
-```
+```sh
 nix develop -c cargo build --release
 nix develop -c cargo fmt --check
 nix develop -c cargo clippy --all-targets -- -D warnings
@@ -41,7 +41,7 @@ before a change is complete. `Cargo.toml` sets `clippy::all` and
 `missing_errors_doc`, `missing_panics_doc` explicitly allowed) — the `-D
 warnings` on the command line is what turns those into hard failures.
 
-## Architecture map
+## Architecture Map
 
 | File | Role |
 | --- | --- |
@@ -59,7 +59,7 @@ warnings` on the command line is what turns those into hard failures.
 
 Object path scheme:
 
-```
+```text
 /org/freedesktop/secrets                                  Service
 /org/freedesktop/secrets/collection/<collection-id>        Collection
 /org/freedesktop/secrets/collection/<collection-id>/<item-id>  Item
@@ -67,7 +67,7 @@ Object path scheme:
 /org/freedesktop/secrets/aliases/<name>                     Collection (alias-resolving)
 ```
 
-## Invariants to preserve
+## Invariants to Preserve
 
 - Secret bytes never touch `redb` and never appear in a log line.
   Plaintext only ever exists in `zeroize::Zeroizing` buffers, and only for
@@ -103,7 +103,7 @@ Object path scheme:
   standard RustCrypto `aes`/`cbc` crates. Follow the spec's mandated
   algorithms exactly rather than substituting something "better."
 
-## Test pitfalls learned
+## Test Pitfalls Learned
 
 - **`pgrep`/`pkill -f` can match themselves.** A pattern like
   `--store-dir <path>` in a `pkill -f` invocation will also match the
