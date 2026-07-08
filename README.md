@@ -1,4 +1,4 @@
-# noirpass
+# Noirpass
 
 A minimal, on-demand implementation of the freedesktop [Secret Service][spec]
 D-Bus API (`org.freedesktop.secrets`), backed by OpenPGP instead of a
@@ -24,9 +24,9 @@ Features:
 - Both Secret Service session transports (`plain` and the encrypted
   Diffie-Hellman mode) are implemented, matching what real clients use.
 
-## How it works
+## How It Works
 
-```
+```text
 ~/.local/share/noirpass/
 ├── index.redb          # collections, item labels & attributes, aliases
 └── secrets/
@@ -57,7 +57,7 @@ Features:
 With the provided Nix flake (recommended — pins a matching toolchain and all
 native dependencies):
 
-```
+```sh
 nix develop -c cargo build --release
 ```
 
@@ -69,23 +69,23 @@ dependency tree needs to build: GnuPG (`gnupg`, for the `gpg` binary used
 once at startup and by `gpg-agent`), Nettle (`nettle`, Sequoia's crypto
 backend), and `capnproto` (Sequoia's IPC layer build script). Then:
 
-```
+```sh
 cargo build --release
 ```
 
-## Install & activation
+## Install & Activation
 
 1. Build the binary (above) and copy it somewhere on your `PATH` that
    systemd user units can reference with an absolute path:
 
-   ```
+   ```sh
    mkdir -p ~/.local/bin
    cp target/release/noirpass ~/.local/bin/noirpass
    ```
 
 2. Install the systemd user unit and the D-Bus activation file:
 
-   ```
+   ```text
    mkdir -p ~/.config/systemd/user ~/.local/share/dbus-1/services
    cp systemd/noirpass.service ~/.config/systemd/user/
    cp systemd/org.freedesktop.secrets.service ~/.local/share/dbus-1/services/
@@ -103,13 +103,13 @@ cargo build --release
    daemon exits again after `--idle-exit` seconds of inactivity with no
    open sessions, and is re-activated on the next request.
 
-### Switching from gnome-keyring on NixOS
+### Switching from Gnome-Keyring on NixOS
 
 Only one process can own the `org.freedesktop.secrets` bus name at a time.
 On most NixOS/GNOME setups that owner is gnome-keyring's Secret Service
 component. Check who currently owns it:
 
-```
+```sh
 busctl --user list | grep secrets
 ```
 
@@ -142,7 +142,7 @@ holding the name.
 Any Secret Service client works unmodified. Using `libsecret`'s
 `secret-tool`:
 
-```
+```sh
 secret-tool store --label='My login' service myservice username myuser
 # prompts for the secret value on stdin, then stores it
 
@@ -156,7 +156,7 @@ first decrypt. Any other Secret Service client library — `oo7` (Rust),
 `libsecret` (C/GLib bindings), or gnome-keyring-compatible tooling — talks
 to noirpass the same way, since it implements the same D-Bus interface.
 
-## Configuration reference
+## Configuration Reference
 
 | Flag | Env var | Default | Description |
 | --- | --- | --- | --- |
@@ -167,7 +167,7 @@ to noirpass the same way, since it implements the same D-Bus interface.
 `--bus-name` also exists but is hidden from `--help`; it lets tests point
 the daemon at a non-default well-known name and is not meant for normal use.
 
-## Security notes
+## Security Notes
 
 - **Item labels and attributes are stored in plaintext** in `index.redb`.
   This is a deliberate trade-off for making `SearchItems` a fast local
@@ -203,7 +203,7 @@ rustc/cargo/clippy/rustfmt plus `cargo-llvm-cov` and every native
 dependency (nettle, capnproto, clang, dbus, libsecret, gnupg,
 pkg-config):
 
-```
+```sh
 nix develop -c cargo fmt --check
 nix develop -c cargo clippy --all-targets -- -D warnings
 nix develop -c cargo test
