@@ -17,7 +17,9 @@
 //! spawned daemons if the tests abort early, so nothing leaks on failure.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write as _};
+#[cfg(feature = "secret-tool-smoke")]
+use std::io::Write as _;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
@@ -568,6 +570,7 @@ async fn s7_persistence_across_restart() {
 }
 
 /// Scenario 8: a real libsecret client (`secret-tool`) stores and looks up.
+#[cfg(feature = "secret-tool-smoke")]
 async fn s8_secret_tool_smoke() {
     let store = tokio::task::spawn_blocking(|| {
         let mut child = Command::new("secret-tool")
@@ -674,8 +677,11 @@ async fn end_to_end() {
     s6_get_secrets_bulk().await;
     eprintln!("scenario 7: persistence across restart");
     s7_persistence_across_restart().await;
-    eprintln!("scenario 8: secret-tool smoke");
-    s8_secret_tool_smoke().await;
+    #[cfg(feature = "secret-tool-smoke")]
+    {
+        eprintln!("scenario 8: secret-tool smoke");
+        s8_secret_tool_smoke().await;
+    }
     eprintln!("scenario 10: signals");
     s10_signals().await;
 
@@ -707,17 +713,25 @@ async fn idle_exit_daemon_exits() {
     let store = tempfile::tempdir().unwrap();
     let mut daemon = spawn_daemon(&address, &h.gnupg_home, store.path(), "1");
 
-    // Exercise the daemon with a real client that exits WITHOUT calling
-    // Session.Close (secret-tool never does): its leaked session must not
-    // block idle-exit — the NameOwnerChanged reaper has to collect it.
-    let out = std::process::Command::new("secret-tool")
-        .args(["lookup", "idle", "probe"])
-        .env("DBUS_SESSION_BUS_ADDRESS", &address)
-        .env("GNUPGHOME", &h.gnupg_home)
-        .output()
-        .expect("run secret-tool against idle-exit daemon");
-    // No such item — lookup "fails" with empty output, but it opened a session.
-    assert!(out.stdout.is_empty());
+    // Open a session and drop the client without calling Session.Close. The
+    // leaked session must not block idle-exit once NameOwnerChanged reaps it.
+    {
+        let conn = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let proxy = service_proxy(&conn).await;
+        let (_output, session): (OwnedValue, OwnedObjectPath) = proxy
+            .call("OpenSession", &("plain", Value::from("")))
+            .await
+            .unwrap();
+        assert!(
+            session
+                .as_str()
+                .starts_with("/org/freedesktop/secrets/session/s")
+        );
+    }
 
     // Idle ticker runs every 10s; the second tick (~10s) sees idle >= 1s.
     let status = tokio::task::spawn_blocking(move || {

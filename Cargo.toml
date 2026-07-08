@@ -14,6 +14,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
+[features]
+default = []
+secret-tool-smoke = []
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

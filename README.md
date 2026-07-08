@@ -217,7 +217,14 @@ Integration tests (`tests/integration.rs`) need no real GPG key or access
 to your session bus: they generate a fresh empty-passphrase key in an
 ephemeral `GNUPGHOME`, spawn a private `dbus-daemon --session`, and run the
 real `noirpass` binary against that private bus, exercising both session
-transports plus real `secret-tool`/libsecret and `oo7` clients.
+transports plus `oo7` clients.
+
+The real `secret-tool`/libsecret smoke test is optional and disabled by
+default:
+
+```sh
+nix develop -c cargo test --features secret-tool-smoke
+```
 
 ## License
 

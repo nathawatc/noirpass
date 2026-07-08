@@ -26,7 +26,7 @@
             nettle # sequoia crypto backend
             clang # nettle-sys bindgen
             dbus # dbus-run-session, busctl for tests
-            libsecret # secret-tool for smoke tests
+            libsecret # secret-tool for optional smoke tests
             pkg-config
           ];
 
