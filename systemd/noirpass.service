@@ -15,7 +15,9 @@ Restart=on-failure
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/share/noirpass
+# Keep this at the XDG data parent, not the noirpass leaf: systemd resolves
+# ReadWritePaths before ExecStart, while noirpass creates the leaf itself.
+ReadWritePaths=%h/.local/share/
 PrivateTmp=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes

@@ -96,6 +96,12 @@ cargo build --release
    (`$HOME/.local/bin/noirpass`); edit `ExecStart=`/`Exec=` in both files
    first if you installed the binary elsewhere — systemd and D-Bus
    activation both require an absolute path.
+   If you replace an existing unit, verify the installed copy too:
+
+   ```sh
+   systemctl --user cat noirpass.service
+   systemctl --user show noirpass.service -p FragmentPath -p DropInPaths -p ExecStart -p ReadWritePaths -p ProtectHome -p ProtectSystem
+   ```
 
 3. Nothing needs to be started by hand. The next time any client (a
    browser, `secret-tool`, etc.) calls a method on `org.freedesktop.secrets`,
@@ -189,7 +195,7 @@ the daemon at a non-default well-known name and is not meant for normal use.
   D-Bus reports the client's unique name has no owner.
 - **The shipped systemd unit is hardened**: `NoNewPrivileges`,
   `ProtectSystem=strict`, `ProtectHome=read-only` with an explicit
-  `ReadWritePaths` exception for the store directory, `PrivateTmp`,
+  `ReadWritePaths` exception for the XDG data directory parent, `PrivateTmp`,
   `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictNamespaces`,
   `LockPersonality`, `ProtectKernelTunables`, `ProtectKernelModules`,
   `ProtectControlGroups`, `RestrictAddressFamilies=AF_UNIX`, an
