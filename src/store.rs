@@ -15,7 +15,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{
+    Database, DatabaseError, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -122,6 +124,37 @@ impl Store {
         }
 
         Ok(Self { db, secrets_dir })
+    }
+
+    /// Check whether an existing store is usable without mutating it.
+    pub fn probe_health(dir: &Path) -> Result<()> {
+        let secrets_dir = dir.join("secrets");
+        let secrets_meta = fs::metadata(&secrets_dir)?;
+        if !secrets_meta.is_dir() {
+            return Err(Error::Config(format!(
+                "store secrets path is not a directory: {}",
+                secrets_dir.display()
+            )));
+        }
+        let _ = fs::read_dir(&secrets_dir)?;
+
+        let index_path = dir.join("index.redb");
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&index_path)?;
+
+        let db = match ReadOnlyDatabase::open(index_path) {
+            Ok(db) => db,
+            Err(DatabaseError::DatabaseAlreadyOpen) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        let txn = db.begin_read()?;
+        txn.open_table(COLLECTIONS)?;
+        txn.open_table(ITEMS)?;
+        txn.open_table(ALIASES)?;
+        drop(txn);
+        Ok(())
     }
 
     /// Path of the `.gpg` secret file backing item `id`.

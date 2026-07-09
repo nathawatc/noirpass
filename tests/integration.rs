@@ -17,9 +17,7 @@
 //! spawned daemons if the tests abort early, so nothing leaks on failure.
 
 use std::collections::HashMap;
-#[cfg(feature = "secret-tool-smoke")]
-use std::io::Write as _;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
@@ -41,6 +39,8 @@ const COLLECTION_IFACE: &str = "org.freedesktop.Secret.Collection";
 struct Harness {
     gnupg_home: PathBuf,
     store_dir: PathBuf,
+    fake_gpg_dir: PathBuf,
+    fake_gpg_log: PathBuf,
     bus_address: String,
     dbus_pid: u32,
     daemon: Mutex<Child>,
@@ -77,6 +77,94 @@ fn setup_gnupg(dir: &Path) {
     assert!(status.success(), "gpg --quick-gen-key failed");
 }
 
+fn secret_fingerprint(dir: &Path) -> String {
+    let output = Command::new("gpg")
+        .args(["--batch", "--no-tty", "--homedir"])
+        .arg(dir)
+        .args(["--list-secret-keys", "--with-colons"])
+        .output()
+        .expect("spawn gpg --list-secret-keys");
+    assert!(output.status.success(), "gpg --list-secret-keys failed");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut seen_sec = false;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        match fields.first().copied() {
+            Some("sec") => seen_sec = true,
+            Some("fpr") if seen_sec => {
+                if let Some(fpr) = fields.get(9)
+                    && !fpr.is_empty()
+                {
+                    return (*fpr).to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("no test secret key fingerprint")
+}
+
+fn export_public_cert(dir: &Path) -> Vec<u8> {
+    let fingerprint = secret_fingerprint(dir);
+    let output = Command::new("gpg")
+        .args(["--batch", "--no-tty", "--homedir"])
+        .arg(dir)
+        .args(["--armor", "--export", &fingerprint])
+        .output()
+        .expect("spawn gpg --export");
+    assert!(output.status.success(), "gpg --export failed");
+    output.stdout
+}
+
+fn init_noirpass_store(store: &Path, recipient: &[u8]) {
+    let recipient_path = store.join("recipient.asc");
+    std::fs::write(&recipient_path, recipient).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store)
+        .arg("init")
+        .arg("--recipient")
+        .arg(&recipient_path)
+        .output()
+        .expect("spawn noirpass init");
+    assert!(
+        output.status.success(),
+        "noirpass init failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn init_noirpass_store_from_stdin(store: &Path, recipient: &[u8]) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store)
+        .arg("init")
+        .arg("--recipient")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn noirpass init stdin");
+    child.stdin.as_mut().unwrap().write_all(recipient).unwrap();
+    let status = child.wait().expect("wait noirpass init stdin");
+    assert!(status.success(), "noirpass init --recipient - failed");
+}
+
+fn fake_gpg_dir() -> (tempfile::TempDir, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("gpg.log");
+    let script = format!(
+        "#!/bin/sh\necho gpg-spawn >> '{}'\nexit 99\n",
+        log.display()
+    );
+    let gpg = dir.path().join("gpg");
+    std::fs::write(&gpg, script).unwrap();
+    std::fs::set_permissions(&gpg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (dir, log)
+}
+
 /// Spawn a private session bus and return `(child, address)`.
 fn spawn_dbus_daemon() -> (Child, String) {
     let mut child = Command::new("dbus-daemon")
@@ -95,16 +183,27 @@ fn spawn_dbus_daemon() -> (Child, String) {
 }
 
 /// Spawn the real daemon binary against `bus`/`gnupg`/`store`.
-fn spawn_daemon(bus: &str, gnupg: &Path, store: &Path, idle_exit: &str) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .arg("--store-dir")
+fn spawn_daemon(
+    bus: &str,
+    gnupg: &Path,
+    store: &Path,
+    idle_exit: &str,
+    fake_gpg_dir: Option<&Path>,
+) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_noirpass"));
+    cmd.arg("--store-dir")
         .arg(store)
         .args(["--idle-exit", idle_exit])
         .env("DBUS_SESSION_BUS_ADDRESS", bus)
         .env("GNUPGHOME", gnupg)
-        .env("RUST_LOG", "info")
-        .spawn()
-        .expect("spawn noirpass daemon")
+        .env("RUST_LOG", "info");
+    if let Some(fake_gpg_dir) = fake_gpg_dir {
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![fake_gpg_dir.to_path_buf()];
+        paths.extend(std::env::split_paths(&old_path));
+        cmd.env("PATH", std::env::join_paths(paths).unwrap());
+    }
+    cmd.spawn().expect("spawn noirpass daemon")
 }
 
 /// Poll (via `dbus-send`) until `org.freedesktop.secrets` has an owner.
@@ -152,6 +251,7 @@ impl Harness {
     fn init() -> Self {
         let gnupg_tmp = tempfile::tempdir().unwrap();
         setup_gnupg(gnupg_tmp.path());
+        let recipient = export_public_cert(gnupg_tmp.path());
 
         let (dbus, bus_address) = spawn_dbus_daemon();
         let dbus_pid = dbus.id();
@@ -168,7 +268,16 @@ impl Harness {
         }
 
         let store_tmp = tempfile::tempdir().unwrap();
-        let daemon = spawn_daemon(&bus_address, gnupg_tmp.path(), store_tmp.path(), "0");
+        init_noirpass_store(store_tmp.path(), &recipient);
+        let (fake_gpg_tmp, fake_gpg_log) = fake_gpg_dir();
+        let fake_gpg_dir = fake_gpg_tmp.path().to_path_buf();
+        let daemon = spawn_daemon(
+            &bus_address,
+            gnupg_tmp.path(),
+            store_tmp.path(),
+            "0",
+            Some(&fake_gpg_dir),
+        );
         wait_for_name(&bus_address);
 
         let gnupg_home = gnupg_tmp.path().to_path_buf();
@@ -205,10 +314,12 @@ impl Harness {
         Self {
             gnupg_home,
             store_dir,
+            fake_gpg_dir,
+            fake_gpg_log,
             bus_address,
             dbus_pid,
             daemon: Mutex::new(daemon),
-            _keep: vec![gnupg_tmp, store_tmp],
+            _keep: vec![gnupg_tmp, store_tmp, fake_gpg_tmp],
         }
     }
 
@@ -222,7 +333,13 @@ impl Harness {
 
     /// Start a fresh daemon on the same bus and store, waiting for the name.
     fn respawn_daemon(&self) {
-        let fresh = spawn_daemon(&self.bus_address, &self.gnupg_home, &self.store_dir, "0");
+        let fresh = spawn_daemon(
+            &self.bus_address,
+            &self.gnupg_home,
+            &self.store_dir,
+            "0",
+            Some(&self.fake_gpg_dir),
+        );
         *self.daemon.lock().unwrap() = fresh;
         wait_for_name(&self.bus_address);
     }
@@ -684,6 +801,8 @@ async fn end_to_end() {
     }
     eprintln!("scenario 10: signals");
     s10_signals().await;
+    eprintln!("scenario 11: no daemon gpg spawn");
+    daemon_runtime_does_not_spawn_gpg();
 
     // Graceful teardown before the process exits: SIGTERM (asserts a clean
     // exit and flushes the daemon's coverage profile), then stop the bus and
@@ -703,6 +822,15 @@ async fn end_to_end() {
     .unwrap();
 }
 
+fn daemon_runtime_does_not_spawn_gpg() {
+    let h = harness();
+    assert!(
+        !h.fake_gpg_log.exists(),
+        "daemon spawned gpg: {}",
+        std::fs::read_to_string(&h.fake_gpg_log).unwrap_or_default()
+    );
+}
+
 /// Scenario 9: a daemon with `--idle-exit 1` and zero traffic exits 0 on its
 /// own. Runs on a private bus + store so it cannot disturb `end_to_end`.
 #[tokio::test]
@@ -711,7 +839,15 @@ async fn idle_exit_daemon_exits() {
 
     let (mut dbus, address) = spawn_dbus_daemon();
     let store = tempfile::tempdir().unwrap();
-    let mut daemon = spawn_daemon(&address, &h.gnupg_home, store.path(), "1");
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "1",
+        Some(&h.fake_gpg_dir),
+    );
 
     // Open a session and drop the client without calling Session.Close. The
     // leaked session must not block idle-exit once NameOwnerChanged reaps it.
@@ -743,7 +879,204 @@ async fn idle_exit_daemon_exits() {
         status.success(),
         "daemon should idle-exit cleanly after client disconnect, got {status}"
     );
+    assert!(
+        !h.fake_gpg_log.exists(),
+        "daemon spawned gpg during idle-exit test: {}",
+        std::fs::read_to_string(&h.fake_gpg_log).unwrap_or_default()
+    );
 
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+}
+
+#[test]
+fn daemon_rejects_store_with_missing_index() {
+    let h = harness();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    std::fs::remove_file(store.path().join("index.redb")).unwrap();
+
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "0",
+        Some(&h.fake_gpg_dir),
+    );
+    let status = wait_with_timeout(&mut daemon, Duration::from_secs(10));
+
+    assert!(!status.success(), "daemon must reject broken store");
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+}
+
+#[test]
+fn cli_init_rejects_store_with_missing_index() {
+    let h = harness();
+    let store = tempfile::tempdir().unwrap();
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    std::fs::write(store.path().join("secrets/existing.gpg"), b"ciphertext").unwrap();
+    std::fs::remove_file(store.path().join("index.redb")).unwrap();
+    let recipient_path = store.path().join("recipient.asc");
+    std::fs::write(&recipient_path, &cert).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store.path())
+        .arg("init")
+        .arg("--recipient")
+        .arg(&recipient_path)
+        .output()
+        .expect("spawn noirpass init broken store");
+
+    assert!(!output.status.success(), "init must reject broken store");
+    assert!(
+        !store.path().join("index.redb").exists(),
+        "init must not recreate missing index over existing secret files"
+    );
+}
+
+#[test]
+fn cli_init_invalid_recipient_does_not_create_store() {
+    let store = tempfile::tempdir().unwrap();
+    let recipient_path = store.path().join("not-openpgp.asc");
+    std::fs::write(&recipient_path, b"not openpgp").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store.path())
+        .arg("init")
+        .arg("--recipient")
+        .arg(&recipient_path)
+        .output()
+        .expect("spawn noirpass init invalid recipient");
+
+    assert!(!output.status.success(), "init must reject invalid cert");
+    assert!(
+        !store.path().join("index.redb").exists(),
+        "invalid init must not create index"
+    );
+    assert!(
+        !store.path().join("secrets").exists(),
+        "invalid init must not create secrets dir"
+    );
+}
+
+#[test]
+fn daemon_rejects_recipient_without_matching_secret_key() {
+    let h = harness();
+    let other_gnupg = tempfile::tempdir().unwrap();
+    setup_gnupg(other_gnupg.path());
+    let other_cert = export_public_cert(other_gnupg.path());
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    init_noirpass_store(store.path(), &other_cert);
+
+    let status_output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store.path())
+        .arg("status")
+        .env("GNUPGHOME", &h.gnupg_home)
+        .output()
+        .expect("spawn noirpass status wrong recipient");
+    assert!(
+        !status_output.status.success(),
+        "status must reject recipient that cannot be decrypted by this GNUPGHOME"
+    );
+    assert!(
+        String::from_utf8_lossy(&status_output.stderr).contains("no available GnuPG secret key")
+    );
+
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "0",
+        Some(&h.fake_gpg_dir),
+    );
+    let status = wait_with_timeout(&mut daemon, Duration::from_secs(10));
+
+    assert!(
+        !status.success(),
+        "daemon must reject recipient that cannot be decrypted by this GNUPGHOME"
+    );
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+    let _ = Command::new("gpgconf")
+        .arg("--homedir")
+        .arg(other_gnupg.path())
+        .args(["--kill", "gpg-agent"])
+        .status();
+}
+
+#[test]
+fn cli_init_stdin_and_status_exit_codes() {
+    let gnupg = tempfile::tempdir().unwrap();
+    setup_gnupg(gnupg.path());
+    let cert = export_public_cert(gnupg.path());
+    let store = tempfile::tempdir().unwrap();
+
+    let uninitialized = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store.path())
+        .arg("status")
+        .output()
+        .expect("spawn noirpass status uninitialized");
+    assert!(!uninitialized.status.success());
+    assert!(
+        String::from_utf8_lossy(&uninitialized.stderr).contains("run noirpass init --recipient")
+    );
+
+    init_noirpass_store_from_stdin(store.path(), &cert);
+
+    let usable = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store.path())
+        .arg("status")
+        .env("GNUPGHOME", gnupg.path())
+        .output()
+        .expect("spawn noirpass status initialized");
+    assert!(
+        usable.status.success(),
+        "status failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&usable.stdout),
+        String::from_utf8_lossy(&usable.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&usable.stdout);
+    assert!(stdout.contains("initialized: yes"));
+    assert!(stdout.contains("fingerprint matches: yes"));
+    assert!(stdout.contains("cert has encryption-capable key: yes"));
+
+    let (fake_gpg_tmp, _fake_gpg_log) = fake_gpg_dir();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let mut daemon = spawn_daemon(
+        &address,
+        gnupg.path(),
+        store.path(),
+        "0",
+        Some(fake_gpg_tmp.path()),
+    );
+    wait_for_name(&address);
+
+    let live = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(store.path())
+        .arg("status")
+        .env("GNUPGHOME", gnupg.path())
+        .output()
+        .expect("spawn noirpass status with running daemon");
+    assert!(
+        live.status.success(),
+        "status with running daemon failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&live.stdout),
+        String::from_utf8_lossy(&live.stderr)
+    );
+
+    sigterm(daemon.id());
+    let _ = wait_with_timeout(&mut daemon, Duration::from_secs(10));
     dbus.kill().expect("kill private dbus-daemon");
     let _ = dbus.wait();
 }

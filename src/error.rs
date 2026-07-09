@@ -54,6 +54,10 @@ pub enum Error {
     /// A session-crypto operation failed (bad key, bad padding, tampering, ...).
     #[error("crypto error: {0}")]
     Crypto(String),
+
+    /// The noirpass store/config is missing or inconsistent.
+    #[error("config error: {0}")]
+    Config(String),
 }
 
 /// A convenience alias for results in this crate.

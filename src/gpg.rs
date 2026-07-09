@@ -2,30 +2,20 @@
 //!
 //! Each secret is encrypted to the user's own `OpenPGP` certificate, so the
 //! ciphertext on disk can only be recovered with the user's secret key. The
-//! public recipient certificate is loaded once at startup by shelling out to
-//! `gpg --export` (documented below); every secret is then encrypted in-process
+//! public recipient certificate is imported by `noirpass init` and loaded from
+//! noirpass' own store at daemon startup. Every secret is encrypted in-process
 //! with Sequoia. Decryption is delegated to the running `gpg-agent` over its
-//! Assuan socket via `sequoia-gpg-agent`, so noirpass never holds the secret
-//! key material itself and honours whatever passphrase/pinentry policy the user
-//! has configured.
-//!
-//! # Why shell out at startup
-//!
-//! Reading `GnuPG`'s keybox/keyring formats directly is fiddly and version
-//! dependent. Running `gpg --export <fpr>` exactly once at construction time to
-//! obtain the binary certificate — which is then parsed with
-//! [`Cert::from_bytes`] — is simple and robust. This happens a single time per
-//! [`Gpg`] instance, never per encrypt/decrypt operation.
+//! Assuan socket via `sequoia-gpg-agent`, so noirpass never holds private key
+//! material itself and honours the user's passphrase/pinentry policy.
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use sequoia_gpg_agent as gpg_agent;
 use sequoia_openpgp as openpgp;
 
-use gpg_agent::KeyPair;
 use gpg_agent::gnupg;
+use gpg_agent::{Agent, KeyPair};
 use openpgp::KeyID;
 use openpgp::cert::Cert;
 use openpgp::crypto::SessionKey;
@@ -35,8 +25,9 @@ use openpgp::parse::stream::{
     DecryptionHelper, DecryptorBuilder, MessageStructure, VerificationHelper,
 };
 use openpgp::policy::StandardPolicy;
+use openpgp::serialize::Serialize;
 use openpgp::serialize::stream::{Encryptor, LiteralWriter, Message};
-use openpgp::types::SymmetricAlgorithm;
+use openpgp::types::{KeyFlags, SymmetricAlgorithm};
 use std::collections::HashMap;
 use zeroize::Zeroizing;
 
@@ -46,6 +37,12 @@ use crate::error::{Error, Result};
 /// direct dependency on `anyhow`.
 fn pgp_err<E: std::fmt::Display>(e: E) -> Error {
     Error::OpenPgp(e.to_string())
+}
+
+fn encryption_key_flags() -> KeyFlags {
+    KeyFlags::empty()
+        .set_storage_encryption()
+        .set_transport_encryption()
 }
 
 /// A recipient certificate plus enough context to decrypt via `gpg-agent`.
@@ -60,38 +57,14 @@ pub struct Gpg {
 }
 
 impl Gpg {
-    /// Construct a [`Gpg`] using the default `GnuPG` home (honouring `GNUPGHOME`).
-    ///
-    /// If `key_fpr` is `None`, the first available secret key is used as the
-    /// recipient.
-    pub fn new(key_fpr: Option<&str>) -> Result<Self> {
-        let ctx = gnupg::Context::new().map_err(pgp_err)?;
-        Self::from_context(&ctx, key_fpr)
+    /// Construct a [`Gpg`] from the configured recipient certificate.
+    pub fn from_cert(cert: Cert) -> Result<Self> {
+        Self::from_cert_with_homedir(cert, None)
     }
 
-    /// Construct a [`Gpg`] rooted at an explicit `GnuPG` home directory.
-    ///
-    /// This keeps operations hermetic (tests, sandboxed daemons) by never
-    /// touching the ambient `~/.gnupg`.
-    pub fn with_homedir(homedir: &Path, key_fpr: Option<&str>) -> Result<Self> {
-        let ctx = gnupg::Context::with_homedir(homedir).map_err(pgp_err)?;
-        Self::from_context(&ctx, key_fpr)
-    }
-
-    /// Shared construction path: resolve the fingerprint, export and parse the
-    /// public certificate.
-    fn from_context(ctx: &gnupg::Context, key_fpr: Option<&str>) -> Result<Self> {
-        let homedir = ctx.homedir().map(Path::to_path_buf);
-
-        let fingerprint = match key_fpr {
-            Some(fpr) => fpr.to_string(),
-            None => default_secret_fingerprint(homedir.as_deref())?,
-        };
-
-        let cert = export_cert(homedir.as_deref(), &fingerprint)?;
-        // Normalise to the certificate's actual primary fingerprint.
+    /// Construct a [`Gpg`] from a cert and explicit `GNUPGHOME` for tests.
+    pub fn from_cert_with_homedir(cert: Cert, homedir: Option<PathBuf>) -> Result<Self> {
         let fingerprint = cert.fingerprint().to_hex();
-
         Ok(Self {
             cert,
             fingerprint,
@@ -103,6 +76,21 @@ impl Gpg {
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// Verify that `gpg-agent` has a secret key for at least one current
+    /// encryption-capable recipient key.
+    pub async fn ensure_recipient_secret_available(&self) -> Result<()> {
+        let cert = self.cert.clone();
+        let homedir = self.homedir.clone();
+        let fingerprint = self.fingerprint.clone();
+        ensure_recipient_secret_available(homedir.as_deref(), &cert)
+            .await
+            .map_err(|err| {
+                Error::Config(format!(
+                    "no available GnuPG secret key for configured recipient {fingerprint}: {err}"
+                ))
+            })
     }
 
     /// Encrypt `plaintext` to the recipient certificate, returning binary
@@ -121,8 +109,7 @@ impl Gpg {
             .supported()
             .alive()
             .revoked(false)
-            .for_storage_encryption()
-            .for_transport_encryption()
+            .key_flags(encryption_key_flags())
             .collect();
 
         if recipients.is_empty() {
@@ -163,6 +150,70 @@ impl Gpg {
     }
 }
 
+/// Parse an armored or binary `OpenPGP` recipient certificate.
+pub fn parse_recipient_cert(bytes: &[u8]) -> Result<Cert> {
+    Cert::from_bytes(bytes).map_err(pgp_err)
+}
+
+/// Serialize a certificate as binary `OpenPGP` packets.
+pub fn cert_to_binary(cert: &Cert) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    cert.serialize(&mut out).map_err(pgp_err)?;
+    Ok(out)
+}
+
+/// True when cert has at least one valid encryption-capable key.
+#[must_use]
+pub fn has_usable_encryption_key(cert: &Cert) -> bool {
+    let policy = StandardPolicy::new();
+    cert.keys()
+        .with_policy(&policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .key_flags(encryption_key_flags())
+        .next()
+        .is_some()
+}
+
+async fn ensure_recipient_secret_available(homedir: Option<&Path>, cert: &Cert) -> Result<()> {
+    let ctx = match homedir {
+        Some(h) => gnupg::Context::with_homedir(h),
+        None => gnupg::Context::new(),
+    }
+    .map_err(pgp_err)?;
+
+    let mut agent = Agent::connect(&ctx).await.map_err(pgp_err)?;
+    let policy = StandardPolicy::new();
+    let mut checked = 0usize;
+    for ka in cert
+        .keys()
+        .with_policy(&policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .key_flags(encryption_key_flags())
+    {
+        checked += 1;
+        if agent
+            .has_key(ka.key().role_as_unspecified())
+            .await
+            .map_err(pgp_err)?
+        {
+            return Ok(());
+        }
+    }
+
+    if checked == 0 {
+        return Err(Error::OpenPgp(
+            "certificate has no usable encryption-capable key".into(),
+        ));
+    }
+    Err(Error::OpenPgp(
+        "gpg-agent has none of the configured recipient secret keys".into(),
+    ))
+}
+
 /// Run the synchronous Sequoia decryption pipeline against `gpg-agent`.
 fn decrypt_blocking(
     homedir: Option<&Path>,
@@ -200,8 +251,7 @@ impl AgentHelper {
         for ka in cert
             .keys()
             .with_policy(policy, None)
-            .for_storage_encryption()
-            .for_transport_encryption()
+            .key_flags(encryption_key_flags())
         {
             let pair = KeyPair::new_for_gnupg_context(ctx, ka.key()).map_err(pgp_err)?;
             keys.insert(ka.key().keyid(), pair);
@@ -248,89 +298,31 @@ impl VerificationHelper for AgentHelper {
     }
 }
 
-/// Build a `gpg` command scoped to `homedir` (if any) and non-interactive.
-fn gpg_command(homedir: Option<&Path>) -> Command {
-    let mut cmd = Command::new("gpg");
-    cmd.arg("--batch").arg("--no-tty");
-    if let Some(h) = homedir {
-        cmd.arg("--homedir").arg(h);
-    }
-    cmd
-}
-
-/// Export the binary public certificate for `fingerprint` via `gpg --export`.
-fn export_cert(homedir: Option<&Path>, fingerprint: &str) -> Result<Cert> {
-    let output = gpg_command(homedir)
-        .arg("--export")
-        .arg(fingerprint)
-        .output()?;
-    if !output.status.success() {
-        return Err(Error::OpenPgp(format!(
-            "`gpg --export {fingerprint}` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    if output.stdout.is_empty() {
-        return Err(Error::NotFound(format!("gpg certificate {fingerprint}")));
-    }
-    Cert::from_bytes(&output.stdout).map_err(pgp_err)
-}
-
-/// Resolve the fingerprint of the first available secret key.
-///
-/// Parses `gpg --list-secret-keys --with-colons`, taking the `fpr` line that
-/// follows the first `sec` record (field index 9 in the colon format).
-fn default_secret_fingerprint(homedir: Option<&Path>) -> Result<String> {
-    let output = gpg_command(homedir)
-        .arg("--list-secret-keys")
-        .arg("--with-colons")
-        .output()?;
-    if !output.status.success() {
-        return Err(Error::OpenPgp(format!(
-            "`gpg --list-secret-keys` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut seen_sec = false;
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        match fields.first().copied() {
-            Some("sec") => seen_sec = true,
-            Some("fpr") if seen_sec => {
-                if let Some(fpr) = fields.get(9)
-                    && !fpr.is_empty()
-                {
-                    return Ok((*fpr).to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    Err(Error::NotFound("no gpg secret key available".into()))
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Shared test fixture: an ephemeral, hermetic `GnuPG` home.
 
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::Command;
+
+    use sequoia_openpgp::Cert;
+    use sequoia_openpgp::serialize::Serialize;
 
     /// An ephemeral `GnuPG` home with a freshly generated, empty-passphrase key.
     ///
     /// Never touches the user's real `~/.gnupg`: every `gpg`/`gpgconf` call and
     /// every Sequoia context is scoped to this temporary directory. The agent
     /// is killed on drop.
-    pub(crate) struct TestGnupg {
+    pub struct TestGnupg {
         dir: tempfile::TempDir,
+        fingerprint: String,
     }
 
     impl TestGnupg {
-        pub(crate) fn new() -> Self {
+        pub fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -342,29 +334,81 @@ pub(crate) mod test_support {
             )
             .unwrap();
 
+            Self::from_dir_with(dir, |path| {
+                let status = Command::new("gpg")
+                    .args(["--batch", "--no-tty", "--homedir"])
+                    .arg(path)
+                    .args([
+                        "--pinentry-mode",
+                        "loopback",
+                        "--passphrase",
+                        "",
+                        "--quick-gen-key",
+                        "noirpass test <t@t>",
+                        "default",
+                        "default",
+                        "never",
+                    ])
+                    .status()
+                    .expect("spawn gpg");
+                assert!(status.success(), "gpg --quick-gen-key failed");
+            })
+        }
+
+        pub fn import(cert: &Cert) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+            fs::write(
+                dir.path().join("gpg-agent.conf"),
+                "allow-loopback-pinentry\n",
+            )
+            .unwrap();
+
+            Self::from_dir_with(dir, |path| {
+                let mut tsk = Vec::new();
+                cert.as_tsk().serialize(&mut tsk).unwrap();
+                let mut child = Command::new("gpg")
+                    .args(["--batch", "--no-tty", "--homedir"])
+                    .arg(path)
+                    .arg("--import")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("spawn gpg --import");
+                child.stdin.as_mut().unwrap().write_all(&tsk).unwrap();
+                let status = child.wait().expect("wait gpg --import");
+                assert!(status.success(), "gpg --import failed");
+            })
+        }
+
+        fn from_dir_with(dir: tempfile::TempDir, init: impl FnOnce(&Path)) -> Self {
+            init(dir.path());
             let status = Command::new("gpg")
                 .args(["--batch", "--no-tty", "--homedir"])
                 .arg(dir.path())
-                .args([
-                    "--pinentry-mode",
-                    "loopback",
-                    "--passphrase",
-                    "",
-                    "--quick-gen-key",
-                    "noirpass test <t@t>",
-                    "default",
-                    "default",
-                    "never",
-                ])
+                .arg("--list-secret-keys")
                 .status()
-                .expect("spawn gpg");
-            assert!(status.success(), "gpg --quick-gen-key failed");
+                .expect("spawn gpg --list-secret-keys");
+            assert!(status.success(), "gpg --list-secret-keys failed");
 
-            Self { dir }
+            let fingerprint = secret_fingerprint(dir.path());
+            Self { dir, fingerprint }
         }
 
-        pub(crate) fn path(&self) -> &Path {
+        pub fn path(&self) -> &Path {
             self.dir.path()
+        }
+
+        pub fn fingerprint(&self) -> &str {
+            &self.fingerprint
+        }
+
+        pub fn export_public_binary(&self) -> Vec<u8> {
+            export_public(self.dir.path(), &self.fingerprint, false)
+        }
+
+        pub fn export_public_armored(&self) -> Vec<u8> {
+            export_public(self.dir.path(), &self.fingerprint, true)
         }
     }
 
@@ -377,18 +421,64 @@ pub(crate) mod test_support {
                 .status();
         }
     }
+
+    fn export_public(homedir: &Path, fingerprint: &str, armor: bool) -> Vec<u8> {
+        let mut cmd = Command::new("gpg");
+        cmd.args(["--batch", "--no-tty", "--homedir"]).arg(homedir);
+        if armor {
+            cmd.arg("--armor");
+        }
+        let output = cmd
+            .arg("--export")
+            .arg(fingerprint)
+            .output()
+            .expect("gpg export");
+        assert!(output.status.success(), "gpg --export failed");
+        output.stdout
+    }
+
+    fn secret_fingerprint(homedir: &Path) -> String {
+        let output = Command::new("gpg")
+            .args(["--batch", "--no-tty", "--homedir"])
+            .arg(homedir)
+            .args(["--list-secret-keys", "--with-colons"])
+            .output()
+            .expect("gpg list secret keys");
+        assert!(output.status.success(), "gpg --list-secret-keys failed");
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut seen_sec = false;
+        for line in text.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            match fields.first().copied() {
+                Some("sec") => seen_sec = true,
+                Some("fpr") if seen_sec => {
+                    if let Some(fpr) = fields.get(9)
+                        && !fpr.is_empty()
+                    {
+                        return (*fpr).to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("test gpg key has no fingerprint")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::test_support::TestGnupg;
     use super::*;
+    use sequoia_openpgp::cert::CertBuilder;
 
     #[tokio::test]
     async fn encrypt_decrypt_roundtrip_via_agent() {
         let gnupg = TestGnupg::new();
-        let gpg = Gpg::with_homedir(gnupg.path(), None).unwrap();
-        assert!(!gpg.fingerprint().is_empty());
+        let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
+        let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+        assert_eq!(gpg.fingerprint(), gnupg.fingerprint());
+        gpg.ensure_recipient_secret_available().await.unwrap();
 
         let plaintext = b"a very secret value";
         let ciphertext = gpg.encrypt(plaintext).unwrap();
@@ -403,15 +493,85 @@ mod tests {
     #[tokio::test]
     async fn decrypt_rejects_garbage() {
         let gnupg = TestGnupg::new();
-        let gpg = Gpg::with_homedir(gnupg.path(), None).unwrap();
+        let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
+        let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
         assert!(gpg.decrypt(b"not a pgp message at all").await.is_err());
     }
 
     #[test]
-    fn missing_key_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        // An empty GnuPG home has no secret keys.
-        let result = Gpg::with_homedir(dir.path(), None);
-        assert!(matches!(result, Err(Error::NotFound(_))));
+    fn encrypt_uses_configured_recipient_cert() {
+        let one = TestGnupg::new();
+        let two = TestGnupg::new();
+        let cert = parse_recipient_cert(&two.export_public_binary()).unwrap();
+        let gpg = Gpg::from_cert(cert).unwrap();
+
+        assert_eq!(gpg.fingerprint(), two.fingerprint());
+        assert_ne!(gpg.fingerprint(), one.fingerprint());
+    }
+
+    #[tokio::test]
+    async fn recipient_secret_check_rejects_wrong_gnupg_home() {
+        let one = TestGnupg::new();
+        let two = TestGnupg::new();
+        let cert = parse_recipient_cert(&two.export_public_binary()).unwrap();
+        let gpg = Gpg::from_cert_with_homedir(cert, Some(one.path().to_path_buf())).unwrap();
+
+        let err = gpg.ensure_recipient_secret_available().await.unwrap_err();
+
+        assert!(err.to_string().contains("no available GnuPG secret key"));
+    }
+
+    fn storage_only_cert() -> Cert {
+        CertBuilder::new()
+            .add_userid("storage-only <storage@test>")
+            .add_storage_encryption_subkey()
+            .generate()
+            .unwrap()
+            .0
+    }
+
+    fn transport_only_cert() -> Cert {
+        CertBuilder::new()
+            .add_userid("transport-only <transport@test>")
+            .add_transport_encryption_subkey()
+            .generate()
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn has_usable_encryption_key_accepts_storage_only_subkey() {
+        assert!(has_usable_encryption_key(&storage_only_cert()));
+    }
+
+    #[test]
+    fn has_usable_encryption_key_accepts_transport_only_subkey() {
+        assert!(has_usable_encryption_key(&transport_only_cert()));
+    }
+
+    #[tokio::test]
+    async fn encrypt_decrypt_roundtrip_via_agent_with_storage_only_subkey() {
+        let cert = storage_only_cert();
+        let gnupg = TestGnupg::import(&cert);
+        let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+
+        let plaintext = b"storage-only secret";
+        let ciphertext = gpg.encrypt(plaintext).unwrap();
+        let recovered = gpg.decrypt(&ciphertext).await.unwrap();
+
+        assert_eq!(&recovered[..], &plaintext[..]);
+    }
+
+    #[tokio::test]
+    async fn encrypt_decrypt_roundtrip_via_agent_with_transport_only_subkey() {
+        let cert = transport_only_cert();
+        let gnupg = TestGnupg::import(&cert);
+        let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+
+        let plaintext = b"transport-only secret";
+        let ciphertext = gpg.encrypt(plaintext).unwrap();
+        let recovered = gpg.decrypt(&ciphertext).await.unwrap();
+
+        assert_eq!(&recovered[..], &plaintext[..]);
     }
 }

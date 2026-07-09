@@ -24,6 +24,8 @@
             gnupg
             openssl # sequoia crypto backend
             capnproto # sequoia-ipc build script needs capnp
+            openssl # sequoia crypto backend
+            clang # openssl-sys bindgen
             dbus # dbus-run-session, busctl for tests
             libsecret # secret-tool for optional smoke tests
             pkg-config

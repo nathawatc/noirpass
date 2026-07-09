@@ -8,10 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 use zbus::export::futures_core::Stream;
 
+use noirpass::config::{init_from_path, load_recipient, status};
 use noirpass::gpg::Gpg;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
 use noirpass::session::Session;
@@ -27,12 +28,6 @@ struct Cli {
     #[arg(long, env = "NOIRPASS_STORE")]
     store_dir: Option<PathBuf>,
 
-    /// Fingerprint of the `OpenPGP` key to encrypt secrets to.
-    ///
-    /// Defaults to the first available secret key.
-    #[arg(long)]
-    key: Option<String>,
-
     /// Exit after this many seconds without D-Bus activity (0 = never).
     ///
     /// The daemon only exits when there are also no open sessions.
@@ -42,6 +37,22 @@ struct Cli {
     /// Well-known bus name to claim (testing hook).
     #[arg(long, hide = true, default_value = "org.freedesktop.secrets")]
     bus_name: String,
+
+    /// One-shot setup/status commands.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Initialize noirpass with an exported public `OpenPGP` recipient cert.
+    Init {
+        /// Recipient cert path, or '-' to read from stdin.
+        #[arg(long)]
+        recipient: String,
+    },
+    /// Report whether the noirpass store is initialized and usable.
+    Status,
 }
 
 /// `$XDG_DATA_HOME/noirpass`, falling back to `~/.local/share/noirpass`.
@@ -63,11 +74,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     let store_dir = cli.store_dir.unwrap_or_else(default_store_dir);
+
+    match cli.command {
+        Some(Command::Init { recipient }) => {
+            if store_dir.join("index.redb").exists() || store_dir.join("secrets").exists() {
+                Store::probe_health(&store_dir)?;
+            }
+            let config = init_from_path(&store_dir, &recipient)?;
+            let store = Store::open(&store_dir)?;
+            store.ensure_default()?;
+            println!("initialized: yes");
+            println!("data directory: {}", store_dir.display());
+            println!("recipient fingerprint: {}", config.recipient_fingerprint);
+            return Ok(());
+        }
+        Some(Command::Status) => {
+            let mut status = status(&store_dir);
+            if status.usable() {
+                match load_recipient(&store_dir)
+                    .and_then(|recipient| Gpg::from_cert(recipient.cert))
+                {
+                    Ok(gpg) => {
+                        if let Err(err) = gpg.ensure_recipient_secret_available().await {
+                            status.errors.push(err.to_string());
+                        }
+                    }
+                    Err(err) => status.errors.push(err.to_string()),
+                }
+            }
+            print_status(&status);
+            if status.usable() {
+                return Ok(());
+            }
+            std::process::exit(1);
+        }
+        None => {}
+    }
+
     info!(store = %store_dir.display(), "opening store");
 
+    let recipient = load_recipient(&store_dir)?;
+    Store::probe_health(&store_dir)?;
     let store = Store::open(&store_dir)?;
     store.ensure_default()?;
-    let gpg = Gpg::new(cli.key.as_deref())?;
+    let gpg = Gpg::from_cert(recipient.cert)?;
+    gpg.ensure_recipient_secret_available().await?;
     info!(key = %gpg.fingerprint(), "using OpenPGP key");
     let state = ServiceState::new(store, gpg);
 
@@ -91,6 +142,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(connection);
     info!("exiting");
     Ok(())
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn opt_yes_no(value: Option<bool>) -> &'static str {
+    value.map_or("unknown", yes_no)
+}
+
+fn print_status(status: &noirpass::config::Status) {
+    println!("data directory: {}", status.data_dir.display());
+    println!("initialized: {}", yes_no(status.usable()));
+    println!("config.toml present: {}", yes_no(status.config_present));
+    println!(
+        "recipient cert present: {}",
+        yes_no(status.recipient_cert_present)
+    );
+    println!(
+        "configured recipient fingerprint: {}",
+        status
+            .configured_fingerprint
+            .as_deref()
+            .unwrap_or("unknown")
+    );
+    println!(
+        "actual cert fingerprint: {}",
+        status.actual_fingerprint.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "fingerprint matches: {}",
+        opt_yes_no(status.fingerprint_matches)
+    );
+    println!(
+        "cert has encryption-capable key: {}",
+        opt_yes_no(status.cert_has_encryption_key)
+    );
+    for err in &status.errors {
+        eprintln!("error: {err}");
+    }
 }
 
 /// Reap sessions whose owning client left the bus without calling

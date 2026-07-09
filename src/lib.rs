@@ -5,6 +5,7 @@
 //! integration tests.
 
 pub mod collection;
+pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod gpg;

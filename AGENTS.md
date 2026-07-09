@@ -65,12 +65,13 @@ Plus rustc ≥ 1.85 (edition 2024). Then `cargo build --release`.
 | `src/service.rs` | `ServiceState` (shared Store/Gpg/session table/activity clock), `org.freedesktop.Secret.Service` D-Bus object, object-path/registration helpers. |
 | `src/collection.rs` | `org.freedesktop.Secret.Collection` D-Bus object. One type serves both `/collection/<id>` and `/aliases/<name>` paths via `Target::Collection` / `Target::Alias` enum. |
 | `src/item.rs` | `org.freedesktop.Secret.Item` D-Bus object. |
-| `src/session.rs` | `org.freedesktop.Secret.Session` (`Close` only) + `Secret` wire struct `(oayays)`. |
-| `src/crypto.rs` | Session transport crypto: `DhHandshake` (1024-bit MODP DH → HKDF-SHA256 → AES-128 key), `SessionCipher` (Plain/Dh, AES-128-CBC-PKCS7). Pure sync, no I/O. |
-| `src/gpg.rs` | `Gpg`: exports recipient cert via `gpg --export`, encrypts in-process with Sequoia, decrypts via `sequoia-gpg-agent`. Hosts `test_support::TestGnupg`. |
-| `src/store.rs` | `Store`: redb tables (`collections`, `items`, `aliases`) + `secrets/<id>.gpg` files. Short-lived transactions; never sees plaintext. |
-| `src/error.rs` | `Error` enum (`thiserror`) + mapping to `zbus::fdo::Error`. |
-| `tests/integration.rs` | End-to-end scenarios (real binary, private dbus-daemon, oo7 client, secret-tool, restart persistence, signals, idle-exit) via shared `Harness`. |
+| `src/session.rs` | `org.freedesktop.Secret.Session` D-Bus object (`Close` only) and the `Secret` wire struct (`(oayays)`). |
+| `src/crypto.rs` | Session transport crypto: `DhHandshake` (1024-bit MODP Diffie-Hellman → HKDF-SHA256 → AES-128 key) and `SessionCipher` (`Plain` / `Dh`, AES-128-CBC-PKCS7). Pure, synchronous, no I/O. |
+| `src/config.rs` | `config.toml` and `keys/recipient.pgp` import/load/status. `noirpass init --recipient <FILE|->` stores an exported public recipient certificate and fingerprint; daemon startup loads this config and fails clearly if missing/broken. |
+| `src/gpg.rs` | `Gpg`: owns the configured recipient certificate, encrypts in-process with Sequoia, decrypts by delegating PKESK unlock to the running `gpg-agent` (`sequoia-gpg-agent`). Runtime/startup code must not spawn `gpg`; `test_support::TestGnupg` may spawn it only for hermetic test fixtures. |
+| `src/store.rs` | `Store`: redb tables (`collections`, `items`, `aliases`) for metadata, plus `secrets/<id>.gpg` ciphertext files. Every method opens its own short-lived transaction; the store never sees plaintext. |
+| `src/error.rs` | Crate-wide `Error` enum (`thiserror`) and its mapping to `zbus::fdo::Error`. |
+| `tests/integration.rs` | End-to-end scenarios (real `noirpass` binary, private `dbus-daemon`, `oo7` client for both session transports, real `secret-tool`, restart persistence, signals, idle-exit) run through one shared process-wide `Harness`. |
 
 ## Invariants
 
@@ -121,3 +122,64 @@ Plus rustc ≥ 1.85 (edition 2024). Then `cargo build --release`.
 /org/freedesktop/secrets/session/s<n>                       Session
 /org/freedesktop/secrets/aliases/<name>                     Collection (alias-resolving)
 ```
+
+## Invariants to Preserve
+
+- Secret bytes never touch `redb` and never appear in a log line.
+  Plaintext only ever exists in `zeroize::Zeroizing` buffers, and only for
+  as long as it takes to re-encrypt (to the session cipher, or to the GPG
+  recipient) or hand off to the caller.
+- Every D-Bus method handler calls `state.touch()` as its first action, so
+  the idle-exit timer only fires on a genuinely quiet bus. Adding a new
+  method without this call will make it invisible to idle tracking.
+- Prompts are always the root path `/` (`root_path()` in `service.rs`,
+  `no_prompt()` in `collection.rs`/`item.rs`) — noirpass never returns a
+  real Prompt object. Keep new methods that have a `prompt` out-arg
+  consistent with this.
+- `ReadAlias` on an unknown alias returns `/`, not an error.
+- `PropertiesChanged` must be emitted whenever `Collections` (Service) or
+  `Items` (Collection) changes — libsecret/oo7 clients cache these
+  properties and only refresh on the signal. See the
+  `collections_changed`/`items_changed` calls after every mutation in
+  `service.rs`/`collection.rs`/`item.rs`; a new mutating method needs the
+  same treatment.
+- Alias objects are served at `/org/freedesktop/secrets/aliases/<name>`
+  and must stay in sync with the `aliases` redb table (register on
+  `SetAlias`, unregister when cleared or when the target collection is
+  deleted).
+- Sessions of clients that vanish without calling `Session.Close` are
+  reaped via `NameOwnerChanged` (`main.rs::reap_vanished_clients`) —
+  required because most real clients never call `Close`, and a leaked
+  session would otherwise pin `session_count` above zero forever and block
+  idle-exit.
+- Dependency policy: use the latest stable version of a crate (check with
+  `cargo search`/`cargo add` rather than hand-picking an old version), and
+  do not introduce experimental or nonstandard crypto backends — Sequoia
+  is pinned to its `crypto-openssl` backend and session crypto uses the
+  standard RustCrypto `aes`/`cbc` crates. Follow the spec's mandated
+  algorithms exactly rather than substituting something "better."
+
+## Test Pitfalls Learned
+
+- **`pgrep`/`pkill -f` can match themselves.** A pattern like
+  `--store-dir <path>` in a `pkill -f` invocation will also match the
+  shell command line running that very `pkill`/reaper script. Use a
+  character-class trick to break the match, e.g. `'[-]-store-dir <path>'`
+  (see the reaper script in `tests/integration.rs::Harness::init`).
+- **Cargo/process exit codes get masked by pipes.** Don't pipe
+  `cargo test`/the daemon's output through `grep`/`head` etc. and assume
+  `$?` reflects cargo's exit code — check `ExitStatus` directly (see
+  `wait_with_timeout` in `tests/integration.rs`), and prefer `assert!` on
+  the status rather than trusting a piped shell's `$?`.
+- **Use `CARGO_BIN_EXE_noirpass` (via `env!("CARGO_BIN_EXE_noirpass")`), not
+  a manually built path**, to spawn the daemon binary from integration
+  tests — this is the binary `cargo llvm-cov` has instrumented, and its
+  coverage is only collected if it's stopped gracefully (`SIGTERM`, not
+  `SIGKILL`) so its profile data flushes before the test process exits.
+- **Environment variables are process-global in Rust test binaries.**
+  `tests/integration.rs` sets `DBUS_SESSION_BUS_ADDRESS`/`GNUPGHOME` once,
+  inside a `OnceLock` initializer, before any test creates a connection —
+  and then runs every scenario that depends on them sequentially inside
+  one orchestrator test (`end_to_end`) rather than as separate `#[test]`
+  functions, since Rust's test harness runs tests concurrently by default
+  and per-test env vars are not isolated between threads.

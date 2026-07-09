@@ -693,7 +693,8 @@ mod tests {
     fn test_state(gnupg: &TestGnupg, dir: &std::path::Path) -> Arc<ServiceState> {
         let store = Store::open(dir).unwrap();
         store.ensure_default().unwrap();
-        let gpg = Gpg::with_homedir(gnupg.path(), None).unwrap();
+        let cert = crate::gpg::parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
+        let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
         ServiceState::new(store, gpg)
     }
 
