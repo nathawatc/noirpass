@@ -33,6 +33,8 @@ const SERVICE_NAME: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
 const SERVICE_IFACE: &str = "org.freedesktop.Secret.Service";
 const COLLECTION_IFACE: &str = "org.freedesktop.Secret.Collection";
+const NO_SESSION_ERROR: &str = "org.freedesktop.Secret.Error.NoSession";
+const UNKNOWN_OBJECT_ERROR: &str = "org.freedesktop.DBus.Error.UnknownObject";
 
 // --- fixture ----------------------------------------------------------------
 
@@ -370,6 +372,13 @@ fn attrs(case: &str) -> Vec<(String, String)> {
     ]
 }
 
+fn assert_method_error(err: &zbus::Error, expected: &str) {
+    match err {
+        zbus::Error::MethodError(name, _, _) => assert_eq!(name.as_str(), expected),
+        other => panic!("expected {expected}, got {other}"),
+    }
+}
+
 // --- scenarios ----------------------------------------------------------------
 
 /// Scenario 1: encrypted (DH) session roundtrip through oo7.
@@ -627,10 +636,17 @@ async fn s6_get_secrets_bulk() {
         .call::<_, _, HashMap<OwnedObjectPath, WireSecret>>("GetSecrets", &(&paths, &ghost))
         .await
         .unwrap_err();
-    assert!(
-        err.to_string().contains("NoSession"),
-        "unexpected error: {err}"
-    );
+    assert_method_error(&err, NO_SESSION_ERROR);
+
+    let ghost_proxy =
+        zbus::Proxy::new(&conn, SERVICE_NAME, ghost, "org.freedesktop.Secret.Session")
+            .await
+            .unwrap();
+    let err = ghost_proxy
+        .call::<_, _, ()>("Close", &())
+        .await
+        .unwrap_err();
+    assert_method_error(&err, UNKNOWN_OBJECT_ERROR);
 
     for path in paths {
         let item_conn = zbus::Connection::session().await.unwrap();
@@ -644,6 +660,155 @@ async fn s6_get_secrets_bulk() {
         .unwrap();
         let _: OwnedObjectPath = item_proxy.call("Delete", &()).await.unwrap();
     }
+}
+
+async fn assert_foreign_item_operations_rejected(
+    attacker: &zbus::Connection,
+    collection_path: &OwnedObjectPath,
+    item_path: &OwnedObjectPath,
+    session: &OwnedObjectPath,
+) {
+    let attacker_item = zbus::Proxy::new(
+        attacker,
+        SERVICE_NAME,
+        item_path.clone(),
+        "org.freedesktop.Secret.Item",
+    )
+    .await
+    .unwrap();
+    let err = attacker_item
+        .call::<_, _, (WireSecret,)>("GetSecret", &(&session,))
+        .await
+        .unwrap_err();
+    assert_method_error(&err, NO_SESSION_ERROR);
+
+    let foreign_secret = WireSecret {
+        session: session.clone(),
+        parameters: Vec::new(),
+        value: b"foreign session value".to_vec(),
+        content_type: "text/plain".to_string(),
+    };
+    let err = attacker_item
+        .call::<_, _, ()>("SetSecret", &(&foreign_secret,))
+        .await
+        .unwrap_err();
+    assert_method_error(&err, NO_SESSION_ERROR);
+
+    let attacker_collection = zbus::Proxy::new(
+        attacker,
+        SERVICE_NAME,
+        collection_path.clone(),
+        COLLECTION_IFACE,
+    )
+    .await
+    .unwrap();
+    let properties: HashMap<String, OwnedValue> = HashMap::new();
+    let err = attacker_collection
+        .call::<_, _, (OwnedObjectPath, OwnedObjectPath)>(
+            "CreateItem",
+            &(&properties, &foreign_secret, false),
+        )
+        .await
+        .unwrap_err();
+    assert_method_error(&err, NO_SESSION_ERROR);
+}
+
+/// Scenario 6b: session handles belong only to opening D-Bus sender.
+async fn s6b_cross_client_session_rejected() {
+    let service = oo7::dbus::Service::encrypted().await.unwrap();
+    let collection = service.default_collection().await.unwrap();
+    let collection_path = OwnedObjectPath::from(collection.path().to_owned());
+    let item = collection
+        .create_item(
+            "s6b-label",
+            &attrs("s6b"),
+            oo7::Secret::text("isolated session value"),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+    let item_path = OwnedObjectPath::from(item.path().to_owned());
+
+    let owner = zbus::Connection::session().await.unwrap();
+    let attacker = zbus::Connection::session().await.unwrap();
+    assert_ne!(owner.unique_name(), attacker.unique_name());
+    let owner_service = service_proxy(&owner).await;
+    let attacker_service = service_proxy(&attacker).await;
+    let (_, session): (OwnedValue, OwnedObjectPath) = owner_service
+        .call("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap();
+
+    let owner_item = zbus::Proxy::new(
+        &owner,
+        SERVICE_NAME,
+        item_path.clone(),
+        "org.freedesktop.Secret.Item",
+    )
+    .await
+    .unwrap();
+    let _: (WireSecret,) = owner_item
+        .call("GetSecret", &(&session,))
+        .await
+        .expect("session owner must retrieve item");
+
+    assert_foreign_item_operations_rejected(&attacker, &collection_path, &item_path, &session)
+        .await;
+
+    let requested_items = vec![item_path.clone()];
+    let err = attacker_service
+        .call::<_, _, HashMap<OwnedObjectPath, WireSecret>>(
+            "GetSecrets",
+            &(&requested_items, &session),
+        )
+        .await
+        .unwrap_err();
+    assert_method_error(&err, NO_SESSION_ERROR);
+
+    let attacker_session = zbus::Proxy::new(
+        &attacker,
+        SERVICE_NAME,
+        session.clone(),
+        "org.freedesktop.Secret.Session",
+    )
+    .await
+    .unwrap();
+    let err = attacker_session
+        .call::<_, _, ()>("Close", &())
+        .await
+        .unwrap_err();
+    assert_method_error(&err, NO_SESSION_ERROR);
+
+    let secrets: HashMap<OwnedObjectPath, WireSecret> = owner_service
+        .call("GetSecrets", &(&requested_items, &session))
+        .await
+        .unwrap();
+    assert_eq!(secrets.len(), 1, "owner's session must remain usable");
+
+    let owner_session = zbus::Proxy::new(
+        &owner,
+        SERVICE_NAME,
+        session.clone(),
+        "org.freedesktop.Secret.Session",
+    )
+    .await
+    .unwrap();
+    owner_session.call::<_, _, ()>("Close", &()).await.unwrap();
+    let err = owner_session
+        .call::<_, _, ()>("Close", &())
+        .await
+        .unwrap_err();
+    assert_method_error(&err, UNKNOWN_OBJECT_ERROR);
+    let closed = owner_service
+        .call::<_, _, HashMap<OwnedObjectPath, WireSecret>>(
+            "GetSecrets",
+            &(&requested_items, &session),
+        )
+        .await
+        .unwrap_err();
+    assert_method_error(&closed, NO_SESSION_ERROR);
+    item.delete(None).await.unwrap();
 }
 
 /// Scenario 7: persistence — SIGTERM the daemon, respawn on the same store,
@@ -792,6 +957,8 @@ async fn end_to_end() {
     s5_collection_lifecycle().await;
     eprintln!("scenario 6: bulk GetSecrets");
     s6_get_secrets_bulk().await;
+    eprintln!("scenario 6b: cross-client session rejection");
+    s6b_cross_client_session_rejected().await;
     eprintln!("scenario 7: persistence across restart");
     s7_persistence_across_restart().await;
     #[cfg(feature = "secret-tool-smoke")]
@@ -887,6 +1054,161 @@ async fn idle_exit_daemon_exits() {
 
     dbus.kill().expect("kill private dbus-daemon");
     let _ = dbus.wait();
+}
+
+#[tokio::test]
+async fn disconnect_unregisters_owned_session() {
+    let h = harness();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "0",
+        Some(&h.fake_gpg_dir),
+    );
+    wait_for_name(&address);
+
+    let session = {
+        let owner = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let proxy = service_proxy(&owner).await;
+        let (_, session): (OwnedValue, OwnedObjectPath) = proxy
+            .call("OpenSession", &("plain", Value::from("")))
+            .await
+            .unwrap();
+        session
+    };
+
+    let observer = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let session_proxy = zbus::Proxy::new(
+        &observer,
+        SERVICE_NAME,
+        session,
+        "org.freedesktop.Secret.Session",
+    )
+    .await
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let err = session_proxy
+            .call::<_, _, ()>("Close", &())
+            .await
+            .unwrap_err();
+        match &err {
+            zbus::Error::MethodError(name, _, _) if name.as_str() == UNKNOWN_OBJECT_ERROR => break,
+            zbus::Error::MethodError(name, _, _)
+                if name.as_str() == NO_SESSION_ERROR && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            _ => panic!("session object survived owner disconnect: {err}"),
+        }
+    }
+
+    sigterm(daemon.id());
+    assert!(wait_with_timeout(&mut daemon, Duration::from_secs(10)).success());
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+}
+
+#[tokio::test]
+async fn stale_session_path_is_not_reissued_after_restart() {
+    let h = harness();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "0",
+        Some(&h.fake_gpg_dir),
+    );
+    wait_for_name(&address);
+
+    let conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let proxy = service_proxy(&conn).await;
+    let (_, stale): (OwnedValue, OwnedObjectPath) = proxy
+        .call("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap();
+
+    sigterm(daemon.id());
+    assert!(wait_with_timeout(&mut daemon, Duration::from_secs(10)).success());
+    daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "0",
+        Some(&h.fake_gpg_dir),
+    );
+    wait_for_name(&address);
+
+    let no_items: Vec<OwnedObjectPath> = Vec::new();
+    let before_new = proxy
+        .call::<_, _, HashMap<OwnedObjectPath, WireSecret>>("GetSecrets", &(&no_items, &stale))
+        .await
+        .unwrap_err();
+    assert_method_error(&before_new, NO_SESSION_ERROR);
+
+    let stale_object = zbus::Proxy::new(
+        &conn,
+        SERVICE_NAME,
+        stale.clone(),
+        "org.freedesktop.Secret.Session",
+    )
+    .await
+    .unwrap();
+    let err = stale_object
+        .call::<_, _, ()>("Close", &())
+        .await
+        .unwrap_err();
+    assert_method_error(&err, UNKNOWN_OBJECT_ERROR);
+
+    let (_, replacement): (OwnedValue, OwnedObjectPath) = proxy
+        .call("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap();
+    let stale_after_new = proxy
+        .call::<_, _, HashMap<OwnedObjectPath, WireSecret>>("GetSecrets", &(&no_items, &stale))
+        .await;
+
+    let replacement_session = zbus::Proxy::new(
+        &conn,
+        SERVICE_NAME,
+        replacement.clone(),
+        "org.freedesktop.Secret.Session",
+    )
+    .await
+    .unwrap();
+    replacement_session
+        .call::<_, _, ()>("Close", &())
+        .await
+        .unwrap();
+    sigterm(daemon.id());
+    assert!(wait_with_timeout(&mut daemon, Duration::from_secs(10)).success());
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+
+    assert_ne!(stale, replacement, "daemon reissued stale session path");
+    let err = stale_after_new.unwrap_err();
+    assert_method_error(&err, NO_SESSION_ERROR);
 }
 
 #[test]

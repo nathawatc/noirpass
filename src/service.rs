@@ -15,8 +15,7 @@
 //! `false`; this is a deliberate, documented deviation from keyrings that
 //! implement their own locking.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +36,10 @@ pub const ALGORITHM_DH: &str = "dh-ietf1024-sha256-aes128-cbc-pkcs7";
 
 /// The plain (no transport encryption) session algorithm identifier.
 pub const ALGORITHM_PLAIN: &str = "plain";
+
+/// Bound retries so a broken entropy source fails instead of looping forever.
+/// Exhausting this with random 128-bit IDs requires 128 consecutive collisions.
+const SESSION_ALLOCATION_ATTEMPTS: usize = 128;
 
 // --- path helpers ---------------------------------------------------------
 
@@ -64,7 +67,7 @@ pub fn item_path(collection_id: &str, item_id: &str) -> OwnedObjectPath {
 
 /// D-Bus path of session number `n`.
 #[must_use]
-pub fn session_path(n: u64) -> OwnedObjectPath {
+pub fn session_path(n: u128) -> OwnedObjectPath {
     OwnedObjectPath::try_from(format!("{SERVICE_PATH}/session/s{n}"))
         .expect("session numbers are valid path elements")
 }
@@ -138,7 +141,7 @@ impl From<crate::Error> for SecretError {
 /// client that opened it (used to reap sessions of vanished clients).
 struct SessionEntry {
     cipher: Arc<SessionCipher>,
-    owner: Option<String>,
+    owner: String,
 }
 
 /// State shared by every D-Bus object of the daemon.
@@ -146,7 +149,6 @@ pub struct ServiceState {
     store: Store,
     gpg: Gpg,
     sessions: Mutex<HashMap<OwnedObjectPath, SessionEntry>>,
-    session_counter: AtomicU64,
     last_activity: Mutex<Instant>,
 }
 
@@ -158,7 +160,6 @@ impl ServiceState {
             store,
             gpg,
             sessions: Mutex::new(HashMap::new()),
-            session_counter: AtomicU64::new(0),
             last_activity: Mutex::new(Instant::now()),
         })
     }
@@ -196,27 +197,38 @@ impl ServiceState {
         self.sessions.lock().expect("session lock poisoned").len()
     }
 
-    /// Allocate the object path for the next session (`.../session/s<n>`).
-    pub fn next_session_path(&self) -> OwnedObjectPath {
-        let n = self.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        session_path(n)
-    }
-
-    /// Register a session cipher under its object path, remembering the
-    /// unique bus name of the opening client when known.
+    /// Register a session cipher for the opening client's unique bus name.
     pub fn register_session(
         &self,
-        path: OwnedObjectPath,
         cipher: SessionCipher,
-        owner: Option<String>,
-    ) {
-        self.sessions.lock().expect("session lock poisoned").insert(
-            path,
-            SessionEntry {
-                cipher: Arc::new(cipher),
-                owner,
-            },
-        );
+        owner: String,
+    ) -> fdo::Result<OwnedObjectPath> {
+        self.register_session_with(cipher, owner, rand::random)
+    }
+
+    fn register_session_with<F>(
+        &self,
+        cipher: SessionCipher,
+        owner: String,
+        mut next_id: F,
+    ) -> fdo::Result<OwnedObjectPath>
+    where
+        F: FnMut() -> u128,
+    {
+        let mut sessions = self.sessions.lock().expect("session lock poisoned");
+        for _ in 0..SESSION_ALLOCATION_ATTEMPTS {
+            let path = session_path(next_id());
+            if let Entry::Vacant(entry) = sessions.entry(path.clone()) {
+                entry.insert(SessionEntry {
+                    cipher: Arc::new(cipher),
+                    owner,
+                });
+                return Ok(path);
+            }
+        }
+        Err(fdo::Error::Failed(format!(
+            "could not allocate session path after {SESSION_ALLOCATION_ATTEMPTS} attempts"
+        )))
     }
 
     /// Drop every session owned by `owner` (a unique bus name that vanished),
@@ -227,7 +239,7 @@ impl ServiceState {
         let mut sessions = self.sessions.lock().expect("session lock poisoned");
         let paths: Vec<OwnedObjectPath> = sessions
             .iter()
-            .filter(|(_, entry)| entry.owner.as_deref() == Some(owner))
+            .filter(|(_, entry)| entry.owner == owner)
             .map(|(path, _)| path.clone())
             .collect();
         for path in &paths {
@@ -237,29 +249,40 @@ impl ServiceState {
     }
 
     /// Remove a session; returns whether it existed.
-    pub fn remove_session(&self, path: &OwnedObjectPath) -> bool {
-        self.sessions
-            .lock()
-            .expect("session lock poisoned")
-            .remove(path)
-            .is_some()
+    pub fn remove_session(&self, path: &OwnedObjectPath, owner: &str) -> bool {
+        let mut sessions = self.sessions.lock().expect("session lock poisoned");
+        if sessions.get(path).is_some_and(|entry| entry.owner == owner) {
+            sessions.remove(path);
+            true
+        } else {
+            false
+        }
     }
 
-    /// Look up the cipher of an open session.
+    /// Look up the cipher of an open session owned by `owner`.
     #[must_use]
-    pub fn session_cipher(&self, path: &OwnedObjectPath) -> Option<Arc<SessionCipher>> {
+    pub fn session_cipher(
+        &self,
+        path: &OwnedObjectPath,
+        owner: &str,
+    ) -> Option<Arc<SessionCipher>> {
         self.sessions
             .lock()
             .expect("session lock poisoned")
             .get(path)
+            .filter(|entry| entry.owner == owner)
             .map(|entry| entry.cipher.clone())
     }
 
     /// Decrypt an incoming [`Secret`] with its session cipher, `gpg`-encrypt
     /// the plaintext for storage and return the at-rest ciphertext.
-    pub fn secret_to_ciphertext(&self, secret: &Secret) -> Result<Vec<u8>, SecretError> {
+    pub fn secret_to_ciphertext(
+        &self,
+        secret: &Secret,
+        owner: &str,
+    ) -> Result<Vec<u8>, SecretError> {
         let cipher = self
-            .session_cipher(&secret.session)
+            .session_cipher(&secret.session, owner)
             .ok_or_else(|| SecretError::NoSession(format!("no session {}", secret.session)))?;
         let plaintext = cipher.decrypt(&secret.parameters, &secret.value)?;
         Ok(self.gpg.encrypt(&plaintext)?)
@@ -272,9 +295,10 @@ impl ServiceState {
         session: &OwnedObjectPath,
         ciphertext: &[u8],
         content_type: &str,
+        owner: &str,
     ) -> Result<Secret, SecretError> {
         let cipher = self
-            .session_cipher(session)
+            .session_cipher(session, owner)
             .ok_or_else(|| SecretError::NoSession(format!("no session {session}")))?;
         let plaintext = self.gpg.decrypt(ciphertext).await?;
         let (parameters, value) = cipher.encrypt(&plaintext);
@@ -288,6 +312,47 @@ impl ServiceState {
 }
 
 // --- object registration -----------------------------------------------------
+
+async fn register_session_object_with<F>(
+    server: &ObjectServer,
+    state: &Arc<ServiceState>,
+    cipher: SessionCipher,
+    owner: String,
+    next_id: F,
+) -> fdo::Result<OwnedObjectPath>
+where
+    F: FnMut() -> u128,
+{
+    // Reserve map state before exposing the D-Bus object. Never hold the
+    // synchronous session mutex across ObjectServer::at().
+    let path = state.register_session_with(cipher, owner.clone(), next_id)?;
+    match server
+        .at(&path, Session::new(state.clone(), path.clone()))
+        .await
+    {
+        Ok(true) if state.session_cipher(&path, &owner).is_some() => Ok(path),
+        Ok(true) => {
+            // Owner disconnected while ObjectServer::at() yielded.
+            let _ = server.remove::<Session, _>(&path).await;
+            Err(fdo::Error::Failed(
+                "session owner disconnected during registration".into(),
+            ))
+        }
+        Ok(false) => {
+            state.remove_session(&path, &owner);
+            Err(fdo::Error::Failed(format!(
+                "session object path {path} is already registered"
+            )))
+        }
+        Err(err) => {
+            state.remove_session(&path, &owner);
+            // ObjectServer::at() can add the interface before a later signal
+            // emission fails. Best-effort removal restores both registries.
+            let _ = server.remove::<Session, _>(&path).await;
+            Err(err.into())
+        }
+    }
+}
 
 /// Serve a [`crate::collection::Collection`] object for `collection_id`.
 pub async fn register_collection(
@@ -402,6 +467,14 @@ impl Service {
     }
 }
 
+/// Require message-bus sender identity before accessing client-owned state.
+pub(crate) fn message_sender(header: &zbus::message::Header<'_>) -> Result<String, SecretError> {
+    header
+        .sender()
+        .map(ToString::to_string)
+        .ok_or_else(|| fdo::Error::AccessDenied("missing D-Bus sender identity".into()).into())
+}
+
 #[interface(name = "org.freedesktop.Secret.Service")]
 impl Service {
     /// Open a transport session.
@@ -448,12 +521,12 @@ impl Service {
             }
         };
 
-        let path = self.state.next_session_path();
-        let owner = header.sender().map(ToString::to_string);
-        self.state.register_session(path.clone(), cipher, owner);
-        server
-            .at(&path, Session::new(self.state.clone(), path.clone()))
-            .await?;
+        let owner = header
+            .sender()
+            .map(ToString::to_string)
+            .ok_or_else(|| fdo::Error::AccessDenied("missing D-Bus sender identity".into()))?;
+        let path =
+            register_session_object_with(server, &self.state, cipher, owner, rand::random).await?;
         Ok((output, path))
     }
 
@@ -550,9 +623,11 @@ impl Service {
         &self,
         items: Vec<OwnedObjectPath>,
         session: OwnedObjectPath,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, Secret>, SecretError> {
         self.state.touch();
-        if self.state.session_cipher(&session).is_none() {
+        let owner = message_sender(&header)?;
+        if self.state.session_cipher(&session, &owner).is_none() {
             return Err(SecretError::NoSession(format!("no session {session}")));
         }
 
@@ -567,7 +642,7 @@ impl Service {
             let ciphertext = self.state.store().read_secret_file(&item_id)?;
             let secret = self
                 .state
-                .ciphertext_to_secret(&session, &ciphertext, &meta.content_type)
+                .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
                 .await?;
             out.insert(path, secret);
         }
@@ -710,19 +785,19 @@ mod tests {
         state.touch();
         assert!(state.idle_for() < Duration::from_millis(10));
 
-        // Session registry add/lookup/remove; counter increments.
-        let p1 = state.next_session_path();
-        let p2 = state.next_session_path();
-        assert_ne!(p1, p2);
+        // Session registry add/lookup/remove.
         assert_eq!(state.session_count(), 0);
 
-        state.register_session(p1.clone(), SessionCipher::Plain, Some(":1.7".into()));
+        let p1 = state
+            .register_session(SessionCipher::Plain, ":1.7".into())
+            .unwrap();
         assert_eq!(state.session_count(), 1);
-        assert!(state.session_cipher(&p1).is_some());
-        assert!(state.session_cipher(&p2).is_none());
+        assert!(state.session_cipher(&p1, ":1.7").is_some());
+        assert!(state.session_cipher(&p1, ":1.8").is_none());
 
-        assert!(state.remove_session(&p1));
-        assert!(!state.remove_session(&p1));
+        assert!(!state.remove_session(&p1, ":1.8"));
+        assert!(state.remove_session(&p1, ":1.7"));
+        assert!(!state.remove_session(&p1, ":1.7"));
         assert_eq!(state.session_count(), 0);
     }
 
@@ -731,25 +806,185 @@ mod tests {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&gnupg, tmp.path());
-        let (p1, p2, p3) = (
-            state.next_session_path(),
-            state.next_session_path(),
-            state.next_session_path(),
-        );
-
-        state.register_session(p1.clone(), SessionCipher::Plain, Some(":1.7".into()));
-        state.register_session(p2.clone(), SessionCipher::Plain, Some(":1.8".into()));
-        state.register_session(p3.clone(), SessionCipher::Plain, None);
+        let p1 = state
+            .register_session(SessionCipher::Plain, ":1.7".into())
+            .unwrap();
+        let _p2 = state
+            .register_session(SessionCipher::Plain, ":1.8".into())
+            .unwrap();
+        let _p3 = state
+            .register_session(SessionCipher::Plain, ":1.9".into())
+            .unwrap();
         assert_eq!(state.session_count(), 3);
 
         let reaped = state.remove_sessions_owned_by(":1.7");
         assert_eq!(reaped, vec![p1.clone()]);
         assert_eq!(state.session_count(), 2);
-        assert!(state.session_cipher(&p1).is_none());
+        assert!(state.session_cipher(&p1, ":1.7").is_none());
 
-        // Unknown owners and owner-less sessions are untouched.
+        // Unknown owners and other owners' sessions are untouched.
         assert!(state.remove_sessions_owned_by(":9.9").is_empty());
         assert_eq!(state.session_count(), 2);
+    }
+
+    #[test]
+    fn session_registration_retries_path_collision_without_overwrite() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let occupied_id = 41;
+        let replacement_id = 42;
+        let occupied = state
+            .register_session_with(SessionCipher::Plain, ":1.7".into(), || occupied_id)
+            .unwrap();
+        let mut ids = [occupied_id, replacement_id].into_iter();
+        let client_dh = DhHandshake::generate();
+        let replacement_cipher = DhHandshake::generate()
+            .derive(&client_dh.public_bytes())
+            .unwrap();
+
+        let replacement = state
+            .register_session_with(replacement_cipher, ":1.8".into(), || ids.next().unwrap())
+            .unwrap();
+
+        assert_eq!(occupied, session_path(occupied_id));
+        assert_eq!(replacement, session_path(replacement_id));
+        assert_eq!(state.session_count(), 2);
+        let occupied_cipher = state.session_cipher(&occupied, ":1.7").unwrap();
+        let (parameters, value) = occupied_cipher.encrypt(b"collision probe");
+        assert!(parameters.is_empty());
+        assert_eq!(value, b"collision probe");
+        assert!(state.session_cipher(&occupied, ":1.8").is_none());
+        let replacement_cipher = state.session_cipher(&replacement, ":1.8").unwrap();
+        let (parameters, _) = replacement_cipher.encrypt(b"collision probe");
+        assert_eq!(parameters.len(), 16);
+    }
+
+    #[test]
+    fn concurrent_session_registration_allocates_distinct_paths() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+
+        for (owner, fallback_id) in [(":1.7", 52), (":1.8", 53)] {
+            let state = state.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut ids = [51, fallback_id].into_iter();
+                barrier.wait();
+                let path = state
+                    .register_session_with(SessionCipher::Plain, owner.into(), || {
+                        ids.next().unwrap()
+                    })
+                    .unwrap();
+                (owner, path)
+            }));
+        }
+        barrier.wait();
+
+        let registrations: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_ne!(registrations[0].1, registrations[1].1);
+        assert_eq!(state.session_count(), 2);
+        for (owner, path) in registrations {
+            assert!(state.session_cipher(&path, owner).is_some());
+        }
+    }
+
+    #[test]
+    fn session_registration_stops_after_bounded_collisions() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let occupied = state
+            .register_session_with(SessionCipher::Plain, ":1.7".into(), || 54)
+            .unwrap();
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+
+        let err = state
+            .register_session_with(SessionCipher::Plain, ":1.8".into(), || {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                54
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("128 attempts"));
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::Relaxed),
+            SESSION_ALLOCATION_ATTEMPTS
+        );
+        assert_eq!(state.session_count(), 1);
+        assert!(state.session_cipher(&occupied, ":1.7").is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_object_registration_rolls_back_session_state() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+        let server = server_conn.object_server();
+        let occupied = session_path(61);
+        assert!(
+            server
+                .at(&occupied, Session::new(state.clone(), occupied.clone()))
+                .await
+                .unwrap()
+        );
+
+        let err = register_session_object_with(
+            server,
+            &state,
+            SessionCipher::Plain,
+            ":1.7".into(),
+            || 61,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("already registered"));
+        assert_eq!(state.session_count(), 0);
+        assert!(server.remove::<Session, _>(&occupied).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn object_registration_error_rolls_back_both_registries() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+        let server = server_conn.object_server().clone();
+        assert!(
+            server
+                .at(SERVICE_PATH, zbus::fdo::ObjectManager)
+                .await
+                .unwrap()
+        );
+        let connection_guard = server_conn.clone();
+        server_conn.close().await.unwrap();
+        let path = session_path(62);
+
+        let err = register_session_object_with(
+            &server,
+            &state,
+            SessionCipher::Plain,
+            ":1.7".into(),
+            || 62,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!err.to_string().is_empty());
+        assert_eq!(state.session_count(), 0);
+        assert!(matches!(
+            server.interface::<_, Session>(&path).await,
+            Err(zbus::Error::InterfaceNotFound)
+        ));
+        drop(connection_guard);
     }
 
     /// In-process p2p bus serving the real `Service` interface.
@@ -769,7 +1004,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_session_plain_and_dh_smoke() {
+    async fn open_session_rejects_missing_sender() {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&gnupg, tmp.path());
@@ -778,8 +1013,9 @@ mod tests {
         let iface = Some("org.freedesktop.Secret.Service");
         let dest = None::<zbus::names::BusName<'_>>;
 
-        // Plain session.
-        let reply = client_conn
+        // Peer-to-peer messages have no bus-assigned sender identity, so
+        // client-owned session state must fail closed.
+        let err = client_conn
             .call_method(
                 dest.clone(),
                 SERVICE_PATH,
@@ -788,19 +1024,13 @@ mod tests {
                 &("plain", Value::from("")),
             )
             .await
-            .unwrap();
-        let (output, session): (OwnedValue, OwnedObjectPath) = reply.body().deserialize().unwrap();
-        assert_eq!(String::try_from(output).unwrap(), "");
-        assert!(
-            session
-                .as_str()
-                .starts_with("/org/freedesktop/secrets/session/s")
-        );
-        assert_eq!(state.session_count(), 1);
+            .unwrap_err();
+        assert!(err.to_string().contains("AccessDenied"));
+        assert_eq!(state.session_count(), 0);
 
-        // DH session: run the client side of the handshake for real.
+        // Missing identity also rejects DH sessions after input validation.
         let client_dh = DhHandshake::generate();
-        let reply = client_conn
+        let err = client_conn
             .call_method(
                 dest.clone(),
                 SERVICE_PATH,
@@ -809,15 +1039,9 @@ mod tests {
                 &(ALGORITHM_DH, Value::from(client_dh.public_bytes())),
             )
             .await
-            .unwrap();
-        let (output, dh_session): (OwnedValue, OwnedObjectPath) =
-            reply.body().deserialize().unwrap();
-        let server_pub = Vec::<u8>::try_from(output).unwrap();
-        assert_eq!(server_pub.len(), 128);
-        assert_ne!(dh_session, session);
-        assert_eq!(state.session_count(), 2);
-        // The client can complete the handshake with our public key.
-        client_dh.derive(&server_pub).unwrap();
+            .unwrap_err();
+        assert!(err.to_string().contains("AccessDenied"));
+        assert_eq!(state.session_count(), 0);
 
         // Unknown algorithm is NotSupported.
         let err = client_conn
