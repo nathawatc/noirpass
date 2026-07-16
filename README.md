@@ -62,121 +62,69 @@ Features:
   material and never implements its own lock/unlock logic; `gpg-agent` is
   the real gate.
 
-## Build
+## Nix
 
-With the provided Nix flake (recommended — pins a matching toolchain and all
-native dependencies):
+Flake supports `x86_64-linux` and `aarch64-linux`. Build, run, enter development
+shell, or execute sandboxed checks directly:
 
 ```sh
-nix develop -c cargo build --release
+nix build
+./result/bin/noirpass --help
+
+nix run . -- --help
+nix develop
+nix flake check
 ```
 
-The resulting binary is at `target/release/noirpass`.
+Install package into current user profile from checkout:
 
-NixOS users: see [NixOS Flake Guide](docs/NIXOS-FLAKE.md) for flake setup,
-per-user installation, D-Bus activation, and Secret Service conflict handling.
+```sh
+nix profile install .#noirpass
+```
 
-On a generic Linux system without Nix, install a recent Rust toolchain
-(edition 2024, so rustc ≥ 1.85) plus the native dependencies the
-dependency tree needs to build: GnuPG (`gnupg`, for user key management and
-`gpg-agent`), OpenSSL (`openssl`, Sequoia's crypto backend), Clang
-(`clang`, for OpenSSL bindgen), and `capnproto` (Sequoia's IPC layer build
-script). Then:
+Install directly from Codeberg:
+
+```sh
+nix profile install git+https://codeberg.org/koharu/noirpass.git#noirpass
+```
+
+Package includes D-Bus activation and systemd user service files with
+store-qualified executable paths. Run `systemctl --user daemon-reload` after
+profile installation; do not enable service because D-Bus starts it on demand.
+See [NixOS Flake Guide](docs/NIXOS-FLAKE.md) for setup and Secret Service
+conflict handling.
+
+## Build without Nix
+
+Install Rust 1.85 or newer plus GnuPG, OpenSSL, Clang, Cap'n Proto, and
+`pkg-config`, then run:
 
 ```sh
 cargo build --release
 ```
 
-## Install & Activation
+Resulting binary is `target/release/noirpass`. Shipped activation files expect
+`/usr/bin/noirpass`; adjust both files when installing elsewhere.
 
-1. Build the binary (above) and copy it somewhere on your `PATH` that
-   systemd user units can reference with an absolute path:
+## Initialize and use
 
-Drop-in for gnome-keyring Secret Service. Works with browsers,
-`secret-tool`, password managers — no client changes needed.
-
-## Features
-
-- **Encrypted at rest** — decryptable only by your GPG key
-- **On-demand** — starts when needed, exits after idle timeout
-- **No master password** — uses existing GPG key and agent
-- **Familiar pinentry** — same passphrase prompts as `gpg`/`pass`
-
-## Quick Start
-
-Service files expect binary at `/usr/bin/noirpass`. Adjust `ExecStart=` in both files if installing
-elsewhere.
-
-Build:
-3. Initialize noirpass with an exported public recipient certificate:
-
-   ```sh
-   gpg --armor --export <FINGERPRINT> | noirpass init --recipient -
-   # or:
-   noirpass init --recipient ./recipient.asc
-   noirpass status
-   ```
-
-4. Nothing needs to be started by hand. The next time any client (a
-   browser, `secret-tool`, etc.) calls a method on `org.freedesktop.secrets`,
-   the session D-Bus daemon activates `noirpass.service` automatically. The
-   daemon exits again after `--idle-exit` seconds of inactivity with no
-   open sessions, and is re-activated on the next request.
-
-### Switching from Gnome-Keyring on NixOS
-
-Only one process can own the `org.freedesktop.secrets` bus name at a time.
-On most NixOS/GNOME setups that owner is gnome-keyring's Secret Service
-component. Check who currently owns it:
-
-```sh
-nix develop -c cargo build --release
-```
-
-Install (generic Linux):
-
-```sh
-sudo cp target/release/noirpass /usr/bin/
-cp systemd/noirpass.service ~/.config/systemd/user/
-cp systemd/org.freedesktop.secrets.service ~/.local/share/dbus-1/services/
-systemctl --user daemon-reload
-```
-
-Done. Daemon activates on first use. No manual start needed.
-
-**NixOS**: flake provides devShell only (no package output yet). Build via devShell, copy binary
-e.g. `~/.local/bin/noirpass`, then <u>edit `ExecStart=` in both service files to match</u>.
-
-## Usage
-
-Any Secret Service client works. With `secret-tool`:
-
-```sh
-# Store a secret
-secret-tool store --label='Email password' service email user alice
-Initialize once after creating/selecting your GPG key:
+Initialize once with full fingerprint of existing GPG key:
 
 ```sh
 gpg --armor --export <FINGERPRINT> | noirpass init --recipient -
 noirpass status
 ```
 
-Any Secret Service client works unmodified. Using `libsecret`'s
-`secret-tool`:
+Any Secret Service client works unmodified. Using `secret-tool`:
 
 ```sh
 secret-tool store --label='My login' service myservice username myuser
-# prompts for the secret value on stdin, then stores it
-
 secret-tool lookup service myservice username myuser
-# prints the secret value
 ```
 
-The first call to either command activates the daemon if it isn't already
-running; `gpg-agent`'s normal pinentry/passphrase-cache behavior applies on
-first decrypt. Any other Secret Service client library — `oo7` (Rust),
-`libsecret` (C/GLib bindings), or gnome-keyring-compatible tooling — talks
-to noirpass the same way, since it implements the same D-Bus interface.
+First call activates daemon. `gpg-agent` handles pinentry and passphrase cache.
+Only one process can own `org.freedesktop.secrets`; disable any competing
+Secret Service provider before using noirpass.
 
 ## Configuration Reference
 
@@ -226,27 +174,18 @@ the daemon at a non-default well-known name and is not meant for normal use.
 
 ## Development
 
-All commands run inside the Nix devShell, which provides a matching
-rustc/cargo/clippy/rustfmt plus `cargo-llvm-cov` and every native
-dependency (openssl, clang, capnproto, dbus, libsecret, gnupg, pkg-config):
+Development shell provides Rust toolchain, coverage tools, and native test
+dependencies. Run all repository gates through flake:
 
-# Retrieve it
-secret-tool lookup service email user alice
+```sh
+nix develop -c cargo fmt --check
+nix develop -c cargo clippy --all-targets --all-features -- -D warnings
+nix develop -c cargo test
+nix develop -c cargo llvm-cov --all-targets --fail-under-lines 80
 ```
 
-First call activates daemon. `gpg-agent` handles passphrase prompts.
+Optional real `secret-tool` smoke test remains feature-gated:
 
-## Options
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--store-dir` | `~/.local/share/noirpass` | Data directory |
-| `--key <fp>` | First secret key | GPG fingerprint for encryption |
-| `--idle-exit <s>` | 300 | Idle timeout (sec). `0` = never exit |
-
-## Security
-
-- Secret values encrypted at rest. Only your GPG key decrypts.
-- Labels and attributes stored in plaintext (needed for fast search).
-- noirpass never holds your private key — `gpg-agent` handles all auth.
-- Systemd service runs with restricted privileges.
+```sh
+nix develop -c cargo test --features secret-tool-smoke
+```

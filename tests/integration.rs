@@ -1064,6 +1064,7 @@ async fn idle_exit_daemon_exits() {
         "1",
         Some(&h.fake_gpg_dir),
     );
+    wait_for_name(&address);
 
     // Open a session and drop the client without calling Session.Close. The
     // leaked session must not block idle-exit once NameOwnerChanged reaps it.

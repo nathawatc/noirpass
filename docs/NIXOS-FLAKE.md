@@ -1,16 +1,11 @@
 # NixOS Flake Guide
 
-Noirpass flake provides reproducible development shell for
-`x86_64-linux` and `aarch64-linux`. It currently does not provide package or
-NixOS module outputs. `nix build`, `nix profile install`, and adding this
-repository to `environment.systemPackages` will not work yet.
-
-Use flake shell to build release binary, then install binary and activation
-files for current user.
+Noirpass flake provides packages, apps, checks, and development shells for
+`x86_64-linux` and `aarch64-linux`. Darwin is not declared supported.
 
 ## Enable flakes
 
-Add following to NixOS configuration:
+Add to NixOS configuration:
 
 ```nix
 {
@@ -18,157 +13,139 @@ Add following to NixOS configuration:
 }
 ```
 
-Apply configuration:
+Apply configuration with `sudo nixos-rebuild switch`. For one command without
+system-wide setting, add
+`--extra-experimental-features 'nix-command flakes'` to `nix` command.
 
-```sh
-sudo nixos-rebuild switch
-```
-
-For one command without system-wide setting:
-
-```sh
-nix --extra-experimental-features 'nix-command flakes' develop
-```
-
-## Build
+## Build, run, and check
 
 From repository root:
 
 ```sh
-nix develop -c cargo build --release
-```
+nix build
+./result/bin/noirpass --help
 
-Binary appears at `target/release/noirpass`. `flake.lock` pins nixpkgs, so
-same checkout uses same Rust toolchain and native build dependencies.
-
-Open interactive shell when running several development commands:
-
-```sh
+nix run . -- --help
 nix develop
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo llvm-cov --all-targets --fail-under-lines 80
+nix flake check
 ```
 
-Otherwise prefix each command with `nix develop -c`. Do not use bare
-`cargo`, `rustc`, `gpg`, or related tools on NixOS for this repository.
+`flake.lock` pins nixpkgs, Rust toolchain, and native dependencies. Package
+uses `Cargo.lock` and Cargo's offline mode during build.
 
-## Install for current user
+Default check builds release package, runs Rust tests with private D-Bus and
+ephemeral `GNUPGHOME` fixtures, and checks formatting. It never uses real
+session bus, GPG keyring, pinentry, secrets, or home-directory state. Optional
+`secret-tool` smoke feature is not enabled by flake check.
 
-Shipped activation files expect `/usr/bin/noirpass`. NixOS does not use that
-path for locally built software, so copy files and replace path with absolute
-home-directory path:
+## Install into user profile
+
+Install from current checkout:
 
 ```sh
-mkdir -p "$HOME/.local/bin"
-mkdir -p "$HOME/.config/systemd/user"
-mkdir -p "$HOME/.local/share/dbus-1/services"
-
-install -m755 target/release/noirpass "$HOME/.local/bin/noirpass"
-install -m644 systemd/noirpass.service \
-  "$HOME/.config/systemd/user/noirpass.service"
-install -m644 systemd/org.freedesktop.secrets.service \
-  "$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
-
-sed -i "s|/usr/bin/noirpass|$HOME/.local/bin/noirpass|g" \
-  "$HOME/.config/systemd/user/noirpass.service" \
-  "$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
-
+nix profile install .#noirpass
 systemctl --user daemon-reload
 ```
 
-Do not enable service. Session D-Bus starts it on demand when client requests
-`org.freedesktop.secrets`; noirpass exits after idle timeout.
+Install directly from Codeberg:
 
-Installed unit writes default store under `~/.local/share/noirpass`. For
-custom `NOIRPASS_STORE`, create systemd user override containing both
-`Environment=NOIRPASS_STORE=...` and matching `ReadWritePaths=...`; unit
-hardening otherwise blocks writes outside `~/.local/share`.
+```sh
+nix profile install git+https://codeberg.org/koharu/noirpass.git#noirpass
+systemctl --user daemon-reload
+```
+
+Package installs:
+
+```text
+bin/noirpass
+share/dbus-1/services/org.freedesktop.secrets.service
+share/systemd/user/noirpass.service
+```
+
+Activation files reference immutable packaged binary path. NixOS includes user
+profile `share` directory in D-Bus and systemd search paths. Do not enable
+service: session D-Bus starts it on demand, and daemon exits after idle timeout.
 
 ## Initialize recipient
 
-List secret keys and choose full fingerprint:
+Ensure GnuPG and `gpg-agent` are configured for user. List secret keys and use
+full fingerprint:
 
 ```sh
-nix develop -c gpg --list-secret-keys --keyid-format long
+gpg --list-secret-keys --keyid-format long
+gpg --armor --export <FINGERPRINT> | noirpass init --recipient -
+noirpass status
 ```
 
-Export public certificate into noirpass:
-
-```sh
-nix develop -c bash -c \
-  'gpg --armor --export FINGERPRINT | "$HOME/.local/bin/noirpass" init --recipient -'
-
-"$HOME/.local/bin/noirpass" status
-```
-
-Replace `FINGERPRINT` with chosen key fingerprint. Secret key remains in
-GnuPG; noirpass stores only exported public certificate. Decryption uses
-running `gpg-agent` and normal pinentry configuration.
+Noirpass stores exported public certificate only. Decryption communicates with
+running `gpg-agent` through its socket and follows normal pinentry policy.
 
 ## Resolve Secret Service conflict
 
-Only one process can own `org.freedesktop.secrets`. GNOME Keyring or another
-password manager may already own it. Inspect current owner:
+Only one process can own `org.freedesktop.secrets`. Inspect current owner:
 
 ```sh
 busctl --user status org.freedesktop.secrets
 ```
 
-Disable competing Secret Service component in desktop configuration before
-using noirpass. Exact option depends on desktop and NixOS configuration.
-Stopping only current process is temporary; desktop may start it again.
+Disable competing Secret Service component in desktop or NixOS configuration
+before using noirpass. Exact option depends on desktop. Flake does not disable
+or replace another provider automatically.
 
-After removing conflict, activate noirpass with test client:
+Test activation after removing conflict:
 
 ```sh
-nix develop -c secret-tool store --label='Noirpass test' service noirpass-test
-nix develop -c secret-tool lookup service noirpass-test
+secret-tool store --label='Noirpass test' service noirpass-test
+secret-tool lookup service noirpass-test
 ```
 
-First command reads secret value from standard input. Second command may open
-pinentry through `gpg-agent`.
-
-Check activation and logs:
+Inspect service and logs:
 
 ```sh
 systemctl --user status noirpass.service
 journalctl --user-unit noirpass.service
 ```
 
-## Update
+## Custom store or idle timeout
 
-After pulling new source, rebuild and replace installed binary:
+Create systemd user override:
 
 ```sh
-git pull --ff-only
-nix develop -c cargo build --release
-install -m755 target/release/noirpass "$HOME/.local/bin/noirpass"
+systemctl --user edit noirpass.service
+```
+
+Example:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=%h/.nix-profile/bin/noirpass --store-dir %h/.local/share/noirpass --idle-exit 600
+```
+
+Default hardened unit permits writes under `~/.local/share`. Store elsewhere
+also requires matching `ReadWritePaths=` override.
+
+## Update or remove
+
+Update installation from checkout:
+
+```sh
+nix profile upgrade noirpass
 systemctl --user try-restart noirpass.service
 ```
 
-`try-restart` replaces running daemon without starting inactive daemon.
-D-Bus starts inactive daemon on next request.
-
-Maintainers can update pinned nixpkgs input with:
-
-```sh
-nix flake update
-```
-
-Review and commit `flake.lock` change. Users seeking reproducible build should
-not update lock file implicitly.
-
-## Remove user installation
+Remove installation:
 
 ```sh
 systemctl --user stop noirpass.service
-rm "$HOME/.config/systemd/user/noirpass.service"
-rm "$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
-rm "$HOME/.local/bin/noirpass"
+nix profile remove noirpass
 systemctl --user daemon-reload
 ```
 
-This leaves encrypted store at `~/.local/share/noirpass`. Remove or archive it
-separately only when stored secrets are no longer needed.
+Encrypted store remains at `~/.local/share/noirpass`.
+
+## NixOS module status
+
+No NixOS module is included yet. Provider ownership and desktop conflict policy
+need explicit design before declarative replacement is safe. Package and user
+activation files remain usable without module.
