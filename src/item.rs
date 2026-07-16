@@ -13,7 +13,7 @@ use zbus::zvariant::OwnedObjectPath;
 use zbus::{fdo, interface};
 
 use crate::collection::Collection;
-use crate::service::{SecretError, ServiceState, collection_path, item_path};
+use crate::service::{SecretError, ServiceState, collection_path, item_path, message_sender};
 use crate::session::Secret;
 
 /// The "no prompt" object path.
@@ -50,13 +50,18 @@ impl Item {
     /// Retrieve the secret, decrypted via `gpg-agent` and encoded for the
     /// given session.
     #[zbus(out_args("secret"))]
-    async fn get_secret(&self, session: OwnedObjectPath) -> Result<(Secret,), SecretError> {
+    async fn get_secret(
+        &self,
+        session: OwnedObjectPath,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> Result<(Secret,), SecretError> {
         self.state.touch();
+        let owner = message_sender(&header)?;
         let meta = self.state.store().get_item(&self.id)?;
         let ciphertext = self.state.store().read_secret_file(&self.id)?;
         let secret = self
             .state
-            .ciphertext_to_secret(&session, &ciphertext, &meta.content_type)
+            .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
             .await?;
         Ok((secret,))
     }
@@ -66,9 +71,14 @@ impl Item {
         clippy::needless_pass_by_value,
         reason = "zbus deserializes method arguments by value"
     )]
-    fn set_secret(&self, secret: Secret) -> Result<(), SecretError> {
+    fn set_secret(
+        &self,
+        secret: Secret,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> Result<(), SecretError> {
         self.state.touch();
-        let ciphertext = self.state.secret_to_ciphertext(&secret)?;
+        let owner = message_sender(&header)?;
+        let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
         self.state.store().update_item(
             &self.id,
             None,

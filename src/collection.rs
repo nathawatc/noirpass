@@ -17,7 +17,7 @@ use zbus::{fdo, interface};
 
 use crate::service::{
     SERVICE_PATH, SecretError, Service, ServiceState, alias_path, collection_path, item_path,
-    register_item,
+    message_sender, register_item,
 };
 use crate::session::Secret;
 
@@ -120,9 +120,11 @@ impl Collection {
         replace: bool,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
         self.state.touch();
         let id = self.resolve_id()?;
+        let owner = message_sender(&header)?;
 
         let label = properties
             .get("org.freedesktop.Secret.Item.Label")
@@ -133,7 +135,7 @@ impl Collection {
             .and_then(|v| HashMap::<String, String>::try_from(v.clone()).ok())
             .unwrap_or_default();
 
-        let ciphertext = self.state.secret_to_ciphertext(&secret)?;
+        let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
 
         // Emit from the canonical collection path regardless of how we were
         // addressed (id or alias).
