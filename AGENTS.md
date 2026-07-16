@@ -183,3 +183,18 @@ Plus rustc ≥ 1.85 (edition 2024). Then `cargo build --release`.
   one orchestrator test (`end_to_end`) rather than as separate `#[test]`
   functions, since Rust's test harness runs tests concurrently by default
   and per-test env vars are not isolated between threads.
+
+## D-Bus tests
+
+Tests that require an existing real session D-Bus or an externally running
+D-Bus service must be optional and must skip when that environment is not
+available.
+
+Mandatory tests should use an isolated test bus or repository-owned test
+fixtures instead.
+
+Do not convert environment-dependent D-Bus tests into mandatory CI tests
+without an explicit maintainer decision.
+
+Do not remove an environment-availability guard without an explicit
+maintainer decision.
