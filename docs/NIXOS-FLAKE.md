@@ -131,6 +131,7 @@ Update installation from checkout:
 
 ```sh
 nix profile upgrade noirpass
+systemctl --user daemon-reload
 systemctl --user try-restart noirpass.service
 ```
 
