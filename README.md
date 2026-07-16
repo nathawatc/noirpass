@@ -73,6 +73,9 @@ nix develop -c cargo build --release
 
 The resulting binary is at `target/release/noirpass`.
 
+NixOS users: see [NixOS Flake Guide](docs/NIXOS-FLAKE.md) for flake setup,
+per-user installation, D-Bus activation, and Secret Service conflict handling.
+
 On a generic Linux system without Nix, install a recent Rust toolchain
 (edition 2024, so rustc ≥ 1.85) plus the native dependencies the
 dependency tree needs to build: GnuPG (`gnupg`, for user key management and
