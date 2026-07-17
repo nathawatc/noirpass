@@ -17,6 +17,50 @@ Apply configuration with `sudo nixos-rebuild switch`. For one command without
 system-wide setting, add
 `--extra-experimental-features 'nix-command flakes'` to `nix` command.
 
+## Use as flake input
+
+Another NixOS flake can consume noirpass directly. The package output is
+system-specific, so use `noirpass.packages.${system}.noirpass` (or
+`noirpass.packages.${system}.default`) for the host system:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    noirpass = {
+      url = "git+https://codeberg.org/koharu/noirpass.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = inputs@{ self, nixpkgs, noirpass, ... }:
+    let
+      system = "x86_64-linux";
+    in
+    {
+      nixosConfigurations.example = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ({ ... }: {
+            environment.systemPackages = [
+              noirpass.packages.${system}.noirpass
+            ];
+          })
+        ];
+      };
+    };
+}
+```
+
+This installs the noirpass executable and its D-Bus and systemd user
+activation files through `environment.systemPackages`.
+
+Update only the noirpass input with:
+
+```sh
+nix flake update noirpass
+```
+
 ## Build, run, and check
 
 From repository root:
