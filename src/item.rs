@@ -13,7 +13,9 @@ use zbus::zvariant::OwnedObjectPath;
 use zbus::{fdo, interface};
 
 use crate::collection::Collection;
-use crate::service::{SecretError, ServiceState, collection_path, item_path, message_sender};
+use crate::service::{
+    SecretError, ServiceState, collection_path, item_path, message_sender, object_removed_or_absent,
+};
 use crate::session::Secret;
 
 /// The "no prompt" object path.
@@ -57,8 +59,7 @@ impl Item {
     ) -> Result<(Secret,), SecretError> {
         self.state.touch();
         let owner = message_sender(&header)?;
-        let meta = self.state.store().get_item(&self.id)?;
-        let ciphertext = self.state.store().read_secret_file(&self.id)?;
+        let (meta, ciphertext) = self.state.store().read_item_secret(&self.id)?;
         let secret = self
             .state
             .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
@@ -97,11 +98,10 @@ impl Item {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
         self.state.touch();
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         self.state.store().delete_item(&self.id)?;
 
-        server
-            .remove::<Self, _>(&self.path())
-            .await
+        object_removed_or_absent(server.remove::<Self, _>(&self.path()).await)
             .map_err(SecretError::ZBus)?;
 
         // ItemDeleted is a Collection signal, emitted from the collection path.
@@ -127,14 +127,15 @@ impl Item {
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).
     #[zbus(property)]
-    #[allow(clippy::unused_self, reason = "zbus property getters take &self")]
     fn locked(&self) -> bool {
+        self.state.touch();
         false
     }
 
     /// Lookup attributes.
     #[zbus(property)]
     fn attributes(&self) -> fdo::Result<HashMap<String, String>> {
+        self.state.touch();
         let meta = self
             .state
             .store()
@@ -157,6 +158,7 @@ impl Item {
     /// Human-readable label.
     #[zbus(property)]
     fn label(&self) -> fdo::Result<String> {
+        self.state.touch();
         let meta = self
             .state
             .store()
@@ -179,6 +181,7 @@ impl Item {
     /// Creation time, seconds since the Unix epoch.
     #[zbus(property)]
     fn created(&self) -> fdo::Result<u64> {
+        self.state.touch();
         let meta = self
             .state
             .store()
@@ -190,6 +193,7 @@ impl Item {
     /// Last modification time, seconds since the Unix epoch.
     #[zbus(property)]
     fn modified(&self) -> fdo::Result<u64> {
+        self.state.touch();
         let meta = self
             .state
             .store()

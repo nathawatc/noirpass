@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 
 use noirpass::crypto::DhHandshake;
 use noirpass::session::Secret as WireSecret;
+use noirpass::store::{CollectionMeta, ItemMeta, Store};
+use redb::{Database, TableDefinition};
 use zbus::export::futures_core::Stream;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -606,6 +608,19 @@ async fn s6_get_secrets_bulk() {
         assert_eq!(secret.content_type, "text/plain");
     }
 
+    // A mismatched collection component must not resolve by item id alone.
+    let (_, item_id) = noirpass::service::parse_item_path(paths[0].as_str()).unwrap();
+    let mismatched_path = OwnedObjectPath::try_from(format!(
+        "/org/freedesktop/secrets/collection/not_the_owner/{item_id}"
+    ))
+    .unwrap();
+    let mismatched_paths = vec![mismatched_path];
+    let mismatched: HashMap<OwnedObjectPath, WireSecret> = proxy
+        .call("GetSecrets", &(&mismatched_paths, &plain_session))
+        .await
+        .unwrap();
+    assert!(mismatched.is_empty());
+
     // DH session: drive the client side with the library's own handshake.
     let client = DhHandshake::generate();
     let (server_pub, dh_session): (OwnedValue, OwnedObjectPath) = proxy
@@ -648,17 +663,16 @@ async fn s6_get_secrets_bulk() {
         .unwrap_err();
     assert_method_error(&err, UNKNOWN_OBJECT_ERROR);
 
+    delete_items(paths).await;
+}
+
+async fn delete_items(paths: Vec<OwnedObjectPath>) {
     for path in paths {
-        let item_conn = zbus::Connection::session().await.unwrap();
-        let item_proxy = zbus::Proxy::new(
-            &item_conn,
-            SERVICE_NAME,
-            path,
-            "org.freedesktop.Secret.Item",
-        )
-        .await
-        .unwrap();
-        let _: OwnedObjectPath = item_proxy.call("Delete", &()).await.unwrap();
+        let conn = zbus::Connection::session().await.unwrap();
+        let proxy = zbus::Proxy::new(&conn, SERVICE_NAME, path, "org.freedesktop.Secret.Item")
+            .await
+            .unwrap();
+        let _: OwnedObjectPath = proxy.call("Delete", &()).await.unwrap();
     }
 }
 
@@ -854,32 +868,47 @@ async fn s7_persistence_across_restart() {
 /// Scenario 8: a real libsecret client (`secret-tool`) stores and looks up.
 #[cfg(feature = "secret-tool-smoke")]
 async fn s8_secret_tool_smoke() {
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+        eprintln!("skipping secret-tool smoke: no D-Bus session address");
+        return;
+    }
+    match Command::new("secret-tool").arg("--version").output() {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping secret-tool smoke: secret-tool is unavailable");
+            return;
+        }
+        Err(err) => panic!("failed to probe secret-tool: {err}"),
+    }
+    wait_for_name(&harness().bus_address);
+
     let store = tokio::task::spawn_blocking(|| {
         let mut child = Command::new("secret-tool")
             .args(["store", "--label=smoke", "sm", "ke"])
             .stdin(Stdio::piped())
-            .spawn()
-            .expect("spawn secret-tool store");
-        child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(b"hunter2\n")
-            .unwrap();
-        child.wait().expect("secret-tool store wait")
+            .spawn()?;
+        let stdin = child.stdin.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "secret-tool stdin unavailable",
+            )
+        })?;
+        stdin.write_all(b"hunter2\n")?;
+        child.wait()
     })
     .await
-    .unwrap();
+    .expect("secret-tool store task panicked")
+    .expect("secret-tool store failed to execute");
     assert!(store.success(), "secret-tool store failed");
 
     let lookup = tokio::task::spawn_blocking(|| {
         Command::new("secret-tool")
             .args(["lookup", "sm", "ke"])
             .output()
-            .expect("secret-tool lookup")
     })
     .await
-    .unwrap();
+    .expect("secret-tool lookup task panicked")
+    .expect("secret-tool lookup failed to execute");
     assert!(lookup.status.success(), "secret-tool lookup failed");
     assert_eq!(
         String::from_utf8_lossy(&lookup.stdout).trim(),
@@ -1015,6 +1044,7 @@ async fn idle_exit_daemon_exits() {
         "1",
         Some(&h.fake_gpg_dir),
     );
+    wait_for_name(&address);
 
     // Open a session and drop the client without calling Session.Close. The
     // leaked session must not block idle-exit once NameOwnerChanged reaps it.
@@ -1209,6 +1239,335 @@ async fn stale_session_path_is_not_reissued_after_restart() {
     assert_ne!(stale, replacement, "daemon reissued stale session path");
     let err = stale_after_new.unwrap_err();
     assert_method_error(&err, NO_SESSION_ERROR);
+}
+
+#[test]
+fn cli_lists_deletes_and_repairs_stale_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let present = store
+        .create_item(
+            &collection.id,
+            "present secret",
+            HashMap::from([("service".to_string(), "present".to_string())]),
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    let missing = store
+        .create_item(
+            &collection.id,
+            "missing secret",
+            HashMap::from([("service".to_string(), "missing".to_string())]),
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    std::fs::remove_file(
+        dir.path()
+            .join("secrets")
+            .join(format!("{}.gpg", missing.id)),
+    )
+    .unwrap();
+    drop(store);
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(dir.path())
+        .arg("list")
+        .output()
+        .expect("spawn noirpass list");
+    assert!(
+        listed.status.success(),
+        "list failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&listed.stdout),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains(&present.id));
+    assert!(stdout.contains(&missing.id));
+    assert!(stdout.contains("ciphertext: missing"));
+
+    let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(dir.path())
+        .args(["check", "--yes"])
+        .output()
+        .expect("spawn noirpass check");
+    assert!(
+        checked.status.success(),
+        "check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(String::from_utf8_lossy(&checked.stdout).contains("store health: repaired"));
+
+    let store = Store::open_existing(dir.path()).unwrap();
+    assert!(store.get_item(&present.id).is_ok());
+    assert!(store.get_item(&missing.id).is_err());
+    drop(store);
+
+    let deleted = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(dir.path())
+        .arg("delete")
+        .arg(&present.id)
+        .arg("--yes")
+        .output()
+        .expect("spawn noirpass delete");
+    assert!(
+        deleted.status.success(),
+        "delete failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&deleted.stdout),
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&deleted.stdout).contains(&present.id));
+
+    let store = Store::open_existing(dir.path()).unwrap();
+    assert!(store.search_items(&HashMap::new()).unwrap().is_empty());
+    assert!(store.check_integrity().unwrap().is_healthy());
+}
+
+#[test]
+fn cli_rejects_mismatched_item_id_without_deleting_valid_item() {
+    const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let valid_b = store
+        .create_item(
+            &collection.id,
+            "valid-b",
+            HashMap::new(),
+            "text/plain",
+            b"ciphertext-b",
+        )
+        .unwrap();
+    let key_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let corrupt = ItemMeta {
+        label: "corrupt-a".to_string(),
+        ..valid_b.clone()
+    };
+    drop(store);
+    let db = Database::open(dir.path().join("index.redb")).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut items = txn.open_table(ITEMS).unwrap();
+        let bytes = serde_json::to_vec(&corrupt).unwrap();
+        items.insert(key_a, bytes.as_slice()).unwrap();
+    }
+    txn.commit().unwrap();
+    drop(db);
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(dir.path())
+        .arg("list")
+        .output()
+        .expect("spawn noirpass list");
+    assert!(
+        !listed.status.success(),
+        "list must reject mismatched item ids"
+    );
+
+    let deleted = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(dir.path())
+        .arg("delete")
+        .arg(key_a)
+        .arg("--yes")
+        .output()
+        .expect("spawn noirpass delete");
+
+    assert!(!deleted.status.success());
+    let store = Store::open_existing(dir.path()).unwrap();
+    assert_eq!(store.get_item(&valid_b.id).unwrap(), valid_b);
+    assert_eq!(
+        store.read_secret_file(&valid_b.id).unwrap(),
+        b"ciphertext-b"
+    );
+    assert_eq!(store.check_integrity().unwrap().corrupt_items.len(), 1);
+}
+
+#[test]
+fn cli_check_repairs_noncanonical_item_key() {
+    const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let metadata = ItemMeta {
+        id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        collection: collection.id,
+        label: "bad-key".to_string(),
+        attributes: HashMap::new(),
+        content_type: "text/plain".to_string(),
+        ciphertext_sha256: None,
+        created: 1,
+        modified: 1,
+    };
+    drop(store);
+    let db = Database::open(dir.path().join("index.redb")).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut items = txn.open_table(ITEMS).unwrap();
+        let bytes = serde_json::to_vec(&metadata).unwrap();
+        items.insert("bad-key", bytes.as_slice()).unwrap();
+    }
+    txn.commit().unwrap();
+    drop(db);
+
+    let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(dir.path())
+        .args(["check", "--yes"])
+        .output()
+        .expect("spawn noirpass check");
+
+    assert!(
+        checked.status.success(),
+        "check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let store = Store::open_existing(dir.path()).unwrap();
+    assert!(store.check_integrity().unwrap().is_healthy());
+}
+
+#[test]
+fn cli_check_recovers_quarantined_ciphertext_before_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let item = store
+        .create_item(
+            &collection.id,
+            "recoverable",
+            HashMap::new(),
+            "text/plain",
+            b"recoverable-ciphertext",
+        )
+        .unwrap();
+    let canonical = dir.path().join("secrets").join(format!("{}.gpg", item.id));
+    let quarantine = dir.path().join("secrets").join(format!(
+        ".noirpass-quarantine-{}-0000000000000001.gpg",
+        item.id
+    ));
+    std::fs::rename(&canonical, &quarantine).unwrap();
+    drop(store);
+
+    let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .arg("--store-dir")
+        .arg(dir.path())
+        .args(["check", "--yes"])
+        .output()
+        .expect("spawn noirpass check");
+
+    assert!(
+        checked.status.success(),
+        "check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let store = Store::open_existing(dir.path()).unwrap();
+    assert_eq!(store.get_item(&item.id).unwrap(), item);
+    assert_eq!(
+        store.read_secret_file(&item.id).unwrap(),
+        b"recoverable-ciphertext"
+    );
+    assert!(!quarantine.exists());
+    assert!(store.check_integrity().unwrap().is_healthy());
+}
+
+#[test]
+fn daemon_recovers_pending_backup_and_quarantine() {
+    let h = harness();
+    let cert = export_public_cert(&h.gnupg_home);
+    for kind in ["backup", "quarantine"] {
+        let (mut dbus, address) = spawn_dbus_daemon();
+        let store_dir = tempfile::tempdir().unwrap();
+        init_noirpass_store(store_dir.path(), &cert);
+        let store = Store::open_existing(store_dir.path()).unwrap();
+        let collection = store.ensure_default().unwrap();
+        let item = store
+            .create_item(
+                &collection.id,
+                kind,
+                HashMap::new(),
+                "text/plain",
+                b"old-ciphertext",
+            )
+            .unwrap();
+        let canonical = store_dir
+            .path()
+            .join("secrets")
+            .join(format!("{}.gpg", item.id));
+        let recovery = store_dir
+            .path()
+            .join("secrets")
+            .join(format!(".noirpass-{kind}-{}-0000000000000001.gpg", item.id));
+        std::fs::rename(&canonical, &recovery).unwrap();
+        if kind == "backup" {
+            std::fs::write(&canonical, b"uncommitted-new-ciphertext").unwrap();
+        }
+        drop(store);
+
+        let mut daemon = spawn_daemon(
+            &address,
+            &h.gnupg_home,
+            store_dir.path(),
+            "0",
+            Some(&h.fake_gpg_dir),
+        );
+        wait_for_name(&address);
+        assert_eq!(std::fs::read(&canonical).unwrap(), b"old-ciphertext");
+        assert!(!recovery.exists());
+
+        sigterm(daemon.id());
+        assert!(wait_with_timeout(&mut daemon, Duration::from_secs(10)).success());
+        dbus.kill().expect("kill private dbus-daemon");
+        let _ = dbus.wait();
+    }
+}
+
+#[test]
+fn daemon_rejects_path_unsafe_collection_identity() {
+    const COLLECTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("collections");
+    let h = harness();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    let db = Database::open(store.path().join("index.redb")).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut collections = txn.open_table(COLLECTIONS).unwrap();
+        let metadata = CollectionMeta {
+            id: "bad-key".to_string(),
+            label: "corrupt".to_string(),
+            created: 1,
+            modified: 1,
+        };
+        let bytes = serde_json::to_vec(&metadata).unwrap();
+        collections.insert("bad-key", bytes.as_slice()).unwrap();
+    }
+    txn.commit().unwrap();
+    drop(db);
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "0",
+        Some(&h.fake_gpg_dir),
+    );
+
+    let status = wait_with_timeout(&mut daemon, Duration::from_secs(10));
+    assert!(
+        !status.success(),
+        "daemon must reject corrupt collection ids"
+    );
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
 }
 
 #[test]

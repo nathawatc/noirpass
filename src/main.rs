@@ -4,6 +4,8 @@
 //! exits cleanly when idle (or on SIGTERM/SIGINT). Secrets at rest are
 //! encrypted to the user's `OpenPGP` key; decryption goes through `gpg-agent`.
 
+use std::collections::{HashMap, HashSet};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +18,7 @@ use noirpass::config::{init_from_path, load_recipient, status};
 use noirpass::gpg::Gpg;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
 use noirpass::session::Session;
-use noirpass::store::Store;
+use noirpass::store::{ItemMeta, Store};
 
 /// Minimal on-demand GPG-backed freedesktop Secret Service.
 #[derive(Parser, Debug)]
@@ -53,6 +55,22 @@ enum Command {
     },
     /// Report whether the noirpass store is initialized and usable.
     Status,
+    /// List indexed secrets without decrypting them.
+    List,
+    /// Delete one indexed secret and its ciphertext file.
+    Delete {
+        /// Secret id shown by `noirpass list`.
+        id: String,
+        /// Skip the interactive confirmation.
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Check redb item records against `.gpg` files and offer safe repair.
+    Check {
+        /// Delete every stale redb item record without prompting.
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 /// `$XDG_DATA_HOME/noirpass`, falling back to `~/.local/share/noirpass`.
@@ -108,6 +126,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             std::process::exit(1);
         }
+        Some(Command::List) => {
+            let store = Store::open_existing(&store_dir)?;
+            store.recover_interrupted_operations()?;
+            print_items(&store)?;
+            return Ok(());
+        }
+        Some(Command::Delete { id, yes }) => {
+            let store = Store::open_existing(&store_dir)?;
+            store.recover_interrupted_operations()?;
+            let item = store.get_item(&id)?;
+            if confirm(
+                &format!(
+                    "delete secret {} with label {}?",
+                    id,
+                    serde_json::to_string(&item.label)?
+                ),
+                yes,
+            )? {
+                store.delete_item(&id)?;
+                println!("deleted: {id}");
+            } else {
+                println!("not deleted: {id}");
+            }
+            return Ok(());
+        }
+        Some(Command::Check { yes }) => {
+            let store = Store::open_existing(&store_dir)?;
+            store.recover_interrupted_operations()?;
+            if check_and_repair(&store, yes)? {
+                return Ok(());
+            }
+            std::process::exit(1);
+        }
         None => {}
     }
 
@@ -116,7 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recipient = load_recipient(&store_dir)?;
     Store::probe_health(&store_dir)?;
     let store = Store::open(&store_dir)?;
+    store.recover_interrupted_operations()?;
     store.ensure_default()?;
+    store.ensure_safe_to_serve()?;
     let gpg = Gpg::from_cert(recipient.cert)?;
     gpg.ensure_recipient_secret_available().await?;
     info!(key = %gpg.fingerprint(), "using OpenPGP key");
@@ -142,6 +195,211 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(connection);
     info!("exiting");
     Ok(())
+}
+
+fn print_items(store: &Store) -> noirpass::Result<()> {
+    let items = store.search_items(&HashMap::new())?;
+    if items.is_empty() {
+        println!("no secrets");
+        return Ok(());
+    }
+
+    let collections: HashMap<String, String> = store
+        .list_collections()?
+        .into_iter()
+        .map(|collection| (collection.id, collection.label))
+        .collect();
+    let missing: HashSet<String> = store
+        .check_integrity()?
+        .missing_secret_items
+        .into_iter()
+        .map(|item| item.table_key)
+        .collect();
+
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        print_item(item, &collections, missing.contains(&item.id))?;
+    }
+    Ok(())
+}
+
+fn print_item(
+    item: &ItemMeta,
+    collections: &HashMap<String, String>,
+    missing_ciphertext: bool,
+) -> noirpass::Result<()> {
+    let collection_label = collections
+        .get(&item.collection)
+        .map_or("<missing collection>", String::as_str);
+    println!("id: {}", item.id);
+    println!("label: {}", serde_json::to_string(&item.label)?);
+    println!(
+        "collection: {} ({})",
+        serde_json::to_string(collection_label)?,
+        item.collection
+    );
+    println!("attributes: {}", serde_json::to_string(&item.attributes)?);
+    let ciphertext_state = if missing_ciphertext {
+        "missing"
+    } else {
+        "present"
+    };
+    println!("ciphertext: {ciphertext_state}");
+    Ok(())
+}
+
+fn confirm(prompt: &str, assume_yes: bool) -> noirpass::Result<bool> {
+    if assume_yes {
+        return Ok(true);
+    }
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        return Err(noirpass::Error::Config(
+            "interactive confirmation requires a terminal; pass --yes for unattended maintenance"
+                .into(),
+        ));
+    }
+
+    eprint!("{prompt} [y/N] ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    stdin.read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear reporting and repair keep each integrity category paired with its action"
+)]
+fn check_and_repair(store: &Store, assume_yes: bool) -> noirpass::Result<bool> {
+    let report = store.check_integrity()?;
+    if report.is_healthy() {
+        println!("store health: ok");
+        return Ok(true);
+    }
+
+    let mut collections = HashMap::new();
+    for item in &report.missing_secret_items {
+        if let Ok(collection) = store.get_collection(&item.metadata.collection) {
+            collections.insert(collection.id, collection.label);
+        }
+    }
+
+    for collection in &report.corrupt_collections {
+        eprintln!(
+            "corrupt collection entry: {} ({})",
+            collection.table_key, collection.error
+        );
+    }
+    for item in &report.missing_secret_items {
+        eprintln!(
+            "missing ciphertext: {} label={} collection={}",
+            item.table_key,
+            serde_json::to_string(&item.metadata.label)?,
+            collections
+                .get(&item.metadata.collection)
+                .map_or(item.metadata.collection.as_str(), String::as_str)
+        );
+    }
+    for item in &report.corrupt_items {
+        eprintln!("corrupt redb entry: {} ({})", item.table_key, item.error);
+    }
+    for item in &report.ciphertext_mismatches {
+        eprintln!(
+            "ciphertext digest mismatch: {} label={} (kept)",
+            item.table_key,
+            serde_json::to_string(&item.metadata.label)?
+        );
+    }
+    for item in &report.items_with_invalid_collection {
+        eprintln!(
+            "item with invalid collection: {} ({}) (kept)",
+            item.table_key, item.error
+        );
+    }
+    for (alias, collection) in &report.corrupt_aliases {
+        eprintln!("corrupt alias: {alias} targets missing collection {collection}");
+    }
+    for (alias, collection) in &report.aliases_with_corrupt_collection {
+        eprintln!("alias with corrupt collection: {alias} targets {collection} (kept)");
+    }
+    for file in &report.orphan_secret_files {
+        eprintln!("orphan ciphertext: {file} (kept; inspect before manual deletion)");
+    }
+    for file in &report.recovery_secret_files {
+        eprintln!("recoverable ciphertext: {file} (kept; inspect before manual deletion)");
+    }
+
+    let mut declined = 0usize;
+    for item in report.missing_secret_items {
+        if confirm(
+            &format!(
+                "delete stale redb entry {} with label {}?",
+                item.table_key,
+                serde_json::to_string(&item.metadata.label)?
+            ),
+            assume_yes,
+        )? {
+            store.delete_item(&item.table_key)?;
+            println!("deleted stale entry: {}", item.table_key);
+        } else {
+            declined += 1;
+        }
+    }
+    for item in report.corrupt_items {
+        if confirm(
+            &format!("delete corrupt redb entry {}?", item.table_key),
+            assume_yes,
+        )? {
+            if item.table_key.len() == 32
+                && item
+                    .table_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                store.delete_item(&item.table_key)?;
+            } else {
+                store.delete_item_metadata(&item.table_key)?;
+            }
+            println!("deleted corrupt entry: {}", item.table_key);
+        } else {
+            declined += 1;
+        }
+    }
+
+    for (alias, _) in report.corrupt_aliases {
+        if confirm(&format!("delete corrupt alias {alias}?"), assume_yes)? {
+            store.set_alias(&alias, None)?;
+            println!("deleted corrupt alias: {alias}");
+        } else {
+            declined += 1;
+        }
+    }
+
+    let remaining = store.check_integrity()?;
+    if remaining.is_healthy() {
+        println!("store health: repaired");
+        return Ok(true);
+    }
+    eprintln!(
+        "store health: needs attention ({} corrupt collections, {} missing ciphertext, {} corrupt items, {} ciphertext mismatches, {} items with invalid collections, {} corrupt aliases, {} aliases with corrupt collections, {} orphan ciphertext, {} recoverable ciphertext, {} repair declined)",
+        remaining.corrupt_collections.len(),
+        remaining.missing_secret_items.len(),
+        remaining.corrupt_items.len(),
+        remaining.ciphertext_mismatches.len(),
+        remaining.items_with_invalid_collection.len(),
+        remaining.corrupt_aliases.len(),
+        remaining.aliases_with_corrupt_collection.len(),
+        remaining.orphan_secret_files.len(),
+        remaining.recovery_secret_files.len(),
+        declined
+    );
+    Ok(false)
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -215,6 +473,7 @@ async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: u64) {
         .expect("installing SIGTERM handler");
     let idle_limit = Duration::from_secs(idle_exit);
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
+    let mut poison_ticker = tokio::time::interval(Duration::from_millis(100));
 
     loop {
         tokio::select! {
@@ -225,6 +484,12 @@ async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: u64) {
             _ = sigterm.recv() => {
                 info!("received SIGTERM");
                 return;
+            }
+            _ = poison_ticker.tick() => {
+                if state.store().is_poisoned() {
+                    info!("store commit outcome indeterminate; shutting down");
+                    return;
+                }
             }
             _ = ticker.tick() => {
                 if idle_exit == 0 {

@@ -17,7 +17,7 @@ use zbus::{fdo, interface};
 
 use crate::service::{
     SERVICE_PATH, SecretError, Service, ServiceState, alias_path, collection_path, item_path,
-    message_sender, register_item,
+    message_sender, object_removed_or_absent, register_item,
 };
 use crate::session::Secret;
 
@@ -75,6 +75,15 @@ impl Collection {
                 .ok_or_else(|| fdo::Error::UnknownObject(format!("alias {name} is not set"))),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn delete_for_test(
+        &self,
+        server: &ObjectServer,
+        connection: &zbus::Connection,
+    ) -> Result<OwnedObjectPath, SecretError> {
+        self.delete(server, connection).await
+    }
 }
 
 #[interface(name = "org.freedesktop.Secret.Collection")]
@@ -123,6 +132,7 @@ impl Collection {
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
         self.state.touch();
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
         let owner = message_sender(&header)?;
 
@@ -142,38 +152,22 @@ impl Collection {
         let emitter =
             SignalEmitter::new(connection, collection_path(&id)).map_err(SecretError::ZBus)?;
 
-        let existing = if replace {
-            self.state
-                .store()
-                .find_item_by_attrs_exact(&id, &attributes)?
-        } else {
-            None
-        };
-
-        if let Some(meta) = existing {
-            self.state.store().update_item(
-                &meta.id,
-                Some(&label),
-                None,
-                Some(&secret.content_type),
-                Some(&ciphertext),
-            )?;
-            let path = item_path(&id, &meta.id);
-            Self::item_changed(&emitter, path.clone()).await?;
-            self.items_changed(&emitter).await?;
-            return Ok((path, no_prompt()));
-        }
-
-        let meta = self.state.store().create_item(
+        let (meta, replaced) = self.state.store().create_or_replace_item(
             &id,
             &label,
             attributes,
             &secret.content_type,
             &ciphertext,
+            replace,
         )?;
         let path = register_item(server, &self.state, &id, &meta.id)
             .await
             .map_err(SecretError::ZBus)?;
+        if replaced {
+            Self::item_changed(&emitter, path.clone()).await?;
+            self.items_changed(&emitter).await?;
+            return Ok((path, no_prompt()));
+        }
         Self::item_created(&emitter, path.clone()).await?;
         // Refresh client-side caches of the `Items` property.
         self.items_changed(&emitter).await?;
@@ -192,31 +186,40 @@ impl Collection {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
         self.state.touch();
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
         let real_path = collection_path(&id);
 
-        let items = self.state.store().list_items(&id)?;
-        // Snapshot the aliases pointing here before the cascade removes them.
-        let aliases = self.state.store().list_aliases()?;
-        self.state.store().delete_collection(&id)?;
+        let deleted = self.state.store().delete_collection(&id)?;
 
-        // Unregister the item objects, the canonical collection object and
-        // any alias objects that resolved to this collection.
-        for item in items {
-            let _ = server
-                .remove::<crate::item::Item, _>(&item_path(&id, &item.id))
-                .await;
-        }
-        server
-            .remove::<Self, _>(&real_path)
-            .await
-            .map_err(SecretError::ZBus)?;
-        for (name, target) in aliases {
-            if target == id
-                && let Ok(path) = alias_path(&name)
+        // Unregister exactly the objects removed by the Store transaction.
+        // Attempt every removal even when one ObjectServer operation fails.
+        let mut cleanup_error = None;
+        for item_id in deleted.item_ids {
+            if let Err(err) = object_removed_or_absent(
+                server
+                    .remove::<crate::item::Item, _>(&item_path(&id, &item_id))
+                    .await,
+            ) && cleanup_error.is_none()
             {
-                let _ = server.remove::<Self, _>(&path).await;
+                cleanup_error = Some(err);
             }
+        }
+        if let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&real_path).await)
+            && cleanup_error.is_none()
+        {
+            cleanup_error = Some(err);
+        }
+        for name in deleted.aliases {
+            if let Ok(path) = alias_path(&name)
+                && let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&path).await)
+                && cleanup_error.is_none()
+            {
+                cleanup_error = Some(err);
+            }
+        }
+        if let Some(err) = cleanup_error {
+            return Err(SecretError::ZBus(err));
         }
 
         // CollectionDeleted is a Service signal, emitted from the service path.
@@ -242,6 +245,7 @@ impl Collection {
     /// Object paths of the items in this collection.
     #[zbus(property)]
     fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
+        self.state.touch();
         let id = self.resolve_id()?;
         let items = self
             .state
@@ -257,6 +261,7 @@ impl Collection {
     /// Human-readable label.
     #[zbus(property)]
     fn label(&self) -> fdo::Result<String> {
+        self.state.touch();
         let id = self.resolve_id()?;
         let meta = self
             .state
@@ -287,14 +292,15 @@ impl Collection {
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).
     #[zbus(property)]
-    #[allow(clippy::unused_self, reason = "zbus property getters take &self")]
     fn locked(&self) -> bool {
+        self.state.touch();
         false
     }
 
     /// Creation time, seconds since the Unix epoch.
     #[zbus(property)]
     fn created(&self) -> fdo::Result<u64> {
+        self.state.touch();
         let id = self.resolve_id()?;
         let meta = self
             .state
@@ -307,6 +313,7 @@ impl Collection {
     /// Last modification time, seconds since the Unix epoch.
     #[zbus(property)]
     fn modified(&self) -> fdo::Result<u64> {
+        self.state.touch();
         let id = self.resolve_id()?;
         let meta = self
             .state

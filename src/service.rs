@@ -19,6 +19,7 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{fdo, interface};
@@ -150,6 +151,7 @@ pub struct ServiceState {
     gpg: Gpg,
     sessions: Mutex<HashMap<OwnedObjectPath, SessionEntry>>,
     last_activity: Mutex<Instant>,
+    object_lifecycle: AsyncMutex<()>,
 }
 
 impl ServiceState {
@@ -161,6 +163,7 @@ impl ServiceState {
             gpg,
             sessions: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(Instant::now()),
+            object_lifecycle: AsyncMutex::new(()),
         })
     }
 
@@ -174,6 +177,11 @@ impl ServiceState {
     #[must_use]
     pub fn gpg(&self) -> &Gpg {
         &self.gpg
+    }
+
+    /// Serialize Store mutations with matching D-Bus object lifecycle changes.
+    pub(crate) async fn lock_object_lifecycle(&self) -> AsyncMutexGuard<'_, ()> {
+        self.object_lifecycle.lock().await
     }
 
     /// Record D-Bus activity now. Called at the top of every method handler
@@ -410,14 +418,25 @@ pub async fn register_alias(
     Ok(())
 }
 
+/// Treat an `ObjectServer` interface as successfully removed when already absent.
+pub(crate) fn object_removed_or_absent(result: zbus::Result<bool>) -> zbus::Result<()> {
+    match result {
+        Ok(_) | Err(zbus::Error::InterfaceNotFound) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// Remove the alias object at `/org/freedesktop/secrets/aliases/<name>`,
 /// if it exists.
-pub async fn unregister_alias(server: &ObjectServer, name: &str) {
+pub async fn unregister_alias(server: &ObjectServer, name: &str) -> zbus::Result<()> {
     if let Ok(path) = alias_path(name) {
-        let _ = server
-            .remove::<crate::collection::Collection, _>(&path)
-            .await;
+        object_removed_or_absent(
+            server
+                .remove::<crate::collection::Collection, _>(&path)
+                .await,
+        )?;
     }
+    Ok(())
 }
 
 /// Serve objects for every collection, item and alias already in the store.
@@ -543,6 +562,7 @@ impl Service {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
         self.state.touch();
+        let _lifecycle = self.state.lock_object_lifecycle().await;
 
         if !alias.is_empty()
             && let Some(existing) = self.state.store().read_alias(alias).map_err(fdo_err)?
@@ -633,13 +653,17 @@ impl Service {
 
         let mut out = HashMap::new();
         for path in items {
-            let Some((_, item_id)) = parse_item_path(path.as_str()) else {
+            let Some((collection_id, item_id)) = parse_item_path(path.as_str()) else {
                 continue;
             };
-            let Ok(meta) = self.state.store().get_item(&item_id) else {
-                continue;
+            let (meta, ciphertext) = match self.state.store().read_item_secret(&item_id) {
+                Ok(item) => item,
+                Err(crate::Error::NotFound(_)) => continue,
+                Err(err) => return Err(err.into()),
             };
-            let ciphertext = self.state.store().read_secret_file(&item_id)?;
+            if meta.collection != collection_id {
+                continue;
+            }
             let secret = self
                 .state
                 .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
@@ -673,9 +697,12 @@ impl Service {
         #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<(), SecretError> {
         self.state.touch();
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         if collection.as_str() == "/" {
             self.state.store().set_alias(name, None)?;
-            unregister_alias(server, name).await;
+            unregister_alias(server, name)
+                .await
+                .map_err(SecretError::ZBus)?;
             return Ok(());
         }
         let id = parse_collection_path(collection.as_str()).ok_or_else(|| {
@@ -693,6 +720,7 @@ impl Service {
     /// Object paths of all collections.
     #[zbus(property)]
     fn collections(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
+        self.state.touch();
         let collections = self.state.store().list_collections().map_err(fdo_err)?;
         Ok(collections
             .into_iter()
@@ -730,8 +758,11 @@ fn fdo_err(err: crate::Error) -> fdo::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+
     use crate::gpg::test_support::TestGnupg;
     use zbus::connection::Builder;
+    use zbus::export::futures_core::Stream;
 
     #[test]
     fn path_helpers_roundtrip() {
@@ -1001,6 +1032,421 @@ mod tests {
         let client = Builder::unix_stream(p1).p2p().build();
         let (server, client) = tokio::join!(server, client);
         (server.unwrap(), client.unwrap())
+    }
+
+    async fn next_stream_item<S>(stream: &mut S) -> Option<S::Item>
+    where
+        S: Stream + Unpin,
+    {
+        std::future::poll_fn(|context| Pin::new(&mut *stream).poll_next(context)).await
+    }
+
+    #[tokio::test]
+    async fn alias_removal_is_idempotent() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+        let server = server_conn.object_server();
+
+        unregister_alias(server, "unknown").await.unwrap();
+        unregister_alias(server, "unknown").await.unwrap();
+
+        state
+            .store()
+            .set_alias("twice", Some(crate::store::DEFAULT_COLLECTION_ID))
+            .unwrap();
+        register_alias(server, &state, "twice").await.unwrap();
+        state.store().set_alias("twice", None).unwrap();
+        unregister_alias(server, "twice").await.unwrap();
+        unregister_alias(server, "twice").await.unwrap();
+        assert_eq!(state.store().read_alias("twice").unwrap(), None);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single end-to-end regression verifies cleanup, object removal, and both signals"
+    )]
+    async fn collection_delete_ignores_already_absent_interface_and_finishes_cleanup() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let collection = state
+            .store()
+            .create_collection("delete", Some("delete_alias"))
+            .unwrap();
+        let first = state
+            .store()
+            .create_item(
+                &collection.id,
+                "first",
+                HashMap::new(),
+                "text/plain",
+                b"first",
+            )
+            .unwrap();
+        let second = state
+            .store()
+            .create_item(
+                &collection.id,
+                "second",
+                HashMap::new(),
+                "text/plain",
+                b"second",
+            )
+            .unwrap();
+        let (server_conn, client_conn) = p2p_pair(state.clone()).await;
+        let server = server_conn.object_server();
+        let collection_path = register_collection(server, &state, &collection.id)
+            .await
+            .unwrap();
+        let first_path = register_item(server, &state, &collection.id, &first.id)
+            .await
+            .unwrap();
+        let second_path = register_item(server, &state, &collection.id, &second.id)
+            .await
+            .unwrap();
+        register_alias(server, &state, "delete_alias")
+            .await
+            .unwrap();
+        let alias_object = alias_path("delete_alias").unwrap();
+        let deleted_rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .path(SERVICE_PATH)
+            .unwrap()
+            .interface("org.freedesktop.Secret.Service")
+            .unwrap()
+            .member("CollectionDeleted")
+            .unwrap()
+            .build();
+        let mut collection_deleted =
+            zbus::MessageStream::for_match_rule(deleted_rule, &client_conn, None)
+                .await
+                .unwrap();
+        let properties_rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .path(SERVICE_PATH)
+            .unwrap()
+            .interface("org.freedesktop.DBus.Properties")
+            .unwrap()
+            .member("PropertiesChanged")
+            .unwrap()
+            .build();
+        let mut properties_changed =
+            zbus::MessageStream::for_match_rule(properties_rule, &client_conn, None)
+                .await
+                .unwrap();
+        object_removed_or_absent(server.remove::<crate::item::Item, _>(&first_path).await).unwrap();
+
+        crate::collection::Collection::new(state.clone(), collection.id.clone())
+            .delete_for_test(server, &server_conn)
+            .await
+            .unwrap();
+
+        let deleted_signal = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_stream_item(&mut collection_deleted),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let (deleted_path,): (OwnedObjectPath,) = deleted_signal.body().deserialize().unwrap();
+        assert_eq!(deleted_path, collection_path);
+        let changed_signal = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_stream_item(&mut properties_changed),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let (interface, changed, _invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
+            changed_signal.body().deserialize().unwrap();
+        assert_eq!(interface, "org.freedesktop.Secret.Service");
+        assert!(changed.contains_key("Collections"));
+
+        assert!(matches!(
+            state.store().get_collection(&collection.id),
+            Err(crate::Error::NotFound(_))
+        ));
+        for path in [first_path, second_path] {
+            assert!(matches!(
+                server.interface::<_, crate::item::Item>(&path).await,
+                Err(zbus::Error::InterfaceNotFound)
+            ));
+        }
+        for path in [collection_path, alias_object] {
+            assert!(matches!(
+                server
+                    .interface::<_, crate::collection::Collection>(&path)
+                    .await,
+                Err(zbus::Error::InterfaceNotFound)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn item_delete_cannot_race_replacement_registration() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let collection = state
+            .store()
+            .get_collection(crate::store::DEFAULT_COLLECTION_ID)
+            .unwrap();
+        let attributes = HashMap::from([("service".to_string(), "mail".to_string())]);
+        let item = state
+            .store()
+            .create_item(
+                &collection.id,
+                "mail",
+                attributes.clone(),
+                "text/plain",
+                b"old",
+            )
+            .unwrap();
+        let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+        let server = server_conn.object_server().clone();
+        register_collection(&server, &state, &collection.id)
+            .await
+            .unwrap();
+        let item_object = register_item(&server, &state, &collection.id, &item.id)
+            .await
+            .unwrap();
+        let committed = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+
+        let replacement_state = state.clone();
+        let replacement_server = server.clone();
+        let replacement_collection = collection.id.clone();
+        let replacement_attributes = attributes.clone();
+        let replacement_committed = committed.clone();
+        let replacement_resume = resume.clone();
+        let replacement = tokio::spawn(async move {
+            let _lifecycle = replacement_state.lock_object_lifecycle().await;
+            let (metadata, replaced) = replacement_state
+                .store()
+                .create_or_replace_item(
+                    &replacement_collection,
+                    "updated",
+                    replacement_attributes,
+                    "text/plain",
+                    b"new",
+                    true,
+                )
+                .unwrap();
+            assert!(replaced);
+            replacement_committed.notify_one();
+            replacement_resume.notified().await;
+            register_item(
+                &replacement_server,
+                &replacement_state,
+                &replacement_collection,
+                &metadata.id,
+            )
+            .await
+            .unwrap();
+        });
+        committed.notified().await;
+
+        let deletion_state = state.clone();
+        let deletion_server = server.clone();
+        let deletion_item = item.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let deletion = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            let _lifecycle = deletion_state.lock_object_lifecycle().await;
+            deletion_state
+                .store()
+                .delete_item(&deletion_item.id)
+                .unwrap();
+            deletion_server
+                .remove::<crate::item::Item, _>(&item_path(
+                    &deletion_item.collection,
+                    &deletion_item.id,
+                ))
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!deletion.is_finished());
+
+        resume.notify_one();
+        replacement.await.unwrap();
+        deletion.await.unwrap();
+        assert!(matches!(
+            state.store().get_item(&item.id),
+            Err(crate::Error::NotFound(_))
+        ));
+        assert!(matches!(
+            server.interface::<_, crate::item::Item>(&item_object).await,
+            Err(zbus::Error::InterfaceNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn collection_delete_removes_concurrently_created_item_object() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let collection = state.store().create_collection("race", None).unwrap();
+        let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+        let server = server_conn.object_server().clone();
+        let collection_object = register_collection(&server, &state, &collection.id)
+            .await
+            .unwrap();
+        let committed = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+
+        let creation_state = state.clone();
+        let creation_server = server.clone();
+        let creation_collection = collection.id.clone();
+        let creation_committed = committed.clone();
+        let creation_resume = resume.clone();
+        let creation = tokio::spawn(async move {
+            let _lifecycle = creation_state.lock_object_lifecycle().await;
+            let metadata = creation_state
+                .store()
+                .create_item(
+                    &creation_collection,
+                    "created",
+                    HashMap::new(),
+                    "text/plain",
+                    b"ciphertext",
+                )
+                .unwrap();
+            creation_committed.notify_one();
+            creation_resume.notified().await;
+            register_item(
+                &creation_server,
+                &creation_state,
+                &creation_collection,
+                &metadata.id,
+            )
+            .await
+            .unwrap();
+            metadata.id
+        });
+        committed.notified().await;
+
+        let deletion_state = state.clone();
+        let deletion_server = server.clone();
+        let deletion_collection = collection.id.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let deletion = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            let _lifecycle = deletion_state.lock_object_lifecycle().await;
+            let deleted = deletion_state
+                .store()
+                .delete_collection(&deletion_collection)
+                .unwrap();
+            for item_id in deleted.item_ids {
+                deletion_server
+                    .remove::<crate::item::Item, _>(&item_path(&deletion_collection, &item_id))
+                    .await
+                    .unwrap();
+            }
+            deletion_server
+                .remove::<crate::collection::Collection, _>(&collection_path(&deletion_collection))
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!deletion.is_finished());
+
+        resume.notify_one();
+        let item_id = creation.await.unwrap();
+        deletion.await.unwrap();
+        assert!(matches!(
+            state.store().get_collection(&collection.id),
+            Err(crate::Error::NotFound(_))
+        ));
+        assert!(matches!(
+            server
+                .interface::<_, crate::item::Item>(item_path(&collection.id, &item_id))
+                .await,
+            Err(zbus::Error::InterfaceNotFound)
+        ));
+        assert!(matches!(
+            server
+                .interface::<_, crate::collection::Collection>(&collection_object)
+                .await,
+            Err(zbus::Error::InterfaceNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn collection_delete_removes_concurrently_registered_alias() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let collection = state.store().create_collection("race", None).unwrap();
+        let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+        let server = server_conn.object_server().clone();
+        register_collection(&server, &state, &collection.id)
+            .await
+            .unwrap();
+        let alias = "racing_alias";
+        let alias_object = alias_path(alias).unwrap();
+        let committed = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+
+        let alias_state = state.clone();
+        let alias_server = server.clone();
+        let alias_collection = collection.id.clone();
+        let alias_committed = committed.clone();
+        let alias_resume = resume.clone();
+        let alias_update = tokio::spawn(async move {
+            let _lifecycle = alias_state.lock_object_lifecycle().await;
+            alias_state
+                .store()
+                .set_alias(alias, Some(&alias_collection))
+                .unwrap();
+            alias_committed.notify_one();
+            alias_resume.notified().await;
+            register_alias(&alias_server, &alias_state, alias)
+                .await
+                .unwrap();
+        });
+        committed.notified().await;
+
+        let deletion_state = state.clone();
+        let deletion_server = server.clone();
+        let deletion_collection = collection.id.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let deletion = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            let _lifecycle = deletion_state.lock_object_lifecycle().await;
+            let deleted = deletion_state
+                .store()
+                .delete_collection(&deletion_collection)
+                .unwrap();
+            for name in deleted.aliases {
+                unregister_alias(&deletion_server, &name).await.unwrap();
+            }
+            deletion_server
+                .remove::<crate::collection::Collection, _>(&collection_path(&deletion_collection))
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!deletion.is_finished());
+
+        resume.notify_one();
+        alias_update.await.unwrap();
+        deletion.await.unwrap();
+        assert_eq!(state.store().read_alias(alias).unwrap(), None);
+        assert!(matches!(
+            server
+                .interface::<_, crate::collection::Collection>(&alias_object)
+                .await,
+            Err(zbus::Error::InterfaceNotFound)
+        ));
     }
 
     #[tokio::test]
