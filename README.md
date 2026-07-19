@@ -1,10 +1,6 @@
 # Noirpass
 
-Noirpass lets Linux applications save passwords through standard Secret Service support while
-protecting secret values with existing OpenPGP key and `gpg-agent`.
-
-Works with desktop keyring applications, including browsers, password managers, and
-`secret-tool`. Noirpass starts on demand and exits after inactivity.
+Minimal on-demand GPG-backed freedesktop Secret Service
 
 ## Before You Start
 
