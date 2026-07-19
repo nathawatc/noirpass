@@ -49,12 +49,13 @@ real `noirpass` binary against it. Exercises both session transports plus
 
 On generic Linux, need native deps:
 
-- `gnupg` (gpg binary, used once at startup + by gpg-agent)
+- `gnupg` (`gpg-agent` runtime and test fixture tooling; daemon does not spawn `gpg`)
 - `openssl` (Sequoia crypto backend)
 - `capnproto` (Sequoia IPC layer build script)
 - `pkg-config`
 
-Plus rustc ≥ 1.85 (edition 2024). Then `cargo build --release`.
+Plus rustc ≥ 1.89 for a release build (edition 2024). The locked test graph
+currently requires rustc ≥ 1.92. Then `cargo build --release`.
 
 ## Architecture Map
 

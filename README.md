@@ -48,8 +48,8 @@ Features:
   OpenPGP message, encrypted to every valid encryption subkey of your
   certificate. The store never sees plaintext; it only ever writes and
   reads ciphertext bytes.
-- **Recipient config** (`config.toml` plus `keys/recipient.pgp`): `noirpass
-  init` stores the exported public certificate and its primary fingerprint.
+- **Recipient config** (`config.toml` plus `keys/recipient.pgp`): `noirpass init`
+  stores the exported public certificate and its primary fingerprint.
   The daemon loads this copy directly; it does not list keys or export
   certificates from GnuPG.
 - **The store directory** and the `secrets/` subdirectory are created mode
@@ -73,12 +73,13 @@ nix develop -c cargo build --release
 
 The resulting binary is at `target/release/noirpass`.
 
-On a generic Linux system without Nix, install a recent Rust toolchain
-(edition 2024, so rustc ≥ 1.85) plus the native dependencies the
+On a generic Linux system without Nix, install Rust 1.89 or newer plus the
+native dependencies the
 dependency tree needs to build: GnuPG (`gnupg`, for user key management and
 `gpg-agent`), OpenSSL (`openssl`, Sequoia's crypto backend), Clang
 (`clang`, for OpenSSL bindgen), and `capnproto` (Sequoia's IPC layer build
-script). Then:
+script). The locked development/test graph currently requires Rust 1.92 or
+newer. Then:
 
 ```sh
 cargo build --release
@@ -86,25 +87,20 @@ cargo build --release
 
 ## Install & Activation
 
-1. Build the binary (above) and copy it somewhere on your `PATH` that
-   systemd user units can reference with an absolute path:
+Service files expect the binary at `/usr/bin/noirpass`. Adjust `ExecStart=` in
+both files if installing elsewhere.
 
-Drop-in for gnome-keyring Secret Service. Works with browsers,
-`secret-tool`, password managers — no client changes needed.
+1. Build the release binary as described above.
+2. Install the binary and service files:
 
-## Features
+   ```sh
+   sudo cp target/release/noirpass /usr/bin/
+   mkdir -p ~/.config/systemd/user ~/.local/share/dbus-1/services
+   cp systemd/noirpass.service ~/.config/systemd/user/
+   cp systemd/org.freedesktop.secrets.service ~/.local/share/dbus-1/services/
+   systemctl --user daemon-reload
+   ```
 
-- **Encrypted at rest** — decryptable only by your GPG key
-- **On-demand** — starts when needed, exits after idle timeout
-- **No master password** — uses existing GPG key and agent
-- **Familiar pinentry** — same passphrase prompts as `gpg`/`pass`
-
-## Quick Start
-
-Service files expect binary at `/usr/bin/noirpass`. Adjust `ExecStart=` in both files if installing
-elsewhere.
-
-Build:
 3. Initialize noirpass with an exported public recipient certificate:
 
    ```sh
@@ -114,52 +110,21 @@ Build:
    noirpass status
    ```
 
-4. Nothing needs to be started by hand. The next time any client (a
-   browser, `secret-tool`, etc.) calls a method on `org.freedesktop.secrets`,
-   the session D-Bus daemon activates `noirpass.service` automatically. The
-   daemon exits again after `--idle-exit` seconds of inactivity with no
-   open sessions, and is re-activated on the next request.
+4. Nothing needs to be started by hand. The next time a client calls
+   `org.freedesktop.secrets`, the session D-Bus daemon activates noirpass.
 
-### Switching from Gnome-Keyring on NixOS
+**NixOS**: the flake provides a devShell only. Build through the devShell, copy
+the binary (for example to `~/.local/bin/noirpass`), then edit `ExecStart=` in
+both service files to use that absolute path.
 
-Only one process can own the `org.freedesktop.secrets` bus name at a time.
-On most NixOS/GNOME setups that owner is gnome-keyring's Secret Service
-component. Check who currently owns it:
+### Switching from Gnome-Keyring
 
-```sh
-nix develop -c cargo build --release
-```
-
-Install (generic Linux):
-
-```sh
-sudo cp target/release/noirpass /usr/bin/
-cp systemd/noirpass.service ~/.config/systemd/user/
-cp systemd/org.freedesktop.secrets.service ~/.local/share/dbus-1/services/
-systemctl --user daemon-reload
-```
-
-Done. Daemon activates on first use. No manual start needed.
-
-**NixOS**: flake provides devShell only (no package output yet). Build via devShell, copy binary
-e.g. `~/.local/bin/noirpass`, then <u>edit `ExecStart=` in both service files to match</u>.
+Only one process can own `org.freedesktop.secrets`. Disable the existing Secret
+Service provider before activating noirpass.
 
 ## Usage
 
-Any Secret Service client works. With `secret-tool`:
-
-```sh
-# Store a secret
-secret-tool store --label='Email password' service email user alice
-Initialize once after creating/selecting your GPG key:
-
-```sh
-gpg --armor --export <FINGERPRINT> | noirpass init --recipient -
-noirpass status
-```
-
-Any Secret Service client works unmodified. Using `libsecret`'s
-`secret-tool`:
+Any Secret Service client works unmodified. Using `libsecret`'s `secret-tool`:
 
 ```sh
 secret-tool store --label='My login' service myservice username myuser
@@ -169,25 +134,45 @@ secret-tool lookup service myservice username myuser
 # prints the secret value
 ```
 
-The first call to either command activates the daemon if it isn't already
-running; `gpg-agent`'s normal pinentry/passphrase-cache behavior applies on
-first decrypt. Any other Secret Service client library — `oo7` (Rust),
-`libsecret` (C/GLib bindings), or gnome-keyring-compatible tooling — talks
-to noirpass the same way, since it implements the same D-Bus interface.
+The first call activates the daemon if needed. `gpg-agent` handles normal
+pinentry and passphrase caching.
 
 ## Configuration Reference
 
-| Flag | Env var | Default | Description |
-| --- | --- | --- | --- |
-| `--store-dir <path>` | `NOIRPASS_STORE` | `$XDG_DATA_HOME/noirpass` (falls back to `~/.local/share/noirpass`) | Directory holding `config.toml`, `keys/`, `index.redb`, and `secrets/`. |
-| `--idle-exit <secs>` | — | `300` | Exit after this many seconds with no D-Bus activity *and* no open sessions. `0` disables idle-exit. |
+| Flag                 | Env var          | Default                                                             | Description                                                                                         |
+| -------------------- | ---------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `--store-dir <path>` | `NOIRPASS_STORE` | `$XDG_DATA_HOME/noirpass` (falls back to `~/.local/share/noirpass`) | Directory holding `config.toml`, `keys/`, `index.redb`, and `secrets/`.                             |
+| `--idle-exit <secs>` | —                | `300`                                                               | Exit after this many seconds with no D-Bus activity _and_ no open sessions. `0` disables idle-exit. |
 
 Commands:
 
 ```sh
 noirpass init --recipient <FILE|->
 noirpass status
+noirpass list
+noirpass delete <ITEM-ID>
+noirpass check
 ```
+
+`list`, `delete`, and `check` are offline maintenance commands. Stop the
+daemon first because redb permits one writable process. `list` reads metadata
+only and never decrypts secret values. `delete` removes one indexed item and
+its ciphertext after confirmation. `check` compares redb item records with
+`secrets/*.gpg`, offers to remove stale records whose ciphertext is missing,
+and reports orphan ciphertext without deleting it. Pass `--yes` to `delete` or
+`check` for unattended maintenance.
+
+Monthly maintenance baseline:
+
+```sh
+systemctl --user stop noirpass.service
+noirpass status
+noirpass check
+systemctl --user start noirpass.service
+```
+
+Review dependency and security updates before release; do not update blindly.
+Back up the complete store directory before repair or dependency migration.
 
 `--bus-name` also exists but is hidden from `--help`; it lets tests point
 the daemon at a non-default well-known name and is not meant for normal use.
@@ -199,7 +184,7 @@ the daemon at a non-default well-known name and is not meant for normal use.
   lookup instead of requiring a decrypt per candidate. If your attribute
   values or labels are themselves sensitive (not just the secret value),
   be aware they are readable by anything that can read your store
-  directory, without needing `gpg-agent` at all. Only the secret *value*
+  directory, without needing `gpg-agent` at all. Only the secret _value_
   of each item is encrypted.
 - **Secret values only ever exist as plaintext in memory**, held in
   `zeroize::Zeroizing` buffers that are wiped when dropped. They are never
@@ -223,27 +208,13 @@ the daemon at a non-default well-known name and is not meant for normal use.
 
 ## Development
 
-All commands run inside the Nix devShell, which provides a matching
-rustc/cargo/clippy/rustfmt plus `cargo-llvm-cov` and every native
-dependency (openssl, clang, capnproto, dbus, libsecret, gnupg, pkg-config):
+All commands run inside the Nix devShell, which provides matching
+rustc/cargo/clippy/rustfmt plus `cargo-llvm-cov` and native dependencies
+(OpenSSL, Clang, Cap'n Proto, D-Bus, libsecret, GnuPG, and pkg-config):
 
-# Retrieve it
-secret-tool lookup service email user alice
+```sh
+nix develop -c cargo fmt --check
+nix develop -c cargo clippy --all-targets -- -D warnings
+nix develop -c cargo test
+nix develop -c cargo llvm-cov --all-targets --fail-under-lines 80
 ```
-
-First call activates daemon. `gpg-agent` handles passphrase prompts.
-
-## Options
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--store-dir` | `~/.local/share/noirpass` | Data directory |
-| `--key <fp>` | First secret key | GPG fingerprint for encryption |
-| `--idle-exit <s>` | 300 | Idle timeout (sec). `0` = never exit |
-
-## Security
-
-- Secret values encrypted at rest. Only your GPG key decrypts.
-- Labels and attributes stored in plaintext (needed for fast search).
-- noirpass never holds your private key — `gpg-agent` handles all auth.
-- Systemd service runs with restricted privileges.

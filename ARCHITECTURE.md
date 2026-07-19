@@ -4,9 +4,12 @@
 
 ```text
 ~/.local/share/noirpass/
+├── config.toml         # recipient fingerprint and certificate path
 ├── index.redb          # redb DB: collections, labels, attrs, aliases (plaintext)
+├── keys/
+│   └── recipient.pgp   # imported public recipient certificate
 └── secrets/
-    └── <id>.gpg         # GPG-encrypted secret (one per item)
+    └── <id>.gpg        # GPG-encrypted secret (one per item)
 ```
 
 - Store dir + `secrets/`: mode `0700`. Each `.gpg`: mode `0600`.
@@ -15,7 +18,7 @@
 ### Encryption / Decryption
 
 - Encryption in-process via Sequoia (`crypto-openssl` backend).
-- Recipient cert loaded once at startup via `gpg --export`.
+- Recipient cert imported once by `noirpass init` and loaded directly at startup.
 - Decryption delegates PKESK unlock to running `gpg-agent` (`sequoia-gpg-agent`).
 - Secret bytes never touch redb. Never logged.
 - Plaintext only in `zeroize::Zeroizing` buffers. Wiped on drop.
@@ -65,4 +68,13 @@ empty `CapabilityBoundingSet`.
 - **Plaintext metadata**: required for fast `SearchItems`. Acceptable since metadata
   less sensitive than secret values.
 - **No own lock/unlock**: `gpg-agent` handles everything (pinentry, passphrase caching, hardware tokens).
-- **gpg subprocess once**: cert exported at startup. Subsequent ops use Sequoia in-process.
+- **No daemon `gpg` subprocess**: encryption uses Sequoia in-process; decryption talks to `gpg-agent`.
+
+## Offline Maintenance
+
+- `noirpass list` lists indexed metadata without decrypting values.
+- `noirpass delete <ITEM-ID>` removes one item after confirmation.
+- `noirpass check` cross-checks redb item records and `.gpg` files. Missing
+  ciphertext can be repaired by deleting stale metadata; orphan ciphertext is
+  reported but retained to avoid destructive recovery guesses.
+- Maintenance commands open redb exclusively. Stop daemon first.
