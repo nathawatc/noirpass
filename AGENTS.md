@@ -5,14 +5,20 @@ See module doc comments (`//!` at top of each `src/*.rs`) for full rationale.
 
 ## Environment
 
-- NixOS. **No cargo, rustc, clippy, rustfmt, gpg on bare PATH**.
-  Every command must run through flake devShell:
+- Prefer the flake devShell. Try each tool command through Nix first:
 
   ```sh
   nix develop -c cargo <subcommand> ...
   ```
 
-  Bare `cargo ...` fails or picks wrong toolchain.
+  If that fails specifically because the `nix` executable is unavailable
+  (`nix: command not found`, exit 127), rerun the underlying command directly:
+
+  ```sh
+  cargo <subcommand> ...
+  ```
+
+  Do not fall back for other `nix develop` failures; fix or report those errors.
 
 - **Never run tests against real session bus.** Ambient
   `org.freedesktop.secrets` owned by gnome-keyring. Integration tests
@@ -59,20 +65,20 @@ currently requires rustc ≥ 1.92. Then `cargo build --release`.
 
 ## Architecture Map
 
-| File | Role |
-| --- | --- |
-| `src/lib.rs` | Crate root; declares modules, re-exports `Error`/`Result`. |
-| `src/main.rs` | CLI (`clap`), opens Store/Gpg, builds zbus connection, serves service object + pre-existing items (`register_existing`) before claiming well-known name, spawns `NameOwnerChanged` reaper, runs idle/signal shutdown loop. |
-| `src/service.rs` | `ServiceState` (shared Store/Gpg/session table/activity clock), `org.freedesktop.Secret.Service` D-Bus object, object-path/registration helpers. |
-| `src/collection.rs` | `org.freedesktop.Secret.Collection` D-Bus object. One type serves both `/collection/<id>` and `/aliases/<name>` paths via `Target::Collection` / `Target::Alias` enum. |
-| `src/item.rs` | `org.freedesktop.Secret.Item` D-Bus object. |
-| `src/session.rs` | `org.freedesktop.Secret.Session` D-Bus object (`Close` only) and the `Secret` wire struct (`(oayays)`). |
-| `src/crypto.rs` | Session transport crypto: `DhHandshake` (1024-bit MODP Diffie-Hellman → HKDF-SHA256 → AES-128 key) and `SessionCipher` (`Plain` / `Dh`, AES-128-CBC-PKCS7). Pure, synchronous, no I/O. |
-| `src/config.rs` | `config.toml` and `keys/recipient.pgp` import/load/status. `noirpass init --recipient <FILE|->` stores an exported public recipient certificate and fingerprint; daemon startup loads this config and fails clearly if missing/broken. |
-| `src/gpg.rs` | `Gpg`: owns the configured recipient certificate, encrypts in-process with Sequoia, decrypts by delegating PKESK unlock to the running `gpg-agent` (`sequoia-gpg-agent`). Runtime/startup code must not spawn `gpg`; `test_support::TestGnupg` may spawn it only for hermetic test fixtures. |
-| `src/store.rs` | `Store`: redb tables (`collections`, `items`, `aliases`) for metadata, plus `secrets/<id>.gpg` ciphertext files. Every method opens its own short-lived transaction; the store never sees plaintext. |
-| `src/error.rs` | Crate-wide `Error` enum (`thiserror`) and its mapping to `zbus::fdo::Error`. |
-| `tests/integration.rs` | End-to-end scenarios (real `noirpass` binary, private `dbus-daemon`, `oo7` client for both session transports, real `secret-tool`, restart persistence, signals, idle-exit) run through one shared process-wide `Harness`. |
+| File                   | Role                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`           | Crate root; declares modules, re-exports `Error`/`Result`.                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/main.rs`          | CLI (`clap`), opens Store/Gpg, builds zbus connection, serves service object + pre-existing items (`register_existing`) before claiming well-known name, spawns `NameOwnerChanged` reaper, runs idle/signal shutdown loop.                                                                                                                                                                                                                |
+| `src/service.rs`       | `ServiceState` (shared Store/Gpg/session table/activity clock), `org.freedesktop.Secret.Service` D-Bus object, object-path/registration helpers.                                                                                                                                                                                                                                                                                          |
+| `src/collection.rs`    | `org.freedesktop.Secret.Collection` D-Bus object. One type serves both `/collection/<id>` and `/aliases/<name>` paths via `Target::Collection` / `Target::Alias` enum.                                                                                                                                                                                                                                                                    |
+| `src/item.rs`          | `org.freedesktop.Secret.Item` D-Bus object.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/session.rs`       | `org.freedesktop.Secret.Session` D-Bus object (`Close` only) and the `Secret` wire struct (`(oayays)`).                                                                                                                                                                                                                                                                                                                                   |
+| `src/crypto.rs`        | Session transport crypto: `DhHandshake` (1024-bit MODP Diffie-Hellman → HKDF-SHA256 → AES-128 key) and `SessionCipher` (`Plain` / `Dh`, AES-128-CBC-PKCS7). Pure, synchronous, no I/O.                                                                                                                                                                                                                                                    |
+| `src/config.rs`        | `config.toml` and `keys/recipient.pgp` import/load/status. `noirpass init --recipient <FILE                                                                                                                                                                                                  | ->` stores an exported public recipient certificate and fingerprint; daemon startup loads this config and fails clearly if missing/broken. |
+| `src/gpg.rs`           | `Gpg`: owns the configured recipient certificate, encrypts in-process with Sequoia, decrypts by delegating PKESK unlock to the running `gpg-agent` (`sequoia-gpg-agent`). Runtime/startup code must not spawn `gpg`; `test_support::TestGnupg` may spawn it only for hermetic test fixtures.                                                                                                                                              |
+| `src/store.rs`         | `Store`: redb tables (`collections`, `items`, `aliases`) for metadata, plus `secrets/<id>.gpg` ciphertext files. Every method opens its own short-lived transaction; the store never sees plaintext.                                                                                                                                                                                                                                      |
+| `src/error.rs`         | Crate-wide `Error` enum (`thiserror`) and its mapping to `zbus::fdo::Error`.                                                                                                                                                                                                                                                                                                                                                              |
+| `tests/integration.rs` | End-to-end scenarios (real `noirpass` binary, private `dbus-daemon`, `oo7` client for both session transports, real `secret-tool`, restart persistence, signals, idle-exit) run through one shared process-wide `Harness`.                                                                                                                                                                                                                |
 
 ## Invariants
 
