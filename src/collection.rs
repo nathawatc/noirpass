@@ -99,7 +99,7 @@ impl Collection {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
         let results = self
             .state
@@ -131,7 +131,7 @@ impl Collection {
         #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
         let owner = message_sender(&header)?;
@@ -185,7 +185,7 @@ impl Collection {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
         let real_path = collection_path(&id);
@@ -245,7 +245,7 @@ impl Collection {
     /// Object paths of the items in this collection.
     #[zbus(property)]
     fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
         let items = self
             .state
@@ -261,7 +261,7 @@ impl Collection {
     /// Human-readable label.
     #[zbus(property)]
     fn label(&self) -> fdo::Result<String> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
         let meta = self
             .state
@@ -279,7 +279,7 @@ impl Collection {
         label: &str,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
         self.state
             .store()
@@ -292,15 +292,15 @@ impl Collection {
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).
     #[zbus(property)]
-    fn locked(&self) -> bool {
-        self.state.touch();
-        false
+    fn locked(&self) -> fdo::Result<bool> {
+        let _activity = self.state.activity()?;
+        Ok(false)
     }
 
     /// Creation time, seconds since the Unix epoch.
     #[zbus(property)]
     fn created(&self) -> fdo::Result<u64> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
         let meta = self
             .state
@@ -313,7 +313,7 @@ impl Collection {
     /// Last modification time, seconds since the Unix epoch.
     #[zbus(property)]
     fn modified(&self) -> fdo::Result<u64> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
         let meta = self
             .state

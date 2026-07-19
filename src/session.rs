@@ -75,7 +75,7 @@ impl Session {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(), SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let owner = message_sender(&header)?;
         self.close_with_removal(&owner, server.remove::<Self, _>(&self.path))
             .await

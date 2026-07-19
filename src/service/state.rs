@@ -27,12 +27,32 @@ struct SessionEntry {
     owner: String,
 }
 
+struct ActivityState {
+    active_calls: usize,
+    had_activity: bool,
+    last_activity: Instant,
+    shutting_down: bool,
+}
+
+/// Marks one in-flight D-Bus method as activity until handler return.
+pub(crate) struct ActivityGuard<'a> {
+    state: &'a ServiceState,
+}
+
+impl Drop for ActivityGuard<'_> {
+    fn drop(&mut self) {
+        let mut activity = self.state.activity.lock().expect("activity lock poisoned");
+        activity.active_calls -= 1;
+        activity.last_activity = Instant::now();
+    }
+}
+
 /// State shared by every D-Bus object of the daemon.
 pub struct ServiceState {
     store: Store,
     gpg: Gpg,
     sessions: Mutex<HashMap<OwnedObjectPath, SessionEntry>>,
-    last_activity: Mutex<Instant>,
+    activity: Mutex<ActivityState>,
     object_lifecycle: AsyncMutex<()>,
 }
 
@@ -44,7 +64,12 @@ impl ServiceState {
             store,
             gpg,
             sessions: Mutex::new(HashMap::new()),
-            last_activity: Mutex::new(Instant::now()),
+            activity: Mutex::new(ActivityState {
+                active_calls: 0,
+                had_activity: false,
+                last_activity: Instant::now(),
+                shutting_down: false,
+            }),
             object_lifecycle: AsyncMutex::new(()),
         })
     }
@@ -66,19 +91,48 @@ impl ServiceState {
         self.object_lifecycle.lock().await
     }
 
-    /// Record D-Bus activity now. Called at the top of every method handler
-    /// so the idle-exit timer only fires on a genuinely quiet bus.
-    pub fn touch(&self) {
-        *self.last_activity.lock().expect("activity lock poisoned") = Instant::now();
+    /// Track one D-Bus method until its handler returns.
+    pub(crate) fn activity(&self) -> fdo::Result<ActivityGuard<'_>> {
+        let mut activity = self.activity.lock().expect("activity lock poisoned");
+        if activity.shutting_down {
+            return Err(fdo::Error::Failed("service is shutting down".into()));
+        }
+        activity.active_calls += 1;
+        activity.had_activity = true;
+        Ok(ActivityGuard { state: self })
     }
 
-    /// Time elapsed since the last recorded activity.
-    #[must_use]
-    pub fn idle_for(&self) -> Duration {
-        self.last_activity
+    /// Atomically select idle shutdown against application-handler admission.
+    pub fn try_begin_idle_shutdown(&self, idle_exit: i64) -> bool {
+        if idle_exit < 0 {
+            return false;
+        }
+
+        let mut activity = self.activity.lock().expect("activity lock poisoned");
+        if activity.shutting_down || activity.active_calls != 0 {
+            return false;
+        }
+        if !self
+            .sessions
             .lock()
-            .expect("activity lock poisoned")
-            .elapsed()
+            .expect("session lock poisoned")
+            .is_empty()
+        {
+            return false;
+        }
+
+        let eligible = if idle_exit == 0 {
+            activity.had_activity
+        } else {
+            let idle_limit = Duration::from_secs(
+                u64::try_from(idle_exit).expect("positive idle timeout must fit u64"),
+            );
+            activity.last_activity.elapsed() >= idle_limit
+        };
+        if eligible {
+            activity.shutting_down = true;
+        }
+        eligible
     }
 
     /// Number of currently open sessions.

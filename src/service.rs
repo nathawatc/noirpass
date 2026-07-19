@@ -115,7 +115,7 @@ impl Service {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let (output, cipher) = match algorithm {
             ALGORITHM_PLAIN => (
                 Value::from("")
@@ -167,7 +167,7 @@ impl Service {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
 
         if !alias.is_empty()
@@ -211,7 +211,7 @@ impl Service {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let unlocked = self
             .state
             .store()
@@ -226,18 +226,24 @@ impl Service {
     /// Unlock objects. Everything is already unlocked, so all inputs are
     /// returned immediately and no prompt is needed.
     #[zbus(out_args("unlocked", "prompt"))]
-    fn unlock(&self, objects: Vec<OwnedObjectPath>) -> (Vec<OwnedObjectPath>, OwnedObjectPath) {
-        self.state.touch();
-        (objects, root_path())
+    fn unlock(
+        &self,
+        objects: Vec<OwnedObjectPath>,
+    ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
+        let _activity = self.state.activity()?;
+        Ok((objects, root_path()))
     }
 
     /// Lock objects. Deliberate no-op: the paths are echoed back as "locked",
     /// but `Locked` stays `false` — `gpg-agent` is the real gate on secret
     /// access, so noirpass has no lock state of its own.
     #[zbus(out_args("locked", "prompt"))]
-    fn lock(&self, objects: Vec<OwnedObjectPath>) -> (Vec<OwnedObjectPath>, OwnedObjectPath) {
-        self.state.touch();
-        (objects, root_path())
+    fn lock(
+        &self,
+        objects: Vec<OwnedObjectPath>,
+    ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
+        let _activity = self.state.activity()?;
+        Ok((objects, root_path()))
     }
 
     /// Fetch the secrets of multiple items in one round trip.
@@ -251,7 +257,7 @@ impl Service {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, Secret>, SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let owner = message_sender(&header)?;
         if self.state.session_cipher(&session, &owner).is_none() {
             return Err(SecretError::NoSession(format!("no session {session}")));
@@ -282,7 +288,7 @@ impl Service {
     /// Resolve an alias to a collection path. Unknown aliases return `/`.
     #[zbus(out_args("collection"))]
     fn read_alias(&self, name: &str) -> fdo::Result<OwnedObjectPath> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         match self.state.store().read_alias(name).map_err(fdo_err)? {
             Some(id) if self.state.store().get_collection(&id).is_ok() => Ok(collection_path(&id)),
             _ => Ok(root_path()),
@@ -302,7 +308,7 @@ impl Service {
         collection: OwnedObjectPath,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<(), SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
         if collection.as_str() == "/" {
             self.state.store().set_alias(name, None)?;
@@ -326,7 +332,7 @@ impl Service {
     /// Object paths of all collections.
     #[zbus(property)]
     fn collections(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let collections = self.state.store().list_collections().map_err(fdo_err)?;
         Ok(collections
             .into_iter()
@@ -411,18 +417,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_registry_and_idle_tracker() {
+    async fn session_registry_adds_looks_up_and_removes() {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&gnupg, tmp.path());
 
-        // Idle tracker: touch resets the clock.
-        std::thread::sleep(Duration::from_millis(20));
-        assert!(state.idle_for() >= Duration::from_millis(10));
-        state.touch();
-        assert!(state.idle_for() < Duration::from_millis(10));
-
-        // Session registry add/lookup/remove.
         assert_eq!(state.session_count(), 0);
 
         let p1 = state
@@ -436,6 +435,75 @@ mod tests {
         assert!(state.remove_session(&p1, ":1.7"));
         assert!(!state.remove_session(&p1, ":1.7"));
         assert_eq!(state.session_count(), 0);
+    }
+
+    #[test]
+    fn active_handler_blocks_positive_idle_exit_and_starts_fresh_period() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let activity = state.activity().unwrap();
+
+        std::thread::sleep(Duration::from_millis(1_100));
+        assert!(!state.try_begin_idle_shutdown(1));
+
+        drop(activity);
+        assert!(!state.try_begin_idle_shutdown(1));
+        std::thread::sleep(Duration::from_millis(1_100));
+        assert!(state.try_begin_idle_shutdown(1));
+    }
+
+    #[test]
+    fn completed_handler_invalidates_stale_elapsed_time() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+
+        std::thread::sleep(Duration::from_millis(1_100));
+        let activity = state.activity().unwrap();
+        drop(activity);
+
+        assert!(!state.try_begin_idle_shutdown(1));
+    }
+
+    #[test]
+    fn shutdown_rejects_new_handler_admission() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        drop(state.activity().unwrap());
+
+        assert!(state.try_begin_idle_shutdown(0));
+        assert!(state.activity().is_err());
+    }
+
+    #[test]
+    fn zero_idle_exit_waits_for_first_completed_handler() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+
+        assert!(!state.try_begin_idle_shutdown(-1));
+        assert!(!state.try_begin_idle_shutdown(0));
+        let activity = state.activity().unwrap();
+        assert!(!state.try_begin_idle_shutdown(0));
+        drop(activity);
+        assert!(state.try_begin_idle_shutdown(0));
+    }
+
+    #[test]
+    fn open_session_blocks_idle_shutdown() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        drop(state.activity().unwrap());
+        let session = state
+            .register_session(SessionCipher::Plain, ":1.7".into())
+            .unwrap();
+
+        assert!(!state.try_begin_idle_shutdown(0));
+        assert!(state.remove_session(&session, ":1.7"));
+        assert!(state.try_begin_idle_shutdown(0));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 use zbus::export::futures_core::Stream;
 
-use noirpass::config::{init_from_path, load_recipient, status};
+use noirpass::config::{Config, init_from_path, load_recipient, status};
 use noirpass::gpg::Gpg;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
 use noirpass::session::Session;
@@ -37,11 +37,16 @@ struct Cli {
     #[arg(long, env = "NOIRPASS_STORE")]
     store_dir: Option<PathBuf>,
 
-    /// Exit after this many seconds without D-Bus activity (0 = never).
+    /// Exit after this many seconds without Noirpass application activity (0 = after activity, -1 = never).
     ///
     /// The daemon only exits when there are also no open sessions.
-    #[arg(long, default_value_t = 300)]
-    idle_exit: u64,
+    /// Defaults to `config.toml` `idle_exit`, or 300 when omitted.
+    #[arg(
+        long,
+        allow_negative_numbers = true,
+        value_parser = clap::value_parser!(i64).range(-1..)
+    )]
+    idle_exit: Option<i64>,
 
     /// Well-known bus name to claim (testing hook).
     #[arg(long, hide = true, default_value = "org.freedesktop.secrets")]
@@ -171,6 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(store = %store_dir.display(), "opening store");
 
+    let idle_exit = cli.idle_exit.unwrap_or(Config::load(&store_dir)?.idle_exit);
     let recipient = load_recipient(&store_dir)?;
     Store::probe_health(&store_dir)?;
     let store = Store::open(&store_dir)?;
@@ -194,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     connection.request_name(cli.bus_name.as_str()).await?;
     info!(name = %cli.bus_name, "secret service ready");
 
-    wait_for_shutdown(&state, cli.idle_exit).await;
+    wait_for_shutdown(&state, idle_exit).await;
 
     // Graceful shutdown: release the name so a future activation starts a
     // fresh instance, then drop the connection.
@@ -478,12 +484,11 @@ async fn reap_vanished_clients(connection: zbus::Connection, state: Arc<ServiceS
     }
 }
 
-/// Wait until SIGTERM/SIGINT, or (when `idle_exit > 0`) until the bus has
-/// been quiet for `idle_exit` seconds *and* no sessions are open.
-async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: u64) {
+/// Wait until SIGTERM/SIGINT or configured idle exit with no open sessions.
+/// Zero exits promptly after observed Noirpass application activity completes; -1 waits forever.
+async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: i64) {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("installing SIGTERM handler");
-    let idle_limit = Duration::from_secs(idle_exit);
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
     let mut poison_ticker = tokio::time::interval(Duration::from_millis(100));
 
@@ -502,16 +507,15 @@ async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: u64) {
                     info!("store commit outcome indeterminate; shutting down");
                     return;
                 }
+                if idle_exit == 0 && state.try_begin_idle_shutdown(idle_exit) {
+                    info!("Noirpass application activity complete");
+                    return;
+                }
             }
             _ = ticker.tick() => {
-                if idle_exit == 0 {
-                    continue;
-                }
-                let idle = state.idle_for();
-                let sessions = state.session_count();
-                debug!(?idle, sessions, "idle check");
-                if idle >= idle_limit && sessions == 0 {
-                    info!(?idle, "idle limit reached");
+                debug!(idle_exit, "idle check");
+                if idle_exit > 0 && state.try_begin_idle_shutdown(idle_exit) {
+                    info!(idle_exit, "idle limit reached");
                     return;
                 }
             }

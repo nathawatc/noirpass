@@ -16,6 +16,8 @@ const CONFIG_FILE: &str = "config.toml";
 const KEYS_DIR: &str = "keys";
 const RECIPIENT_REL: &str = "keys/recipient.pgp";
 const CONFIG_VERSION: i64 = 1;
+/// Default daemon inactivity timeout in seconds.
+pub const DEFAULT_IDLE_EXIT_SECONDS: i64 = 300;
 const INIT_HINT: &str = "run noirpass init --recipient ...";
 
 /// Minimal persisted config.
@@ -27,6 +29,8 @@ pub struct Config {
     pub recipient_fingerprint: String,
     /// Relative path to the stored binary recipient certificate.
     pub recipient_cert: PathBuf,
+    /// Daemon inactivity timeout in seconds; zero exits after activity, -1 disables idle exit.
+    pub idle_exit: i64,
 }
 
 /// Full recipient material loaded from disk.
@@ -90,6 +94,7 @@ impl Config {
     /// Write `config.toml`.
     pub fn write(&self, data_dir: &Path) -> Result<()> {
         validate_recipient_cert_path(&self.recipient_cert)?;
+        validate_idle_exit(self.idle_exit)?;
         fs::create_dir_all(data_dir)?;
         fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
 
@@ -97,6 +102,7 @@ impl Config {
         doc["version"] = value(self.version);
         doc["recipient_fingerprint"] = value(self.recipient_fingerprint.as_str());
         doc["recipient_cert"] = value(self.recipient_cert.to_string_lossy().as_ref());
+        doc["idle_exit"] = value(self.idle_exit);
         let text = doc.to_string();
         atomic_write(&config_path(data_dir), text.as_bytes(), 0o600)?;
         Ok(())
@@ -258,6 +264,9 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
         }
     }
 
+    let idle_exit =
+        Config::load(data_dir).map_or(DEFAULT_IDLE_EXIT_SECONDS, |config| config.idle_exit);
+
     fs::create_dir_all(data_dir.join(KEYS_DIR))?;
     fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
     fs::set_permissions(data_dir.join(KEYS_DIR), fs::Permissions::from_mode(0o700))?;
@@ -271,6 +280,7 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
         version: CONFIG_VERSION,
         recipient_fingerprint: new_fingerprint,
         recipient_cert: PathBuf::from(RECIPIENT_REL),
+        idle_exit,
     };
     if let Err(err) = config.write(data_dir) {
         if let Err(restore_err) = restore_recipient_cert(&cert_path, previous_cert.as_deref()) {
@@ -406,6 +416,15 @@ pub fn status(data_dir: &Path) -> Status {
     out
 }
 
+fn validate_idle_exit(idle_exit: i64) -> Result<()> {
+    if idle_exit < -1 {
+        return Err(Error::Config(
+            "config.toml `idle_exit` must be -1 or greater".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_config(text: &str) -> Result<Config> {
     let doc = text
         .parse::<DocumentMut>()
@@ -425,10 +444,20 @@ fn parse_config(text: &str) -> Result<Config> {
         .ok_or_else(|| Error::Config("config.toml missing string `recipient_cert`".into()))?;
     let recipient_cert = PathBuf::from(recipient_cert);
     validate_recipient_cert_path(&recipient_cert)?;
+    let idle_exit = doc
+        .get("idle_exit")
+        .map(|item| {
+            item.as_integer()
+                .ok_or_else(|| Error::Config("config.toml `idle_exit` must be an integer".into()))
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_IDLE_EXIT_SECONDS);
+    validate_idle_exit(idle_exit)?;
     Ok(Config {
         version,
         recipient_fingerprint,
         recipient_cert,
+        idle_exit,
     })
 }
 
@@ -438,6 +467,55 @@ mod tests {
     use crate::gpg::test_support::TestGnupg;
     use sequoia_openpgp::cert::CertBuilder;
     use sequoia_openpgp::serialize::Serialize;
+
+    #[test]
+    fn config_idle_exit_defaults_and_accepts_override() {
+        let base = "version = 1\nrecipient_fingerprint = \"fingerprint\"\nrecipient_cert = \"keys/recipient.pgp\"\n";
+
+        assert_eq!(
+            parse_config(base).unwrap().idle_exit,
+            DEFAULT_IDLE_EXIT_SECONDS
+        );
+        assert_eq!(
+            parse_config(&format!("{base}idle_exit = 42\n"))
+                .unwrap()
+                .idle_exit,
+            42
+        );
+    }
+
+    #[test]
+    fn generated_config_idle_exit_matches_parser_fallback() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+        let generated = fs::read_to_string(config_path(tmp.path())).unwrap();
+        assert!(generated.contains(&format!("idle_exit = {DEFAULT_IDLE_EXIT_SECONDS}")));
+        let without_idle_exit = generated
+            .lines()
+            .filter(|line| !line.starts_with("idle_exit = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            Config::load(tmp.path()).unwrap().idle_exit,
+            parse_config(&without_idle_exit).unwrap().idle_exit
+        );
+    }
+
+    #[test]
+    fn config_idle_exit_accepts_minus_one_and_rejects_lower_values() {
+        let base = "version = 1\nrecipient_fingerprint = \"fingerprint\"\nrecipient_cert = \"keys/recipient.pgp\"\n";
+
+        assert_eq!(
+            parse_config(&format!("{base}idle_exit = -1\n"))
+                .unwrap()
+                .idle_exit,
+            -1
+        );
+        let err = parse_config(&format!("{base}idle_exit = -2\n")).unwrap_err();
+        assert!(err.to_string().contains("must be -1 or greater"));
+    }
 
     #[test]
     fn init_imports_armored_recipient_cert() {
@@ -459,6 +537,46 @@ mod tests {
 
         assert_eq!(config.recipient_fingerprint, gnupg.fingerprint());
         assert!(load_recipient(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn reinit_preserves_configured_idle_exit() {
+        let gnupg = TestGnupg::new();
+
+        for idle_exit in [-1, 600] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+            config.idle_exit = idle_exit;
+            config.write(tmp.path()).unwrap();
+
+            let reinitialized = init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+
+            assert_eq!(reinitialized.idle_exit, idle_exit);
+            assert_eq!(Config::load(tmp.path()).unwrap().idle_exit, idle_exit);
+        }
+    }
+
+    #[test]
+    fn reinit_config_without_idle_exit_uses_default() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+        let path = config_path(tmp.path());
+        let config = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("idle_exit = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, config).unwrap();
+
+        let reinitialized = init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+
+        assert_eq!(reinitialized.idle_exit, DEFAULT_IDLE_EXIT_SECONDS);
+        assert_eq!(
+            Config::load(tmp.path()).unwrap().idle_exit,
+            DEFAULT_IDLE_EXIT_SECONDS
+        );
     }
 
     #[test]

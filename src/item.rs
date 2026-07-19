@@ -57,7 +57,7 @@ impl Item {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(Secret,), SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let owner = message_sender(&header)?;
         let (meta, ciphertext) = self.state.store().read_item_secret(&self.id)?;
         let secret = self
@@ -77,7 +77,7 @@ impl Item {
         secret: Secret,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(), SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let owner = message_sender(&header)?;
         let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
         self.state.store().update_item(
@@ -97,7 +97,7 @@ impl Item {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
         self.state.store().delete_item(&self.id)?;
 
@@ -127,15 +127,15 @@ impl Item {
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).
     #[zbus(property)]
-    fn locked(&self) -> bool {
-        self.state.touch();
-        false
+    fn locked(&self) -> fdo::Result<bool> {
+        let _activity = self.state.activity()?;
+        Ok(false)
     }
 
     /// Lookup attributes.
     #[zbus(property)]
     fn attributes(&self) -> fdo::Result<HashMap<String, String>> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let meta = self
             .state
             .store()
@@ -147,7 +147,7 @@ impl Item {
     /// Replace the lookup attributes (bumps the modified timestamp).
     #[zbus(property)]
     fn set_attributes(&self, attributes: HashMap<String, String>) -> fdo::Result<()> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         self.state
             .store()
             .update_item(&self.id, None, Some(attributes), None, None)
@@ -158,7 +158,7 @@ impl Item {
     /// Human-readable label.
     #[zbus(property)]
     fn label(&self) -> fdo::Result<String> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let meta = self
             .state
             .store()
@@ -170,7 +170,7 @@ impl Item {
     /// Relabel the item (bumps the modified timestamp).
     #[zbus(property)]
     fn set_label(&self, label: &str) -> fdo::Result<()> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         self.state
             .store()
             .update_item(&self.id, Some(label), None, None, None)
@@ -181,7 +181,7 @@ impl Item {
     /// Creation time, seconds since the Unix epoch.
     #[zbus(property)]
     fn created(&self) -> fdo::Result<u64> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let meta = self
             .state
             .store()
@@ -193,7 +193,7 @@ impl Item {
     /// Last modification time, seconds since the Unix epoch.
     #[zbus(property)]
     fn modified(&self) -> fdo::Result<u64> {
-        self.state.touch();
+        let _activity = self.state.activity()?;
         let meta = self
             .state
             .store()

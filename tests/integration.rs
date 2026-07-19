@@ -195,10 +195,11 @@ fn spawn_daemon(
     fake_gpg_dir: Option<&Path>,
 ) -> Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_noirpass"));
-    cmd.arg("--store-dir")
-        .arg(store)
-        .args(["--idle-exit", idle_exit])
-        .env("DBUS_SESSION_BUS_ADDRESS", bus)
+    cmd.arg("--store-dir").arg(store);
+    if !idle_exit.is_empty() {
+        cmd.args(["--idle-exit", idle_exit]);
+    }
+    cmd.env("DBUS_SESSION_BUS_ADDRESS", bus)
         .env("GNUPGHOME", gnupg)
         .env("RUST_LOG", "info");
     if let Some(fake_gpg_dir) = fake_gpg_dir {
@@ -279,7 +280,7 @@ impl Harness {
             &bus_address,
             gnupg_tmp.path(),
             store_tmp.path(),
-            "0",
+            "-1",
             Some(&fake_gpg_dir),
         );
         wait_for_name(&bus_address);
@@ -341,7 +342,7 @@ impl Harness {
             &self.bus_address,
             &self.gnupg_home,
             &self.store_dir,
-            "0",
+            "-1",
             Some(&self.fake_gpg_dir),
         );
         *self.daemon.lock().unwrap() = fresh;
@@ -1062,8 +1063,8 @@ fn daemon_runtime_does_not_spawn_gpg() {
     );
 }
 
-/// Scenario 9: a daemon with `--idle-exit 1` and zero traffic exits 0 on its
-/// own. Runs on a private bus + store so it cannot disturb `end_to_end`.
+/// Scenario 9: a daemon with `idle_exit = 0` in `config.toml` exits after its
+/// client disconnects. Runs on a private bus + store so it cannot disturb `end_to_end`.
 #[tokio::test]
 async fn idle_exit_daemon_exits() {
     let h = harness(); // shared hermetic GNUPGHOME (env is process-global anyway)
@@ -1072,11 +1073,16 @@ async fn idle_exit_daemon_exits() {
     let store = tempfile::tempdir().unwrap();
     let cert = export_public_cert(&h.gnupg_home);
     init_noirpass_store(store.path(), &cert);
+    let config_path = store.path().join("config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(config.contains("idle_exit = 300"));
+    config = config.replace("idle_exit = 300", "idle_exit = 0");
+    std::fs::write(config_path, config).unwrap();
     let mut daemon = spawn_daemon(
         &address,
         &h.gnupg_home,
         store.path(),
-        "1",
+        "",
         Some(&h.fake_gpg_dir),
     );
     wait_for_name(&address);
@@ -1101,9 +1107,8 @@ async fn idle_exit_daemon_exits() {
         );
     }
 
-    // Idle ticker runs every 10s; the second tick (~10s) sees idle >= 1s.
     let status = tokio::task::spawn_blocking(move || {
-        wait_with_timeout(&mut daemon, Duration::from_secs(25))
+        wait_with_timeout(&mut daemon, Duration::from_secs(10))
     })
     .await
     .unwrap();
@@ -1132,7 +1137,7 @@ async fn disconnect_unregisters_owned_session() {
         &address,
         &h.gnupg_home,
         store.path(),
-        "0",
+        "-1",
         Some(&h.fake_gpg_dir),
     );
     wait_for_name(&address);
@@ -1198,7 +1203,7 @@ async fn stale_session_path_is_not_reissued_after_restart() {
         &address,
         &h.gnupg_home,
         store.path(),
-        "0",
+        "-1",
         Some(&h.fake_gpg_dir),
     );
     wait_for_name(&address);
@@ -1220,7 +1225,7 @@ async fn stale_session_path_is_not_reissued_after_restart() {
         &address,
         &h.gnupg_home,
         store.path(),
-        "0",
+        "-1",
         Some(&h.fake_gpg_dir),
     );
     wait_for_name(&address);
@@ -1551,7 +1556,7 @@ fn daemon_recovers_pending_backup_and_quarantine() {
             &address,
             &h.gnupg_home,
             store_dir.path(),
-            "0",
+            "-1",
             Some(&h.fake_gpg_dir),
         );
         wait_for_name(&address);
@@ -1592,7 +1597,7 @@ fn daemon_rejects_path_unsafe_collection_identity() {
         &address,
         &h.gnupg_home,
         store.path(),
-        "0",
+        "-1",
         Some(&h.fake_gpg_dir),
     );
 
@@ -1618,7 +1623,7 @@ fn daemon_rejects_store_with_missing_index() {
         &address,
         &h.gnupg_home,
         store.path(),
-        "0",
+        "-1",
         Some(&h.fake_gpg_dir),
     );
     let status = wait_with_timeout(&mut daemon, Duration::from_secs(10));
@@ -1710,7 +1715,7 @@ fn daemon_rejects_recipient_without_matching_secret_key() {
         &address,
         &h.gnupg_home,
         store.path(),
-        "0",
+        "-1",
         Some(&h.fake_gpg_dir),
     );
     let status = wait_with_timeout(&mut daemon, Duration::from_secs(10));
@@ -1772,7 +1777,7 @@ fn cli_init_stdin_and_status_exit_codes() {
         &address,
         gnupg.path(),
         store.path(),
-        "0",
+        "-1",
         Some(fake_gpg_tmp.path()),
     );
     wait_for_name(&address);

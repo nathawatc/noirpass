@@ -170,15 +170,10 @@ NOIRPASS_STORE=/path/to/store noirpass <COMMAND>
 
 Use same location in daemon service configuration and maintenance commands.
 
-### Idle Exit
+### Configuration
 
-Daemon exits after five inactive minutes with no client session. Change timeout with:
-
-```sh
-noirpass --idle-exit 600
-```
-
-Use `--idle-exit 0` to keep daemon running.
+By default, the daemon exits after five inactive minutes with no client session. See
+[Configuration Guide](docs/CONFIG.md) for config location, idle-exit behavior, and overrides.
 
 ## Maintenance
 

@@ -63,7 +63,8 @@ noirpass/
 
 - Store, `keys`, and `secrets` directories: mode `0700`.
 - Config, recipient certificate, and ciphertext files: mode `0600`.
-- `config.toml`: format version, expected primary fingerprint, store-relative certificate path.
+- `config.toml`: format version, expected primary fingerprint, store-relative certificate path, and
+  optional daemon idle-exit timeout.
 - `index.redb`: collection records, item metadata, aliases.
 - Item metadata: id, collection id, label, attributes, content type, ciphertext SHA-256,
   created/modified timestamps.
@@ -90,6 +91,13 @@ not OpenPGP confidentiality.
 6. Creates redb store and default collection.
 
 Configured certificate path: relative, non-empty, only normal components; cannot escape store root.
+`idle_exit` is an optional integer greater than or equal to -1. Omission defaults to 300; positive
+values are inactivity seconds, zero exits promptly after observed Noirpass application activity
+completes with no sessions, and -1 disables idle exit. Command-line `--idle-exit` takes precedence.
+Zero-mode tracks whether application-handler activity occurred so daemon cannot exit during startup,
+plus in-flight method guards so method entry cannot be mistaken for completion. Reinitialization
+preserves the existing config's deserialized `idle_exit`, including the default for configs where
+field is absent.
 
 Startup and `status` validate config version, certificate presence, configured/actual fingerprint
 equality, usable encryption key, corresponding secret-key availability through `gpg-agent`.
@@ -192,8 +200,11 @@ Emit `PropertiesChanged` whenever cached aggregate properties change:
 
 Clients cache these properties; may never refresh without signal.
 
-Every D-Bus method and property handler must call `state.touch()` before other work. Handler lacking
-touch is invisible to idle tracking.
+Every Noirpass application method and property handler must hold `state.activity()` guard for
+complete handler lifetime. Admission, active-call count, completion timestamp, and shutdown
+selection share one activity-state mutex. Once idle shutdown is selected, new application handlers
+receive a standard D-Bus failure instead of admission. Handler lacking guard is invisible to idle
+tracking; dropping guard marks completion.
 
 Session access owner-bound. Sender unique bus name must match session-opening owner. Session and
 object registration/removal must remain daemon-atomic. `NameOwnerChanged` reaps all vanished-client
@@ -214,12 +225,17 @@ At-rest OpenPGP and D-Bus session transport are independent layers.
 
 ## Idle and Shutdown
 
-Every D-Bus handler updates activity clock. Idle exit requires both:
+Every completed Noirpass application method and property handler resets activity clock. Positive
+idle exit requires all three:
 
 - elapsed inactivity reaches configured threshold;
-- session table is empty.
+- session table is empty;
+- no application handler is active.
 
-Timeout `0` disables idle exit. Vanished-client reaping prevents leaked sessions pinning daemon
+Timeout `0` exits after first completed Noirpass application handler once no handler and no session
+remain. Standard zbus-managed calls such as `org.freedesktop.DBus.Peer.Ping` and
+`org.freedesktop.DBus.Introspectable.Introspect` do not count as Noirpass application activity.
+Timeout `-1` disables idle exit. Vanished-client reaping prevents leaked sessions pinning daemon
 forever. SIGINT/SIGTERM trigger graceful name release and process exit.
 
 ## CLI Maintenance Contracts
@@ -255,7 +271,7 @@ build derives version from `Cargo.toml`, runs hermetic tests, installs activatio
 
 ### D-Bus Changes
 
-1. Touch activity first.
+1. Acquire activity guard first and hold it through handler completion.
 2. Validate sender/session ownership where secret transport is involved.
 3. Hold object lifecycle guard across persistent/object-server transition.
 4. Keep aliases and object registration synchronized.
