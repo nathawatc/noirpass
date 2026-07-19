@@ -48,7 +48,7 @@ num-bigint-dig = "0.9.1"
 rand = "0.10.2"
 redb = "4.1.0"
 secrecy = "0.10.3"
-sequoia-gpg-agent = "0.7.0-pqc.1"
+sequoia-gpg-agent = "0.6.2"
 sequoia-openpgp = { version = "2.4.1", default-features = false, features = ["crypto-openssl"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
