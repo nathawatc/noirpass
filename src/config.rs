@@ -164,6 +164,7 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
                     let _ = fs::remove_file(&tmp);
                     return Err(Error::Io(err));
                 }
+                fs::File::open(parent)?.sync_all()?;
                 return Ok(());
             }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
