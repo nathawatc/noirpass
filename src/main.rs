@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 use zbus::export::futures_core::Stream;
@@ -20,9 +21,15 @@ use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
 use noirpass::session::Session;
 use noirpass::store::{ItemMeta, Store};
 
+const CLI_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().bold())
+    .usage(AnsiColor::Green.on_default().bold())
+    .literal(AnsiColor::Cyan.on_default().bold())
+    .placeholder(AnsiColor::Cyan.on_default());
+
 /// Minimal on-demand GPG-backed freedesktop Secret Service.
 #[derive(Parser, Debug)]
-#[command(name = "noirpass", version, about)]
+#[command(name = "noirpass", version, about, styles = CLI_STYLES)]
 struct Cli {
     /// Directory for the metadata index and encrypted secret files.
     ///
