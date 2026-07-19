@@ -26,7 +26,10 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
+mod files;
+mod integrity;
 mod persistence;
+mod recovery;
 
 /// id → `serde_json(CollectionMeta)`
 const COLLECTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("collections");
