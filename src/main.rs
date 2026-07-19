@@ -387,7 +387,12 @@ fn check_and_repair(store: &Store, assume_yes: bool) -> noirpass::Result<bool> {
         return Ok(true);
     }
     eprintln!(
-        "store health: needs attention ({} corrupt collections, {} missing ciphertext, {} corrupt items, {} ciphertext mismatches, {} items with invalid collections, {} corrupt aliases, {} aliases with corrupt collections, {} orphan ciphertext, {} recoverable ciphertext, {} repair declined)",
+        concat!(
+            "store health: needs attention ({} corrupt collections, {} missing ciphertext, ",
+            "{} corrupt items, {} ciphertext mismatches, {} items with invalid collections, ",
+            "{} corrupt aliases, {} aliases with corrupt collections, {} orphan ciphertext, ",
+            "{} recoverable ciphertext, {} repair declined)"
+        ),
         remaining.corrupt_collections.len(),
         remaining.missing_secret_items.len(),
         remaining.corrupt_items.len(),

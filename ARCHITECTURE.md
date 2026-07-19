@@ -13,21 +13,21 @@ D-Bus-activated daemon serves one shared store; exits after inactivity only with
 
 ## Component Map
 
-| File                   | Responsibility                                                                                                                                            |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/lib.rs`           | Crate modules and shared `Error`/`Result` exports.                                                                                                        |
-| `src/main.rs`          | CLI, setup/maintenance commands, startup validation, D-Bus connection, object registration, name ownership, vanished-client reaper, idle/signal shutdown. |
-| `src/config.rs`        | Versioned config, recipient import/load/status, path validation, atomic durable writes, unsafe rotation prevention.                                       |
-| `src/gpg.rs`           | Recipient validation, in-process OpenPGP encryption, `gpg-agent` decryption and secret-key availability checks.                                           |
-| `src/store.rs`         | redb metadata, ciphertext files, transactional mutation, recovery, integrity reporting, poisoned-store handling.                                          |
-| `src/service.rs`       | Shared state, Service interface, session ownership, object-path helpers, registration coordination.                                                       |
-| `src/collection.rs`    | Collection interface for canonical and alias-backed paths.                                                                                                |
-| `src/item.rs`          | Item properties, secret transport conversion, update, and deletion.                                                                                       |
-| `src/session.rs`       | Session object and Secret Service wire structure.                                                                                                         |
-| `src/crypto.rs`        | Pure session transport handshake and encryption.                                                                                                          |
-| `src/error.rs`         | Internal error taxonomy and D-Bus error mapping.                                                                                                          |
-| `tests/integration.rs` | Real binary, private bus, ephemeral GnuPG key, oo7/libsecret flows, restart and lifecycle scenarios.                                                      |
-| `systemd/*`            | User service and D-Bus activation definitions.                                                                                                            |
+| File                                 | Responsibility                                                                                                                                            |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`                         | Crate modules and shared `Error`/`Result` exports.                                                                                                        |
+| `src/main.rs`                        | CLI, setup/maintenance commands, startup validation, D-Bus connection, object registration, name ownership, vanished-client reaper, idle/signal shutdown. |
+| `src/config.rs`                      | Versioned config, recipient import/load/status, path validation, atomic durable writes, unsafe rotation prevention.                                       |
+| `src/gpg.rs`                         | Recipient validation, in-process OpenPGP encryption, `gpg-agent` decryption and secret-key availability checks.                                           |
+| `src/store.rs` and `src/store/*`     | redb metadata, ciphertext files, transactional mutation, recovery, integrity reporting, poisoned-store handling.                                          |
+| `src/service.rs` and `src/service/*` | Shared state, Service interface, session ownership, object-path helpers, registration coordination.                                                       |
+| `src/collection.rs`                  | Collection interface for canonical and alias-backed paths.                                                                                                |
+| `src/item.rs`                        | Item properties, secret transport conversion, update, and deletion.                                                                                       |
+| `src/session.rs`                     | Session object and Secret Service wire structure.                                                                                                         |
+| `src/crypto.rs`                      | Pure session transport handshake and encryption.                                                                                                          |
+| `src/error.rs`                       | Internal error taxonomy and D-Bus error mapping.                                                                                                          |
+| `tests/integration.rs`               | Real binary, private bus, ephemeral GnuPG key, oo7/libsecret flows, restart and lifecycle scenarios.                                                      |
+| `systemd/*`                          | User service and D-Bus activation definitions.                                                                                                            |
 
 Module-level `//!` comments document local rationale; keep synchronized with this document.
 
