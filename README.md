@@ -20,51 +20,99 @@ provider for `org.freedesktop.secrets` before using Noirpass.
 
 ## Install
 
-Flake supports `x86_64-linux` and `aarch64-linux`:
+Do not enable `noirpass.service`. Session D-Bus starts it on demand.
+
+<details>
+<summary><h3>NixOS</h3></summary>
+
+### Install from Flake
+
+Flake supports `x86_64-linux` and `aarch64-linux`. Enable `nix-command` and `flakes`, then install
+directly from Codeberg:
 
 ```sh
-nix build
-./result/bin/noirpass --help
-
-nix run . -- --help
-nix flake check
-```
-
-Install package and activation files into current user profile:
-
-```sh
-nix profile install .#noirpass
+nix profile install git+https://codeberg.org/koharu/noirpass.git#noirpass
 systemctl --user daemon-reload
 ```
 
-Install directly from Codeberg by replacing `.#noirpass` with
-`git+https://codeberg.org/koharu/noirpass.git#noirpass`. Do not enable service; D-Bus starts it on
-demand. NixOS users: see [NixOS Flake Guide](docs/NIXOS-FLAKE.md) for flake input setup and Secret
-Service conflict handling.
+From an existing checkout, use `nix profile install .#noirpass` instead. Package includes executable,
+D-Bus activation file, and systemd user unit with immutable Nix store paths.
 
-### Manual Installation
+For declarative flake-input installation, updates, and Secret Service conflict handling, see
+[NixOS Flake Guide](docs/NIXOS-FLAKE.md).
 
-Build release binary with provided development environment:
+<details>
+<summary><h4>Manual Installation</h4></summary>
+
+Build inside provided development environment:
 
 ```sh
 nix develop -c cargo build --release
 ```
 
-Without Nix, install Rust 1.95 or newer plus GnuPG, OpenSSL, Clang, Cap'n Proto, and `pkg-config`,
-then run `cargo build --release`.
-
-Install binary and service files:
+Install executable and activation files for current user, replacing `/usr/bin/noirpass` with NixOS
+user-local path:
 
 ```sh
-sudo cp target/release/noirpass /usr/bin/
-mkdir -p ~/.config/systemd/user ~/.local/share/dbus-1/services
-cp systemd/noirpass.service ~/.config/systemd/user/
-cp systemd/org.freedesktop.secrets.service ~/.local/share/dbus-1/services/
+install -Dm755 target/release/noirpass "$HOME/.local/bin/noirpass"
+install -Dm644 systemd/noirpass.service \
+  "$HOME/.config/systemd/user/noirpass.service"
+install -Dm644 systemd/org.freedesktop.secrets.service \
+  "$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+
+sed -i "s|/usr/bin/noirpass|$HOME/.local/bin/noirpass|g" \
+  "$HOME/.config/systemd/user/noirpass.service" \
+  "$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+
 systemctl --user daemon-reload
 ```
 
-Service files expect Noirpass at `/usr/bin/noirpass`. If installed elsewhere, update `ExecStart` and
-`Exec` in copied service files with its absolute path.
+Rebuild and replace executable manually after each update.
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>Arch Linux</h3></summary>
+
+Install Arch build tools, clone repository, then build included [`arch/PKGBUILD`](arch/PKGBUILD):
+
+```sh
+sudo pacman -S --needed base-devel git
+git clone https://codeberg.org/koharu/noirpass.git
+cd noirpass/arch
+makepkg -si
+systemctl --user daemon-reload
+```
+
+PKGBUILD installs executable to `/usr/bin`, D-Bus activation file to `/usr/share/dbus-1/services`,
+and systemd user unit to `/usr/lib/systemd/user`.
+
+</details>
+
+### Build from Source
+
+Install Rust 1.95 or newer plus GnuPG, OpenSSL, Clang, Cap'n Proto, and `pkg-config`, then build from
+repository root:
+
+```sh
+cargo build --locked --release
+```
+
+Install executable and activation files:
+
+```sh
+sudo install -Dm755 target/release/noirpass /usr/bin/noirpass
+install -Dm644 systemd/noirpass.service \
+  "$HOME/.config/systemd/user/noirpass.service"
+install -Dm644 systemd/org.freedesktop.secrets.service \
+  "$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+systemctl --user daemon-reload
+```
+
+If executable is installed elsewhere, replace `/usr/bin/noirpass` in both copied activation files
+with its absolute path.
 
 ## Set Up
 
@@ -87,28 +135,15 @@ through `gpg-agent`.
 Do not replace recipient key after storing secrets. Existing secrets remain encrypted for original
 key. Noirpass rejects unsafe recipient changes in non-empty store.
 
-## Use
-
-No manual daemon start needed. Compatible applications activate Noirpass when accessing Secret
-Service. Example with `secret-tool`:
-
-```sh
-secret-tool store --label='My login' service myservice username myuser
-secret-tool lookup service myservice username myuser
-```
-
-First call activates daemon. `gpg-agent` displays pinentry when needed and applies configured
-passphrase cache policy.
-
 ## Commands
 
-```text
-noirpass init --recipient <FILE|->   Set up recipient from file or standard input
-noirpass status                     Check setup and secret-key availability
-noirpass list                       List saved entries without showing secret values
-noirpass delete <ITEM-ID>           Delete one entry after confirmation
-noirpass check                      Check store and offer safe repairs
-```
+| Command                               | Description                                      |
+| ------------------------------------- | ------------------------------------------------ |
+| `noirpass init --recipient <FILE\|->` | Set up recipient from file or standard input     |
+| `noirpass status`                     | Check setup and secret-key availability          |
+| `noirpass list`                       | List saved entries without showing secret values |
+| `noirpass delete <ITEM-ID>`           | Delete one entry after confirmation              |
+| `noirpass check`                      | Check store and offer safe repairs               |
 
 Use `--yes` with `delete` or `check` to skip confirmation.
 
@@ -162,16 +197,18 @@ OpenPGP secret key available; loss makes saved secret values unrecoverable.
 `noirpass check` removes only stale entries after confirmation. Unmatched encrypted files remain
 reported and preserved.
 
-## Security Expectations
+> [!NOTE]
+> Security Expectations
+>
+> - Secret values are OpenPGP-encrypted on disk.
+> - Entry names and search fields are not encrypted. Avoid sensitive information in labels and
+>   attributes.
+> - Access depends on GnuPG key, `gpg-agent`, pinentry, and passphrase policy.
+> - Anyone controlling unlocked desktop session may ask Secret Service clients to access secrets.
+>   Lock session when unattended.
 
-- Secret values are OpenPGP-encrypted on disk.
-- Entry names and search fields are not encrypted. Avoid sensitive information in labels and
-  attributes.
-- Access depends on GnuPG key, `gpg-agent`, pinentry, and passphrase policy.
-- Anyone controlling unlocked desktop session may ask Secret Service clients to access secrets.
-  Lock session when unattended.
-
-## Troubleshooting
+<details>
+<summary><h3>Troubleshooting</h3></summary>
 
 ### Service Does Not Start
 
@@ -185,12 +222,12 @@ journalctl --user -u noirpass.service
 
 Check Noirpass path in both installed service files.
 
-### Another Keyring Answers Requests
+#### Another Keyring Answers Requests
 
 Another provider owns `org.freedesktop.secrets`. Disable its Secret Service component, sign out,
 then sign in again.
 
-### Secret Key Is Unavailable
+#### Secret Key Is Unavailable
 
 Confirm key exists and `gpg-agent` can use it:
 
@@ -201,10 +238,8 @@ noirpass status
 
 For hardware-backed keys, connect token and verify normal GnuPG decryption works.
 
-### Maintenance Says Store Is in Use
+#### Maintenance Says Store Is in Use
 
 Stop daemon and manually started Noirpass processes, then rerun command.
 
-## License
-
-Apache-2.0. See `LICENSE`.
+</details>
