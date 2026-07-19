@@ -7,14 +7,14 @@ pkgdesc="Minimal on-demand GPG-backed freedesktop Secret Service"
 arch=('x86_64' 'aarch64')
 url="https://codeberg.org/koharu/noirpass"
 license=('Apache-2.0')
-depends=('dbus' 'gcc-libs' 'glibc' 'openssl')
-makedepends=('cargo')
+depends=('dbus' 'gcc-libs' 'glibc' 'gnupg' 'openssl')
+makedepends=('capnproto' 'cargo' 'clang' 'pkgconf')
 provides=('org.freedesktop.secrets')
 
 _tag=v${pkgver}
 
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/${_tag}.tar.gz")
-b2sums=('SKIP')
+b2sums=('c929c094aeeeb1f44bafc30ebff190010519c0673d41c295a7d54753c9776da946fc321ab2a1866559311aa50f56070f76537c8ce734df95cd218b0ee06cc87d')
 
 prepare() {
 	cd "${pkgname}"
