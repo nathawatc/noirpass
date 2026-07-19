@@ -127,7 +127,16 @@ impl DhHandshake {
         let p = prime();
         let one = BigUint::from(1u32);
         let p_minus_one = &p - &one;
-        let client = BigUint::from_bytes_be(client_public);
+        let significant = match client_public.iter().position(|byte| *byte != 0) {
+            Some(offset) => &client_public[offset..],
+            None => &[],
+        };
+        if significant.len() > GROUP_BYTES {
+            return Err(Error::Crypto(
+                "client public key exceeds the 1024-bit group size".into(),
+            ));
+        }
+        let client = BigUint::from_bytes_be(significant);
 
         if client <= one || client >= p_minus_one {
             return Err(Error::Crypto(
@@ -292,6 +301,17 @@ mod tests {
         let p_minus_one = &p - BigUint::from(1u32);
         assert!(make().derive(&pad_be(&p_minus_one)).is_err());
         assert!(make().derive(&pad_be(&p)).is_err());
+        assert!(make().derive(&[0xff; GROUP_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn client_pubkey_accepts_leading_zero_padding() {
+        let server = DhHandshake::generate();
+        let client = DhHandshake::generate();
+        let mut padded = vec![0u8; 1024];
+        padded.extend(client.public_bytes());
+
+        assert!(matches!(server.derive(&padded), Ok(SessionCipher::Dh(_))));
     }
 
     #[test]
