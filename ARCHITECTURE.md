@@ -247,6 +247,10 @@ parent, private temporary directory, W^X protection, namespace/kernel/control-gr
 Default unit assumes store under `%h/.local/share` and binary at `/usr/bin/noirpass`. Configurable
 store path changes may require matching `ReadWritePaths` update.
 
+Flake exposes package, app, check, and development-shell outputs for supported Linux systems. Package
+build derives version from `Cargo.toml`, runs hermetic tests, installs activation files, and replaces
+`/usr/bin/noirpass` in packaged copies with immutable store path.
+
 ## Implementation Guidelines
 
 ### D-Bus Changes

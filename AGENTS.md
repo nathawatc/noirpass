@@ -79,3 +79,8 @@ All gates must pass with zero warnings. Claim pass only with command output.
 - `AGENTS.md`: AI workflow, constraints, commands, and safety rules.
 - `ARCHITECTURE.md`: design, internals, invariants, persistence protocol, implementation guidance,
   and test architecture.
+
+## Environment-Dependent Tests
+
+Tests requiring an ambient session bus or externally running D-Bus service must remain optional and
+skip when unavailable. Mandatory tests must use isolated repository-owned fixtures.

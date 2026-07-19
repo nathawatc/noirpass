@@ -20,11 +20,38 @@ provider for `org.freedesktop.secrets` before using Noirpass.
 
 ## Install
 
-Build release binary with provided Nix environment:
+Flake supports `x86_64-linux` and `aarch64-linux`:
+
+```sh
+nix build
+./result/bin/noirpass --help
+
+nix run . -- --help
+nix flake check
+```
+
+Install package and activation files into current user profile:
+
+```sh
+nix profile install .#noirpass
+systemctl --user daemon-reload
+```
+
+Install directly from Codeberg by replacing `.#noirpass` with
+`git+https://codeberg.org/koharu/noirpass.git#noirpass`. Do not enable service; D-Bus starts it on
+demand. NixOS users: see [NixOS Flake Guide](docs/NIXOS-FLAKE.md) for flake input setup and Secret
+Service conflict handling.
+
+### Manual Installation
+
+Build release binary with provided development environment:
 
 ```sh
 nix develop -c cargo build --release
 ```
+
+Without Nix, install Rust 1.95 or newer plus GnuPG, OpenSSL, Clang, Cap'n Proto, and `pkg-config`,
+then run `cargo build --release`.
 
 Install binary and service files:
 
@@ -41,7 +68,7 @@ Service files expect Noirpass at `/usr/bin/noirpass`. If installed elsewhere, up
 
 ## Set Up
 
-Find key fingerprint:
+Find full key fingerprint:
 
 ```sh
 gpg --list-secret-keys --keyid-format long
@@ -54,7 +81,7 @@ gpg --armor --export <FINGERPRINT> | noirpass init --recipient -
 noirpass status
 ```
 
-`noirpass status` should report `initialized: yes`; also confirms matching secret-key access
+`noirpass status` should report `initialized: yes`; it also confirms matching secret-key access
 through `gpg-agent`.
 
 Do not replace recipient key after storing secrets. Existing secrets remain encrypted for original
@@ -63,16 +90,15 @@ key. Noirpass rejects unsafe recipient changes in non-empty store.
 ## Use
 
 No manual daemon start needed. Compatible applications activate Noirpass when accessing Secret
-Service.
-
-Example with `secret-tool`:
+Service. Example with `secret-tool`:
 
 ```sh
 secret-tool store --label='My login' service myservice username myuser
 secret-tool lookup service myservice username myuser
 ```
 
-GnuPG displays pinentry when key needs unlocking and applies configured passphrase cache policy.
+First call activates daemon. `gpg-agent` displays pinentry when needed and applies configured
+passphrase cache policy.
 
 ## Commands
 

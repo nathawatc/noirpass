@@ -867,20 +867,43 @@ async fn s7_persistence_across_restart() {
 
 /// Scenario 8: a real libsecret client (`secret-tool`) stores and looks up.
 #[cfg(feature = "secret-tool-smoke")]
+async fn secret_service_available_at(address: &str) -> bool {
+    let Ok(builder) = zbus::connection::Builder::address(address) else {
+        return false;
+    };
+    let Ok(connection) = builder.build().await else {
+        return false;
+    };
+    let Ok(proxy) = zbus::fdo::DBusProxy::new(&connection).await else {
+        return false;
+    };
+    let name = zbus::names::BusName::try_from(SERVICE_NAME).expect("valid service bus name");
+    proxy.name_has_owner(name).await.unwrap_or(false)
+}
+
+#[cfg(feature = "secret-tool-smoke")]
+async fn secret_tool_smoke_environment_available(address: Option<&str>) -> bool {
+    let Some(address) = address.filter(|address| !address.is_empty()) else {
+        return false;
+    };
+    if !secret_service_available_at(address).await {
+        return false;
+    }
+    Command::new("secret-tool")
+        .arg("--help")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(feature = "secret-tool-smoke")]
 async fn s8_secret_tool_smoke() {
-    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-        eprintln!("skipping secret-tool smoke: no D-Bus session address");
+    let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
+    if !secret_tool_smoke_environment_available(address.as_deref()).await {
+        eprintln!("scenario 8 skipped: session bus, Secret Service, or secret-tool unavailable");
         return;
     }
-    match Command::new("secret-tool").arg("--version").output() {
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping secret-tool smoke: secret-tool is unavailable");
-            return;
-        }
-        Err(err) => panic!("failed to probe secret-tool: {err}"),
-    }
-    wait_for_name(&harness().bus_address);
 
     let store = tokio::task::spawn_blocking(|| {
         let mut child = Command::new("secret-tool")
@@ -915,6 +938,18 @@ async fn s8_secret_tool_smoke() {
         "hunter2",
         "lookup must return the stored secret"
     );
+}
+
+#[cfg(feature = "secret-tool-smoke")]
+#[tokio::test]
+async fn optional_secret_tool_smoke_skips_unavailable_environment() {
+    assert!(!secret_tool_smoke_environment_available(None).await);
+
+    let dir = tempfile::tempdir().unwrap();
+    let missing_socket = dir.path().join("missing-session-bus");
+    let address = format!("unix:path={}", missing_socket.display());
+
+    assert!(!secret_tool_smoke_environment_available(Some(&address)).await);
 }
 
 /// Scenario 10: `CollectionCreated` and `ItemCreated` signals fire.
