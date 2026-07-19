@@ -76,7 +76,7 @@ Rebuild and replace executable manually after each update.
 <details>
 <summary><h3>Arch Linux</h3></summary>
 
-Install Arch build tools, clone repository, then build included [`arch/PKGBUILD`](arch/PKGBUILD):
+Install Arch build tools, clone repository, then build included [`archlinux/PKGBUILD`](archlinux/PKGBUILD):
 
 ```sh
 sudo pacman -S --needed base-devel git
