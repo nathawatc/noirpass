@@ -71,6 +71,7 @@ fn write_recipient(store: &Path, file_name: &str, userid: &str) -> PathBuf {
 
 fn run_init(store: &Path, recipient: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store)
         .args(["init", "--recipient"])
@@ -118,6 +119,7 @@ fn run_tty_eof(store: &Path, input: &[u8]) -> Output {
 fn run_tty_with_input(store: &Path, input: &[u8]) -> Output {
     let (mut master, slave) = open_pty();
     let child = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store)
         .arg("deinit")
@@ -134,6 +136,7 @@ fn run_tty_with_input(store: &Path, input: &[u8]) -> Output {
 
 fn run_piped(store: &Path, args: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store)
         .args(args)

@@ -1,0 +1,69 @@
+# Service Ownership
+
+Own Secret Service D-Bus behavior. In current checkout this covers `src/service.rs`,
+`src/service/objects.rs`, and `src/service/state.rs`; the service-layer siblings `src/collection.rs`,
+`src/item.rs`, and `src/session.rs` remain here conceptually until source restructuring moves them.
+
+## Object Model and D-Bus Boundary
+
+Serve the Secret Service tree at:
+
+```text
+/org/freedesktop/secrets                                  Service
+/org/freedesktop/secrets/collection/<id>                  Collection
+/org/freedesktop/secrets/collection/<id>/<item-id>        Item
+/org/freedesktop/secrets/session/s<n>                     Session
+/org/freedesktop/secrets/aliases/<name>                   Collection alias
+```
+
+- Treat every caller, sender identity, object path, variant, algorithm, length, and object lookup as
+  hostile. Validate at the D-Bus boundary before touching persistent state or secret transport.
+- Bind sessions to the caller's unique bus sender name. Never substitute PID, executable name, or
+  another reusable identity. Foreign sessions fail closed for secret access, item creation/update,
+  secret retrieval, and close operations.
+- Subscribe to `NameOwnerChanged` and remove all sessions owned by vanished unique senders; clients
+  often do not call `Session.Close`.
+- Service, Collection, Item, Session, and alias objects must expose only state authorized by their
+  owning store/session boundary. Alias-backed collections resolve their persisted target per call;
+  valid alias paths are registered and invalid-path aliases remain usable through alias methods but
+  do not receive an object path.
+- D-Bus errors are the public boundary: map internal failures without leaking secret bytes or
+  treating malformed client data as an internal panic.
+
+## Lifecycle, Registration, and Signals
+
+Serialize each mutation across persistent state, object-server registration/removal, and signals.
+The lifecycle guard must prevent clients observing half-applied state:
+
+- Register collections/items on creation and remove them on deletion.
+- Remove contained item objects with a deleted collection.
+- Register an alias object when `SetAlias` creates a valid path; remove it when cleared or when its
+  target collection is deleted. Registration must match the persisted alias table.
+- Register the complete persisted object tree before requesting `org.freedesktop.secrets`; activation
+  clients must not see a partial tree.
+- Emit `PropertiesChanged` for aggregate `Service.Collections` and `Collection.Items` whenever their
+  cached values change, plus the required created/deleted signals. Clients may cache these values.
+
+Every Noirpass application method and property handler holds the activity guard for its complete
+lifetime. Admission, active-call count, completion time, and shutdown selection share one activity
+state. Once idle shutdown is selected, new application handlers fail instead of entering a closing
+service. Idle shutdown requires no sessions and no active application handler.
+
+## Always-Unlocked Contract
+
+Noirpass exposes no independent lock state; access control remains GPG-agent policy.
+
+```text
+Locked properties are always false.
+Unlock returns requested objects as already unlocked.
+Lock returns no successfully locked objects.
+No Prompt objects are exposed; prompt path is /.
+```
+
+`Lock` and `Unlock` return `/` as their prompt path, and unknown `ReadAlias` also returns `/`. Keep
+these semantics internally consistent across Service, Collection, and Item implementations.
+
+Changes to object lifecycle, sender ownership, signals, admission, or errors require real object-
+server/client integration coverage on a private test bus. Test isolation is owned by
+[`../../tests/AGENTS.md`](../../tests/AGENTS.md); at-rest durability is owned by
+[`../store/AGENTS.md`](../store/AGENTS.md).

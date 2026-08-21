@@ -48,6 +48,7 @@ struct Harness {
     fake_gpg_log: PathBuf,
     bus_address: String,
     dbus_pid: u32,
+    daemon_pid_file: PathBuf,
     daemon: Mutex<Child>,
     _keep: Vec<tempfile::TempDir>,
 }
@@ -125,6 +126,7 @@ fn init_noirpass_store(store: &Path, recipient: &[u8]) {
     let recipient_path = store.join("recipient.asc");
     std::fs::write(&recipient_path, recipient).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store)
         .arg("init")
@@ -142,6 +144,7 @@ fn init_noirpass_store(store: &Path, recipient: &[u8]) {
 
 fn init_noirpass_store_from_stdin(store: &Path, recipient: &[u8]) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store)
         .arg("init")
@@ -196,6 +199,7 @@ fn spawn_daemon(
     fake_gpg_dir: Option<&Path>,
 ) -> Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_noirpass"));
+    cmd.env_remove("NOIRPASS_STORE");
     cmd.arg("--store-dir").arg(store);
     if !idle_exit.is_empty() {
         cmd.args(["--idle-exit", idle_exit]);
@@ -253,6 +257,10 @@ fn sigterm(pid: u32) {
         .status();
 }
 
+fn record_daemon_pid(path: &Path, daemon: &Child) {
+    std::fs::write(path, daemon.id().to_string()).expect("record daemon pid");
+}
+
 impl Harness {
     fn init() -> Self {
         let gnupg_tmp = tempfile::tempdir().unwrap();
@@ -265,6 +273,12 @@ impl Harness {
         // the reaper below cleans it up when the test process exits.
         std::mem::forget(dbus);
 
+        let daemon_pid_tmp = tempfile::tempdir().unwrap();
+        let daemon_pid_file = daemon_pid_tmp.path().join("daemon.pid");
+
+        // The high-level oo7/zbus session helpers used by scenarios read
+        // DBUS_SESSION_BUS_ADDRESS from process environment, so child-only injection cannot
+        // configure them. This one shared fixture sets it before dependent tests begin.
         // SAFETY: called once, from the OnceLock initializer, before any test
         // creates a zbus/oo7 connection or reads these variables. The other
         // test thread is blocked on the OnceLock during this call.
@@ -284,25 +298,29 @@ impl Harness {
             "-1",
             Some(&fake_gpg_dir),
         );
+        record_daemon_pid(&daemon_pid_file, &daemon);
         wait_for_name(&bus_address);
 
         let gnupg_home = gnupg_tmp.path().to_path_buf();
         let store_dir = store_tmp.path().to_path_buf();
 
         // Reaper: if the test process dies (success or abort), terminate the
-        // daemon (SIGTERM, so it flushes coverage), the private bus and the
-        // gpg-agent. `pkill -f` on the unique store path survives daemon
-        // restarts (the pid changes; the command line does not).
+        // exact fixture-owned daemon PID (SIGTERM, so it flushes coverage), the
+        // private bus, and the test-owned gpg-agent. The PID file is updated
+        // when the harness respawns its daemon.
         let test_pid = std::process::id();
-        // Note the `[-]-store-dir` character class: it stops `pkill -f` from
-        // matching (and killing) the reaper's own command line, which embeds
-        // this very pattern.
         let script = format!(
-            "while kill -0 {test_pid} 2>/dev/null; do sleep 0.5; done; \
-             pkill -TERM -f -- '[-]-store-dir {store}' 2>/dev/null; \
-             kill -TERM {dbus_pid} 2>/dev/null; \
+            "while kill -0 {test_pid} 2>/dev/null; do sleep 0.5; done; \\
+             if test -r '{pid_file}'; then \\
+               IFS= read -r daemon_pid < '{pid_file}' || daemon_pid=; \\
+               case \"$daemon_pid\" in \\
+                 ''|*[!0-9]*) ;; \\
+                 *) kill -TERM \"$daemon_pid\" 2>/dev/null ;; \\
+               esac; \\
+             fi; \\
+             kill -TERM {dbus_pid} 2>/dev/null; \\
              gpgconf --homedir '{gnupg}' --kill gpg-agent 2>/dev/null; true",
-            store = store_dir.display(),
+            pid_file = daemon_pid_file.display(),
             gnupg = gnupg_home.display(),
         );
         #[allow(
@@ -324,8 +342,9 @@ impl Harness {
             fake_gpg_log,
             bus_address,
             dbus_pid,
+            daemon_pid_file,
             daemon: Mutex::new(daemon),
-            _keep: vec![gnupg_tmp, store_tmp, fake_gpg_tmp],
+            _keep: vec![gnupg_tmp, store_tmp, fake_gpg_tmp, daemon_pid_tmp],
         }
     }
 
@@ -334,6 +353,7 @@ impl Harness {
         let mut child = self.daemon.lock().unwrap();
         sigterm(child.id());
         let status = wait_with_timeout(&mut child, Duration::from_secs(10));
+        std::fs::write(&self.daemon_pid_file, "").expect("clear daemon pid");
         assert!(status.success(), "daemon exited with {status}");
     }
 
@@ -346,6 +366,7 @@ impl Harness {
             "-1",
             Some(&self.fake_gpg_dir),
         );
+        record_daemon_pid(&self.daemon_pid_file, &fresh);
         *self.daemon.lock().unwrap() = fresh;
         wait_for_name(&self.bus_address);
     }
@@ -1394,6 +1415,7 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     drop(store);
 
     let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(dir.path())
         .arg("list")
@@ -1411,6 +1433,7 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     assert!(stdout.contains("ciphertext: missing"));
 
     let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(dir.path())
         .args(["check", "--yes"])
@@ -1430,6 +1453,7 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     drop(store);
 
     let deleted = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(dir.path())
         .arg("delete")
@@ -1482,6 +1506,7 @@ fn cli_rejects_mismatched_item_id_without_deleting_valid_item() {
     drop(db);
 
     let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(dir.path())
         .arg("list")
@@ -1493,6 +1518,7 @@ fn cli_rejects_mismatched_item_id_without_deleting_valid_item() {
     );
 
     let deleted = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(dir.path())
         .arg("delete")
@@ -1539,6 +1565,7 @@ fn cli_check_repairs_noncanonical_item_key() {
     drop(db);
 
     let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(dir.path())
         .args(["check", "--yes"])
@@ -1578,6 +1605,7 @@ fn cli_check_recovers_quarantined_ciphertext_before_repair() {
     drop(store);
 
     let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(dir.path())
         .args(["check", "--yes"])
@@ -1720,25 +1748,42 @@ fn cli_init_rejects_store_with_missing_index() {
     let store = tempfile::tempdir().unwrap();
     let cert = export_public_cert(&h.gnupg_home);
     init_noirpass_store(store.path(), &cert);
-    std::fs::write(store.path().join("secrets/existing.gpg"), b"ciphertext").unwrap();
+    let config = store.path().join("config.toml");
+    let stored_recipient = store.path().join("keys/recipient.pgp");
+    let config_before = std::fs::read(&config).unwrap();
+    let stored_recipient_before = std::fs::read(&stored_recipient).unwrap();
+    let ciphertext = store.path().join("secrets/existing.gpg");
+    std::fs::write(&ciphertext, b"ciphertext").unwrap();
     std::fs::remove_file(store.path().join("index.redb")).unwrap();
     let recipient_path = store.path().join("recipient.asc");
     std::fs::write(&recipient_path, &cert).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store.path())
         .arg("init")
         .arg("--recipient")
         .arg(&recipient_path)
         .output()
-        .expect("spawn noirpass init broken store");
+        .expect("spawn noirpass init with missing index");
 
-    assert!(!output.status.success(), "init must reject broken store");
     assert!(
-        !store.path().join("index.redb").exists(),
-        "init must not recreate missing index over existing secret files"
+        !output.status.success(),
+        "init must reject missing index: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already initialized"), "stderr: {stderr}");
+    assert!(stderr.contains("index.redb"), "stderr: {stderr}");
+    assert!(!store.path().join("index.redb").exists());
+    assert_eq!(std::fs::read(config).unwrap(), config_before);
+    assert_eq!(
+        std::fs::read(stored_recipient).unwrap(),
+        stored_recipient_before
+    );
+    assert_eq!(std::fs::read(ciphertext).unwrap(), b"ciphertext");
 }
 
 #[test]
@@ -1748,6 +1793,7 @@ fn cli_init_invalid_recipient_does_not_create_store() {
     std::fs::write(&recipient_path, b"not openpgp").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store.path())
         .arg("init")
@@ -1778,6 +1824,7 @@ fn daemon_rejects_recipient_without_matching_secret_key() {
     init_noirpass_store(store.path(), &other_cert);
 
     let status_output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store.path())
         .arg("status")
@@ -1822,6 +1869,7 @@ fn cli_init_stdin_and_status_exit_codes() {
     let store = tempfile::tempdir().unwrap();
 
     let uninitialized = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store.path())
         .arg("status")
@@ -1835,6 +1883,7 @@ fn cli_init_stdin_and_status_exit_codes() {
     init_noirpass_store_from_stdin(store.path(), &cert);
 
     let usable = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store.path())
         .arg("status")
@@ -1864,6 +1913,7 @@ fn cli_init_stdin_and_status_exit_codes() {
     wait_for_name(&address);
 
     let live = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
         .arg("--store-dir")
         .arg(store.path())
         .arg("status")

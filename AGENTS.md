@@ -1,38 +1,48 @@
 # AI Agent Guide
 
-Coding-agent repository instructions. Minimize changes, preserve security properties, use
-`ARCHITECTURE.md` as technical source of truth.
+Repository-wide coding-agent rules. Current checkout is source of truth. Make smallest correct
+change, preserve security properties, and read the nearest scoped guidance before editing.
+
+## Scope
+
+Root rules. Read nearest `AGENTS.md` for narrower ownership guidance.
+
+- `src/cli/AGENTS.md`: CLI entrypoints, commands, confirmation, and daemon orchestration
+- `src/config/AGENTS.md`: configuration, initialization, recipient lifecycle, and deinitialization
+- `src/crypto/AGENTS.md`: Secret Service transport cryptography and secret-memory handling
+- `src/gpg/AGENTS.md`: OpenPGP encryption, certificate validation, and GPG-agent integration
+- `src/service/AGENTS.md`: Secret Service D-Bus API, sessions, objects, signals, and lifecycle
+- `src/store/AGENTS.md`: redb persistence, ciphertext storage, durability, recovery, and integrity
+- `systemd/AGENTS.md`: systemd user service, D-Bus activation, filesystem access, and sandbox hardening
+- `tests/AGENTS.md`: hermetic tests and production-isolation requirements
+
+Until source restructuring, the four future ownership directories contain guidance only; current
+Rust files remain in their existing locations. Do not move modules merely to create guidance.
 
 ## Read First
 
 Before editing:
 
 1. Read affected module-level `//!` documentation.
-2. Read relevant sections in `ARCHITECTURE.md`.
-3. Trace complete call and persistence flow.
-4. Inspect existing tests for intended behavior.
+2. Read the nearest scoped `AGENTS.md` files for every touched boundary.
+3. Trace the complete call, persistence, and error flow.
+4. Inspect existing tests for intended behavior and isolation.
 
-Update `ARCHITECTURE.md` when implementation contracts, storage format, object lifecycle, security
-boundaries, or test strategy change. Update `README.md` only for user-visible setup, commands,
-behavior, or troubleshooting.
+README is user-facing documentation. Scoped `AGENTS.md` files own subsystem contracts and invariants;
+module docs own local rationale. Do not invent a second central design document.
 
-## Environment
+## Environment and Validation
 
-Run Rust tooling through flake dev shell first:
+Run Rust tooling through the flake development shell first:
 
 ```sh
 nix develop -c cargo <subcommand> ...
 ```
 
-Use direct `cargo` only when `nix` unavailable (`command not found`, exit 127). For other Nix
-failures, fix or report; never bypass environment.
+Use direct `cargo` only when `nix` is unavailable (`command not found`, exit 127). For other Nix
+failures, fix or report the failure; do not silently bypass the environment.
 
-Never test against real session bus or real GnuPG home. Integration harness provides private
-`dbus-daemon`, ephemeral `GNUPGHOME`, and temporary store.
-
-## Required Gates
-
-Run change-relevant checks, then full gates before completion:
+Required gates:
 
 ```sh
 nix develop -c cargo build --release
@@ -40,52 +50,33 @@ nix develop -c cargo fmt --check
 nix develop -c cargo clippy --all-targets -- -D warnings
 nix develop -c cargo test
 nix develop -c cargo llvm-cov --all-targets --fail-under-lines 80
+git diff --check
 ```
 
-Optional real-client smoke test:
+Claim a gate only from observed command output. Optional real-desktop smoke tests remain feature-
+gated and must skip safely when unavailable. Mandatory tests must follow [`tests/AGENTS.md`](tests/AGENTS.md).
 
-```sh
-nix develop -c cargo test --features secret-tool-smoke
-```
+## Nix Packaging
 
-All gates must pass with zero warnings. Claim pass only with command output.
+- `flake.nix` owns package, app, checks, and development-shell outputs for supported systems.
+- Package version follows `Cargo.toml`; do not duplicate or manually drift the release version in the
+  flake.
+- Package checks and formatting checks remain hermetic and use repository-owned dependencies and test
+  fixtures rather than ambient user services, stores, or keyrings.
+- Packaged activation and systemd service files must be installed and must reference the packaged
+  Noirpass binary, not `/usr/bin/noirpass` from the source templates.
 
-## Change Rules
+## Global Change Rules
 
-- Fix root cause. Smallest correct diff.
-- Reuse existing patterns and dependencies.
-- Preserve public D-Bus compatibility and on-disk compatibility unless task explicitly changes them.
-- Add regression coverage for non-trivial behavior changes.
-- Never log secret bytes or move plaintext outside `Zeroizing` buffers.
-- Never spawn `gpg` in daemon/startup paths. Only hermetic test fixtures may spawn it.
-- Never substitute cryptographic algorithms or backends. Follow Secret Service specification and
-  dependency policy in `ARCHITECTURE.md`.
-- Keep object-server registration, persistent state, aliases, and emitted property signals
-  synchronized.
-- Treat uncertain persistence commit as poisoned store; stop serving and writing.
-- Never repair corruption destructively without explicit, evidence-based policy. Canonical corrupt
-  item metadata is explicit policy: when table key is a valid canonical item ID, `check` treats the
-  item as corrupt as a whole and may delete metadata plus associated ciphertext after confirmation
-  or with `check --yes`; it never reconstructs metadata from ciphertext. Non-canonical keys,
-  orphan/unknown ciphertext, and uncertain ownership or transaction state remain conservative: never
-  infer paths or delete unrelated files.
-
-## Test Safety
-
-- Use `CARGO_BIN_EXE_noirpass` for daemon spawned by integration tests.
-- Stop instrumented daemon with SIGTERM, not SIGKILL, ensuring coverage flushes.
-- Serialize tests using process-global `DBUS_SESSION_BUS_ADDRESS` or `GNUPGHOME` in shared harness.
-- Never pipe process output to infer status. Assert actual `ExitStatus`.
-- `pgrep`/`pkill -f` patterns can match caller. Break option pattern, e.g. `'[-]-store-dir <path>'`.
-
-## Documentation Ownership
-
-- `README.md`: user guidance only. No implementation internals or contributor workflow.
-- `AGENTS.md`: AI workflow, constraints, commands, and safety rules.
-- `ARCHITECTURE.md`: design, internals, invariants, persistence protocol, implementation guidance,
-  and test architecture.
-
-## Environment-Dependent Tests
-
-Tests requiring an ambient session bus or externally running D-Bus service must remain optional and
-skip when unavailable. Mandatory tests must use isolated repository-owned fixtures.
+- Fix root cause with the smallest focused diff; reuse existing dependencies and patterns.
+- Preserve public D-Bus behavior and on-disk compatibility unless the task explicitly changes the
+  contract and includes migration/recovery coverage.
+- Add regression coverage for non-trivial behavior. Do not bump dependencies or modify `Cargo.lock`
+  without a concrete purpose.
+- Never log secret bytes, expose plaintext outside controlled zeroizing storage, or move private
+  OpenPGP key material across the agent boundary.
+- Never spawn `gpg`, `gpg2`, `gpgconf`, or a shell in production daemon/startup paths. Test fixtures
+  may spawn GPG tools only inside exact temporary homes.
+- Do not weaken fail-closed validation, destructive confirmation, path/symlink protection, store
+  durability, session ownership, or test isolation to make a test pass.
+- Do not commit changes or create branches unless explicitly requested.

@@ -250,6 +250,25 @@ fn has_encrypted_secret_files(data_dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn reject_missing_index_for_initialized_store(data_dir: &Path) -> Result<()> {
+    let initialized = path_entry_exists(&config_path(data_dir))?
+        || path_entry_exists(&recipient_cert_path(data_dir))?;
+    if initialized && !path_entry_exists(&data_dir.join(INDEX_FILE))? {
+        return Err(Error::Config(
+            "cannot initialize an already initialized store because metadata database `index.redb` is missing; run `noirpass deinit` before initializing again".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Import an armored or binary recipient cert from `reader`.
 pub fn init_from_reader(data_dir: &Path, mut reader: impl Read) -> Result<Config> {
     let mut bytes = Vec::new();
@@ -275,6 +294,7 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
         ));
     }
     let new_fingerprint = cert.fingerprint().to_hex();
+    reject_missing_index_for_initialized_store(data_dir)?;
     let has_encrypted_files = has_encrypted_secret_files(data_dir)?;
 
     if config_path(data_dir).exists() {
@@ -841,6 +861,7 @@ mod tests {
         for idle_exit in [-1, 600] {
             let tmp = tempfile::tempdir().unwrap();
             let mut config = init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+            drop(Store::open(tmp.path()).unwrap());
             config.idle_exit = idle_exit;
             config.write(tmp.path()).unwrap();
 
@@ -856,6 +877,7 @@ mod tests {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         let path = config_path(tmp.path());
         let config = fs::read_to_string(&path)
             .unwrap()
@@ -879,6 +901,7 @@ mod tests {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         fs::write(tmp.path().join("secrets/existing.gpg"), b"ciphertext").unwrap();
 
@@ -889,6 +912,32 @@ mod tests {
             load_recipient(tmp.path()).unwrap().fingerprint,
             gnupg.fingerprint()
         );
+    }
+
+    #[test]
+    fn reinit_configured_store_fails_when_index_missing() {
+        let (cert, _) = CertBuilder::new()
+            .add_userid("missing-index")
+            .add_storage_encryption_subkey()
+            .generate()
+            .unwrap();
+        let mut bytes = Vec::new();
+        cert.serialize(&mut bytes).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        init_from_bytes(tmp.path(), &bytes).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
+        let old_config = fs::read(config_path(tmp.path())).unwrap();
+        let old_cert = fs::read(recipient_cert_path(tmp.path())).unwrap();
+        fs::remove_file(tmp.path().join(INDEX_FILE)).unwrap();
+
+        let err = init_from_bytes(tmp.path(), &bytes).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("already initialized"));
+        assert!(message.contains("index.redb"));
+        assert!(!tmp.path().join(INDEX_FILE).exists());
+        assert_eq!(fs::read(config_path(tmp.path())).unwrap(), old_config);
+        assert_eq!(fs::read(recipient_cert_path(tmp.path())).unwrap(), old_cert);
     }
 
     #[test]
@@ -956,6 +1005,7 @@ mod tests {
         let two = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         let old_config = fs::read(config_path(tmp.path())).unwrap();
         let old_cert = fs::read(recipient_cert_path(tmp.path())).unwrap();
 
@@ -980,6 +1030,7 @@ mod tests {
         let two = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         fs::write(tmp.path().join("secrets/existing.gpg"), b"ciphertext").unwrap();
 
@@ -1004,6 +1055,7 @@ mod tests {
         let two = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         fs::write(tmp.path().join("secrets/existing.gpg"), b"ciphertext").unwrap();
         let old_cert = fs::read(recipient_cert_path(tmp.path())).unwrap();
@@ -1025,6 +1077,7 @@ mod tests {
         let two = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         fs::write(tmp.path().join("secrets/existing.gpg"), b"ciphertext").unwrap();
         let old_cert = fs::read(recipient_cert_path(tmp.path())).unwrap();
@@ -1032,10 +1085,9 @@ mod tests {
 
         let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("cannot initialize non-empty store")
-        );
+        let message = err.to_string();
+        assert!(message.contains("already initialized store"));
+        assert!(message.contains("existing recipient fingerprint cannot be verified"));
         assert_eq!(
             fs::read_to_string(config_path(tmp.path())).unwrap(),
             "not toml"
@@ -1260,6 +1312,7 @@ mod tests {
         let two = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
 
         fs::remove_file(config_path(tmp.path())).unwrap();
         fs::create_dir(config_path(tmp.path())).unwrap();
