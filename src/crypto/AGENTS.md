@@ -1,6 +1,6 @@
 # Crypto Ownership
 
-Own Secret Service session transport cryptography in current `src/crypto.rs`: algorithm negotiation,
+Own Secret Service session transport cryptography under `src/crypto/`: algorithm negotiation,
 Diffie-Hellman validation, wire encoding, cipher lifetime, and zeroization. At-rest OpenPGP is owned
 by [`../gpg/AGENTS.md`](../gpg/AGENTS.md).
 

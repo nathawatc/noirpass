@@ -16,8 +16,8 @@ Root rules. Read nearest `AGENTS.md` for narrower ownership guidance.
 - `systemd/AGENTS.md`: systemd user service, D-Bus activation, filesystem access, and sandbox hardening
 - `tests/AGENTS.md`: hermetic tests and production-isolation requirements
 
-Until source restructuring, the four future ownership directories contain guidance only; current
-Rust files remain in their existing locations. Do not move modules merely to create guidance.
+Subsystem Rust files now live under their owning directories above. Keep new files within the
+nearest ownership boundary; do not duplicate guidance into child files.
 
 ## Read First
 

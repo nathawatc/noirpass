@@ -17,7 +17,10 @@
 //! `/` as their prompt path. This is a deliberate, documented deviation from
 //! keyrings that implement their own locking.
 
+pub mod collection;
+pub mod item;
 mod objects;
+pub mod session;
 mod state;
 
 pub use objects::{

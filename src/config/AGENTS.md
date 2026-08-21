@@ -1,8 +1,7 @@
 # Configuration Ownership
 
 Own configuration parsing, initialization, recipient persistence, recipient lifecycle, and config-
-layer deinitialization state. In current checkout this means `src/config.rs`; no Rust module move is
-implied by this guidance.
+layer deinitialization state under `src/config/`.
 
 ## Persisted Configuration
 

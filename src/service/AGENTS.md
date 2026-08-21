@@ -1,8 +1,7 @@
 # Service Ownership
 
-Own Secret Service D-Bus behavior. In current checkout this covers `src/service.rs`,
-`src/service/objects.rs`, and `src/service/state.rs`; the service-layer siblings `src/collection.rs`,
-`src/item.rs`, and `src/session.rs` remain here conceptually until source restructuring moves them.
+Own Secret Service D-Bus behavior under `src/service/`, including service state, object
+registration, collections, items, and sessions.
 
 ## Object Model and D-Bus Boundary
 

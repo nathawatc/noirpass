@@ -1,8 +1,7 @@
 # Store Ownership
 
 Own `redb` metadata, ciphertext files, durability, recovery, integrity checks, aliases persisted in
-the store, and poisoned-store behavior. In current checkout this covers `src/store.rs` and
-`src/store/*`.
+store, and poisoned-store behavior under `src/store/`.
 
 ## Storage Model and Path Safety
 

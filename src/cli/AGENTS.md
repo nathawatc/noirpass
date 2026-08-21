@@ -1,7 +1,7 @@
 # CLI Ownership
 
-Own CLI entrypoints and runtime orchestration. In current checkout this means `src/main.rs`; the
-source restructure may move these responsibilities into this directory without changing contracts.
+Own CLI entrypoints and runtime orchestration under `src/cli/`, with `src/main.rs` limited to
+process entry.
 
 ## Command and Output Contracts
 

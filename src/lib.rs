@@ -4,14 +4,15 @@
 //! plus the D-Bus interface objects used by the `noirpass` binary and the
 //! integration tests.
 
-pub mod collection;
 pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod gpg;
-pub mod item;
 pub mod service;
-pub mod session;
 pub mod store;
+
+// Preserve the original public module paths while service objects live under
+// their owning subsystem.
+pub use service::{collection, item, session};
 
 pub use error::{Error, Result};

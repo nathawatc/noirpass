@@ -1,8 +1,8 @@
 # GPG Ownership
 
-Own OpenPGP certificate validation and at-rest encryption/decryption in current `src/gpg.rs`,
-including its test-only fixture support. The application must keep private-key material behind the
-GPG-agent boundary.
+Own OpenPGP certificate validation and at-rest encryption/decryption under `src/gpg/`, including
+its test-only fixture support. The application must keep private-key material behind the GPG-agent
+boundary.
 
 ## OpenPGP Boundary
 
