@@ -27,6 +27,47 @@ fn collection_reads_and_updates_reject_embedded_id_mismatch() {
 }
 
 #[test]
+fn readonly_integrity_probe_preserves_busy_store_behavior() {
+    let tmp = tempfile::tempdir().unwrap();
+    let setup = Store::open(tmp.path()).unwrap();
+    setup.ensure_default().unwrap();
+    drop(setup);
+    let _store = Store::open(tmp.path()).unwrap();
+    let index_before = fs::read(tmp.path().join("index.redb")).unwrap();
+
+    let report = Store::probe_integrity(tmp.path()).unwrap();
+
+    assert!(report.is_healthy());
+    assert_eq!(
+        fs::read(tmp.path().join("index.redb")).unwrap(),
+        index_before
+    );
+}
+
+#[test]
+fn readonly_integrity_probe_rejects_invalid_secrets_path_while_store_is_busy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let setup = Store::open(tmp.path()).unwrap();
+    setup.ensure_default().unwrap();
+    drop(setup);
+    let _store = Store::open(tmp.path()).unwrap();
+    let secrets_dir = tmp.path().join("secrets");
+    let outside = tempfile::tempdir().unwrap();
+    let outside_file = outside.path().join("keep.txt");
+    fs::write(&outside_file, b"outside").unwrap();
+    fs::remove_dir(&secrets_dir).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &secrets_dir).unwrap();
+
+    let err = Store::probe_integrity(tmp.path()).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("store secrets path is not a directory")
+    );
+    assert_eq!(fs::read(outside_file).unwrap(), b"outside");
+}
+
+#[test]
 fn integrity_reports_missing_item_owner_and_dangling_alias() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();

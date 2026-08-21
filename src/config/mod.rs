@@ -89,10 +89,59 @@ mod tests {
     use super::format::parse_config;
     use super::*;
     use crate::gpg::{parse_recipient_cert, test_support::TestGnupg};
-    use crate::store::Store;
+    use crate::store::{ItemMeta, Store};
+    use redb::{Database, TableDefinition};
     use sequoia_openpgp::cert::CertBuilder;
     use sequoia_openpgp::serialize::Serialize;
+    use std::collections::HashMap;
     use std::fs;
+
+    fn initialized_store_with_item() -> (tempfile::TempDir, ItemMeta) {
+        let (cert, _) = CertBuilder::new()
+            .add_userid("status-integrity")
+            .add_storage_encryption_subkey()
+            .generate()
+            .unwrap();
+        let mut cert_bytes = Vec::new();
+        cert.serialize(&mut cert_bytes).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
+        init_from_bytes(tmp.path(), &cert_bytes).unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let item = store
+            .create_item(
+                "default",
+                "status item",
+                HashMap::new(),
+                "text/plain",
+                b"ciphertext",
+            )
+            .unwrap();
+        drop(store);
+        (tmp, item)
+    }
+
+    fn assert_status_rejects_integrity_defect(tmp: &tempfile::TempDir) {
+        let status = status(tmp.path());
+        assert!(!status.usable(), "{status:?}");
+        assert!(
+            status
+                .errors
+                .iter()
+                .any(|error| error.contains("store integrity")),
+            "{:?}",
+            status.errors
+        );
+    }
+
+    #[test]
+    fn status_reports_healthy_integrity_store() {
+        let (tmp, _) = initialized_store_with_item();
+
+        let status = status(tmp.path());
+
+        assert!(status.usable(), "{status:?}");
+    }
 
     #[test]
     fn config_idle_exit_defaults_and_accepts_override() {
@@ -522,6 +571,80 @@ mod tests {
     }
 
     #[test]
+    fn status_rejects_missing_ciphertext() {
+        let (tmp, item) = initialized_store_with_item();
+        let index_before = fs::read(tmp.path().join("index.redb")).unwrap();
+        let config_before = fs::read(config_path(tmp.path())).unwrap();
+        fs::remove_file(tmp.path().join(format!("secrets/{}.gpg", item.id))).unwrap();
+        let secrets_before = fs::read_dir(tmp.path().join("secrets"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+
+        assert_status_rejects_integrity_defect(&tmp);
+
+        assert_eq!(
+            fs::read(tmp.path().join("index.redb")).unwrap(),
+            index_before
+        );
+        assert_eq!(fs::read(config_path(tmp.path())).unwrap(), config_before);
+        let mut secrets_after = fs::read_dir(tmp.path().join("secrets"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        let mut secrets_before = secrets_before;
+        secrets_before.sort();
+        secrets_after.sort();
+        assert_eq!(secrets_after, secrets_before);
+    }
+
+    #[test]
+    fn status_rejects_ciphertext_digest_mismatch() {
+        let (tmp, item) = initialized_store_with_item();
+        fs::write(
+            tmp.path().join(format!("secrets/{}.gpg", item.id)),
+            b"wrong ciphertext",
+        )
+        .unwrap();
+
+        assert_status_rejects_integrity_defect(&tmp);
+    }
+
+    #[test]
+    fn status_rejects_corrupt_item_metadata() {
+        const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
+        let (tmp, item) = initialized_store_with_item();
+        let db = Database::open(tmp.path().join("index.redb")).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut items = txn.open_table(ITEMS).unwrap();
+            items
+                .insert(item.id.as_str(), b"not-json".as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+        drop(db);
+
+        assert_status_rejects_integrity_defect(&tmp);
+    }
+
+    #[test]
+    fn status_rejects_broken_alias() {
+        const ALIASES: TableDefinition<&str, &str> = TableDefinition::new("aliases");
+        let (tmp, _) = initialized_store_with_item();
+        let db = Database::open(tmp.path().join("index.redb")).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut aliases = txn.open_table(ALIASES).unwrap();
+            aliases.insert("broken", "missing-collection").unwrap();
+        }
+        txn.commit().unwrap();
+        drop(db);
+
+        assert_status_rejects_integrity_defect(&tmp);
+    }
+
+    #[test]
     fn status_rejects_unsupported_config_version() {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
@@ -590,12 +713,7 @@ mod tests {
 
         let status = status(tmp.path());
         assert!(!status.usable());
-        assert!(
-            status
-                .errors
-                .iter()
-                .any(|e| e.contains("store is not usable"))
-        );
+        assert!(status.errors.iter().any(|e| e.contains("store integrity")));
     }
 
     #[test]
@@ -609,12 +727,7 @@ mod tests {
 
         let status = status(tmp.path());
         assert!(!status.usable());
-        assert!(
-            status
-                .errors
-                .iter()
-                .any(|e| e.contains("store is not usable"))
-        );
+        assert!(status.errors.iter().any(|e| e.contains("store integrity")));
     }
 
     #[test]

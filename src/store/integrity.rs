@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+use std::path::Path;
 
-use redb::{ReadableDatabase, ReadableTable};
+use redb::{DatabaseError, ReadOnlyDatabase, ReadableDatabase, ReadableTable};
 
 use crate::error::{Error, Result};
 
@@ -26,204 +27,222 @@ impl Store {
     }
 
     /// Cross-check every redb item against ciphertext files on disk.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "single read transaction validates related collection, item, and alias tables"
-    )]
     pub fn check_integrity(&self) -> Result<IntegrityReport> {
-        let txn = self.db.begin_read()?;
-        let mut collection_ids = HashSet::new();
-        let mut present_collection_ids = HashSet::new();
-        let mut corrupt_collections = Vec::new();
-        {
-            let collections = txn.open_table(COLLECTIONS)?;
-            for entry in collections.iter()? {
-                let (key, value) = entry?;
-                let table_key = key.value().to_string();
-                present_collection_ids.insert(table_key.clone());
-                let metadata = serde_json::from_slice::<CollectionMeta>(value.value());
-                let error = if is_valid_collection_id(&table_key) {
-                    match metadata {
-                        Ok(metadata) if metadata.id == table_key => {
-                            collection_ids.insert(table_key.clone());
-                            None
-                        }
-                        Ok(metadata) => Some(format!(
-                            "metadata id {} does not match table key {table_key}",
-                            metadata.id
-                        )),
-                        Err(err) => Some(format!("metadata cannot be decoded: {err}")),
-                    }
-                } else {
-                    Some(format!(
-                        "table key {table_key} is not a canonical collection id"
-                    ))
-                };
-                if let Some(error) = error {
-                    corrupt_collections.push(CorruptCollection { table_key, error });
-                }
-            }
-        }
+        scan_integrity(&self.db, &self.secrets_dir)
+    }
 
-        let items = txn.open_table(ITEMS)?;
-        let mut indexed = HashSet::new();
-        let mut missing_secret_items = Vec::new();
-        let mut corrupt_items = Vec::new();
-        let mut ciphertext_mismatches = Vec::new();
-        let mut items_with_invalid_collection = Vec::new();
-        for entry in items.iter()? {
+    /// Cross-check an existing store without acquiring its writer lock.
+    pub(crate) fn probe_integrity(dir: &Path) -> Result<IntegrityReport> {
+        let (secrets_dir, index_path) = super::existing_store_paths(dir)?;
+        let db = match ReadOnlyDatabase::open(&index_path) {
+            Ok(db) => db,
+            Err(DatabaseError::DatabaseAlreadyOpen) => {
+                // The running daemon already passed startup integrity admission. Preserve the
+                // non-mutating busy-store status behavior instead of racing its live database.
+                return Ok(IntegrityReport::default());
+            }
+            Err(err) => return Err(err.into()),
+        };
+        scan_integrity(&db, &secrets_dir)
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "single read transaction validates related collection, item, and alias tables"
+)]
+fn scan_integrity<D: ReadableDatabase>(db: &D, secrets_dir: &Path) -> Result<IntegrityReport> {
+    let txn = db.begin_read()?;
+    let mut collection_ids = HashSet::new();
+    let mut present_collection_ids = HashSet::new();
+    let mut corrupt_collections = Vec::new();
+    {
+        let collections = txn.open_table(COLLECTIONS)?;
+        for entry in collections.iter()? {
             let (key, value) = entry?;
             let table_key = key.value().to_string();
-            indexed.insert(table_key.clone());
-            if !is_valid_item_id(&table_key) {
-                corrupt_items.push(CorruptItem {
+            present_collection_ids.insert(table_key.clone());
+            let metadata = serde_json::from_slice::<CollectionMeta>(value.value());
+            let error = if is_valid_collection_id(&table_key) {
+                match metadata {
+                    Ok(metadata) if metadata.id == table_key => {
+                        collection_ids.insert(table_key.clone());
+                        None
+                    }
+                    Ok(metadata) => Some(format!(
+                        "metadata id {} does not match table key {table_key}",
+                        metadata.id
+                    )),
+                    Err(err) => Some(format!("metadata cannot be decoded: {err}")),
+                }
+            } else {
+                Some(format!(
+                    "table key {table_key} is not a canonical collection id"
+                ))
+            };
+            if let Some(error) = error {
+                corrupt_collections.push(CorruptCollection { table_key, error });
+            }
+        }
+    }
+
+    let items = txn.open_table(ITEMS)?;
+    let mut indexed = HashSet::new();
+    let mut missing_secret_items = Vec::new();
+    let mut corrupt_items = Vec::new();
+    let mut ciphertext_mismatches = Vec::new();
+    let mut items_with_invalid_collection = Vec::new();
+    for entry in items.iter()? {
+        let (key, value) = entry?;
+        let table_key = key.value().to_string();
+        indexed.insert(table_key.clone());
+        if !is_valid_item_id(&table_key) {
+            corrupt_items.push(CorruptItem {
+                table_key: table_key.clone(),
+                metadata: serde_json::from_slice(value.value()).ok(),
+                error: format!("table key {table_key} is not a canonical item id"),
+            });
+            continue;
+        }
+        let metadata = match serde_json::from_slice::<ItemMeta>(value.value()) {
+            Ok(metadata)
+                if metadata.id == table_key && collection_ids.contains(&metadata.collection) =>
+            {
+                metadata
+            }
+            Ok(metadata) if metadata.id == table_key => {
+                let owner_state = if present_collection_ids.contains(&metadata.collection) {
+                    "corrupt"
+                } else {
+                    "missing"
+                };
+                items_with_invalid_collection.push(CorruptItem {
                     table_key: table_key.clone(),
-                    metadata: serde_json::from_slice(value.value()).ok(),
-                    error: format!("table key {table_key} is not a canonical item id"),
+                    error: format!(
+                        "item references {owner_state} collection {}",
+                        metadata.collection
+                    ),
+                    metadata: Some(metadata),
                 });
                 continue;
             }
-            let metadata = match serde_json::from_slice::<ItemMeta>(value.value()) {
-                Ok(metadata)
-                    if metadata.id == table_key
-                        && collection_ids.contains(&metadata.collection) =>
-                {
-                    metadata
-                }
-                Ok(metadata) if metadata.id == table_key => {
-                    let owner_state = if present_collection_ids.contains(&metadata.collection) {
-                        "corrupt"
-                    } else {
-                        "missing"
-                    };
-                    items_with_invalid_collection.push(CorruptItem {
-                        table_key: table_key.clone(),
-                        error: format!(
-                            "item references {owner_state} collection {}",
-                            metadata.collection
-                        ),
-                        metadata: Some(metadata),
-                    });
-                    continue;
-                }
-                Ok(metadata) => {
-                    corrupt_items.push(CorruptItem {
-                        table_key: table_key.clone(),
-                        error: format!(
-                            "metadata id {} does not match table key {table_key}",
-                            metadata.id
-                        ),
-                        metadata: Some(metadata),
-                    });
-                    continue;
-                }
-                Err(err) => {
-                    corrupt_items.push(CorruptItem {
-                        table_key: table_key.clone(),
-                        metadata: None,
-                        error: format!("metadata cannot be decoded: {err}"),
-                    });
-                    continue;
-                }
-            };
-            let path = self.secret_path(&table_key)?;
-            match fs::symlink_metadata(&path) {
-                Ok(file_metadata) if file_metadata.file_type().is_file() => {
-                    if let Some(expected_hash) = &metadata.ciphertext_sha256 {
-                        let ciphertext = fs::read(&path)?;
-                        if ciphertext_sha256(&ciphertext) != *expected_hash {
-                            ciphertext_mismatches.push(IndexedItem {
-                                table_key,
-                                metadata,
-                            });
-                        }
-                    }
-                }
-                Ok(_) => {
-                    return Err(Error::Config(format!(
-                        "secret path is not a regular file: {}",
-                        path.display()
-                    )));
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    missing_secret_items.push(IndexedItem {
-                        table_key,
-                        metadata,
-                    });
-                }
-                Err(err) => return Err(err.into()),
+            Ok(metadata) => {
+                corrupt_items.push(CorruptItem {
+                    table_key: table_key.clone(),
+                    error: format!(
+                        "metadata id {} does not match table key {table_key}",
+                        metadata.id
+                    ),
+                    metadata: Some(metadata),
+                });
+                continue;
             }
-        }
-        drop(items);
-
-        let mut corrupt_aliases = Vec::new();
-        let mut aliases_with_corrupt_collection = Vec::new();
-        {
-            let aliases = txn.open_table(ALIASES)?;
-            for entry in aliases.iter()? {
-                let (name, collection_id) = entry?;
-                if !collection_ids.contains(collection_id.value()) {
-                    let alias = (name.value().to_string(), collection_id.value().to_string());
-                    if present_collection_ids.contains(collection_id.value()) {
-                        aliases_with_corrupt_collection.push(alias);
-                    } else {
-                        corrupt_aliases.push(alias);
+            Err(err) => {
+                corrupt_items.push(CorruptItem {
+                    table_key: table_key.clone(),
+                    metadata: None,
+                    error: format!("metadata cannot be decoded: {err}"),
+                });
+                continue;
+            }
+        };
+        let path = super::secret_path(secrets_dir, &table_key)?;
+        match fs::symlink_metadata(&path) {
+            Ok(file_metadata) if file_metadata.file_type().is_file() => {
+                if let Some(expected_hash) = &metadata.ciphertext_sha256 {
+                    let ciphertext = fs::read(&path)?;
+                    if ciphertext_sha256(&ciphertext) != *expected_hash {
+                        ciphertext_mismatches.push(IndexedItem {
+                            table_key,
+                            metadata,
+                        });
                     }
                 }
             }
-        }
-        drop(txn);
-
-        let mut orphan_secret_files = Vec::new();
-        let mut recovery_secret_files = Vec::new();
-        for entry in fs::read_dir(&self.secrets_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            if file_name.starts_with(".noirpass-backup-")
-                || file_name.starts_with(".noirpass-quarantine-")
-                || file_name.starts_with(".noirpass-create-")
-                || file_name.starts_with(".noirpass-update-")
-            {
-                if !entry.file_type()?.is_file() {
-                    return Err(Error::Config(format!(
-                        "recovery path is not a regular file: {}",
-                        path.display()
-                    )));
-                }
-                recovery_secret_files.push(file_name);
-                continue;
-            }
-            if path.extension().is_none_or(|extension| extension != "gpg") {
-                continue;
-            }
-            if !entry.file_type()?.is_file() {
+            Ok(_) => {
                 return Err(Error::Config(format!(
                     "secret path is not a regular file: {}",
                     path.display()
                 )));
             }
-            let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
-                orphan_secret_files.push(file_name);
-                continue;
-            };
-            if !indexed.contains(id) {
-                orphan_secret_files.push(file_name);
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                missing_secret_items.push(IndexedItem {
+                    table_key,
+                    metadata,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    drop(items);
+
+    let mut corrupt_aliases = Vec::new();
+    let mut aliases_with_corrupt_collection = Vec::new();
+    {
+        let aliases = txn.open_table(ALIASES)?;
+        for entry in aliases.iter()? {
+            let (name, collection_id) = entry?;
+            if !collection_ids.contains(collection_id.value()) {
+                let alias = (name.value().to_string(), collection_id.value().to_string());
+                if present_collection_ids.contains(collection_id.value()) {
+                    aliases_with_corrupt_collection.push(alias);
+                } else {
+                    corrupt_aliases.push(alias);
+                }
             }
         }
-        orphan_secret_files.sort();
-        recovery_secret_files.sort();
-
-        Ok(IntegrityReport {
-            corrupt_collections,
-            missing_secret_items,
-            corrupt_items,
-            ciphertext_mismatches,
-            items_with_invalid_collection,
-            corrupt_aliases,
-            aliases_with_corrupt_collection,
-            orphan_secret_files,
-            recovery_secret_files,
-        })
     }
+    drop(txn);
+
+    let mut orphan_secret_files = Vec::new();
+    let mut recovery_secret_files = Vec::new();
+    for entry in fs::read_dir(secrets_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name.starts_with(".noirpass-backup-")
+            || file_name.starts_with(".noirpass-quarantine-")
+            || file_name.starts_with(".noirpass-create-")
+            || file_name.starts_with(".noirpass-update-")
+        {
+            if !entry.file_type()?.is_file() {
+                return Err(Error::Config(format!(
+                    "recovery path is not a regular file: {}",
+                    path.display()
+                )));
+            }
+            recovery_secret_files.push(file_name);
+            continue;
+        }
+        if path.extension().is_none_or(|extension| extension != "gpg") {
+            continue;
+        }
+        if !entry.file_type()?.is_file() {
+            return Err(Error::Config(format!(
+                "secret path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
+            orphan_secret_files.push(file_name);
+            continue;
+        };
+        if !indexed.contains(id) {
+            orphan_secret_files.push(file_name);
+        }
+    }
+    orphan_secret_files.sort();
+    recovery_secret_files.sort();
+
+    Ok(IntegrityReport {
+        corrupt_collections,
+        missing_secret_items,
+        corrupt_items,
+        ciphertext_mismatches,
+        items_with_invalid_collection,
+        corrupt_aliases,
+        aliases_with_corrupt_collection,
+        orphan_secret_files,
+        recovery_secret_files,
+    })
 }

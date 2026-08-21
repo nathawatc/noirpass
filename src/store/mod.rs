@@ -211,6 +211,13 @@ fn is_valid_item_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn secret_path(secrets_dir: &Path, id: &str) -> Result<PathBuf> {
+    if !is_valid_item_id(id) {
+        return Err(Error::Config(format!("invalid item id in store: {id}")));
+    }
+    Ok(secrets_dir.join(format!("{id}.gpg")))
+}
+
 fn decode_item(table_key: &str, value: &[u8]) -> Result<ItemMeta> {
     if !is_valid_item_id(table_key) {
         return Err(Error::Config(format!(
@@ -424,10 +431,7 @@ impl Store {
 
     /// Path of the `.gpg` secret file backing item `id`.
     fn secret_path(&self, id: &str) -> Result<PathBuf> {
-        if !is_valid_item_id(id) {
-            return Err(Error::Config(format!("invalid item id in store: {id}")));
-        }
-        Ok(self.secrets_dir.join(format!("{id}.gpg")))
+        secret_path(&self.secrets_dir, id)
     }
 }
 

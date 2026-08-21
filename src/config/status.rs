@@ -130,9 +130,16 @@ pub fn status(data_dir: &Path) -> Status {
         && out.recipient_cert_present
         && out.fingerprint_matches == Some(true)
         && out.cert_has_encryption_key == Some(true)
-        && let Err(err) = Store::probe_health(data_dir)
     {
-        out.errors.push(format!("store is not usable: {err}"));
+        match Store::probe_integrity(data_dir) {
+            Ok(report) if report.is_healthy() => {}
+            Ok(_) => out.errors.push(
+                "store integrity check failed; run `noirpass check` before starting daemon".into(),
+            ),
+            Err(err) => out
+                .errors
+                .push(format!("store integrity check failed: {err}")),
+        }
     }
 
     out
