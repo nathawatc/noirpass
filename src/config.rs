@@ -1,4 +1,4 @@
-//! Persistent noirpass configuration and recipient certificate import/status.
+//! Persistent noirpass configuration, recipient lifecycle, and deinitialization.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -13,12 +13,16 @@ use crate::gpg::{cert_to_binary, has_usable_encryption_key, parse_recipient_cert
 use crate::store::Store;
 
 const CONFIG_FILE: &str = "config.toml";
+const INDEX_FILE: &str = "index.redb";
 const KEYS_DIR: &str = "keys";
 const RECIPIENT_REL: &str = "keys/recipient.pgp";
+const SECRETS_DIR: &str = "secrets";
 const CONFIG_VERSION: i64 = 1;
+const RECOVERY_KINDS: [&str; 4] = ["create", "update", "quarantine", "backup"];
 /// Default daemon inactivity timeout in seconds.
 pub const DEFAULT_IDLE_EXIT_SECONDS: i64 = 300;
 const INIT_HINT: &str = "run noirpass init --recipient ...";
+const DIFFERENT_RECIPIENT_ERROR: &str = "Noirpass is initialized with a different recipient.\n\nChanging recipient requires deleting the existing Noirpass store first.\n\nRun:\n    noirpass deinit\n\nThen run init again with the new recipient.";
 
 /// Minimal persisted config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,20 +208,42 @@ fn restore_recipient_cert(path: &Path, previous: Option<&[u8]>) -> Result<()> {
 }
 
 fn has_encrypted_secret_files(data_dir: &Path) -> Result<bool> {
-    let secrets_dir = data_dir.join("secrets");
-    let entries = match fs::read_dir(&secrets_dir) {
-        Ok(entries) => entries,
+    let secrets_dir = data_dir.join(SECRETS_DIR);
+    match fs::symlink_metadata(&secrets_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Error::Config(format!(
+                "cannot initialize with symlinked secrets path: {}",
+                secrets_dir.display()
+            )));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(Error::Config(format!(
+                "cannot initialize with non-directory secrets path: {}",
+                secrets_dir.display()
+            )));
+        }
+        Ok(_) => {}
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(err) => return Err(Error::Io(err)),
-    };
-    for entry in entries {
+    }
+
+    for entry in fs::read_dir(&secrets_dir)? {
         let entry = entry?;
-        if entry.file_type()?.is_file()
-            && entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "gpg")
-        {
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "gpg") {
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(Error::Config(format!(
+                    "cannot initialize with symlinked possible ciphertext: {}",
+                    path.display()
+                )));
+            }
+            if !metadata.is_file() {
+                return Err(Error::Config(format!(
+                    "cannot initialize with unsupported possible ciphertext path: {}",
+                    path.display()
+                )));
+            }
             return Ok(true);
         }
     }
@@ -249,19 +275,23 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
         ));
     }
     let new_fingerprint = cert.fingerprint().to_hex();
+    let has_encrypted_files = has_encrypted_secret_files(data_dir)?;
 
-    if has_encrypted_secret_files(data_dir)? {
-        let existing = load_recipient(data_dir).map_err(|err| {
+    if config_path(data_dir).exists() {
+        let (_, _, existing_fingerprint) = load_configured_recipient(data_dir).map_err(|err| {
+            Error::Config(format!(
+                "cannot initialize an already initialized store because existing recipient fingerprint cannot be verified: {err}"
+            ))
+        })?;
+        if existing_fingerprint != new_fingerprint {
+            return Err(Error::Config(DIFFERENT_RECIPIENT_ERROR.into()));
+        }
+    } else if has_encrypted_files {
+        let _existing = load_recipient(data_dir).map_err(|err| {
             Error::Config(format!(
                 "cannot initialize non-empty store because existing recipient fingerprint cannot be verified: {err}"
             ))
         })?;
-        if existing.fingerprint != new_fingerprint {
-            return Err(Error::Config(
-                "recipient rotation on a non-empty store is unsafe; migrate or re-encrypt existing secrets first"
-                    .into(),
-            ));
-        }
     }
 
     let idle_exit =
@@ -293,8 +323,270 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     Ok(config)
 }
 
-/// Load config and recipient certificate, validating consistency.
-pub fn load_recipient(data_dir: &Path) -> Result<Recipient> {
+fn is_lower_hex(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn is_canonical_secret_name(name: &str) -> bool {
+    name.strip_suffix(".gpg")
+        .is_some_and(|id| id.len() == 32 && is_lower_hex(id.as_bytes()))
+}
+
+fn is_recovery_secret_name(name: &str) -> bool {
+    RECOVERY_KINDS.iter().any(|kind| {
+        let prefix = format!(".noirpass-{kind}-");
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            return false;
+        };
+        let Some((id, suffix)) = rest.split_once('-') else {
+            return false;
+        };
+        suffix.strip_suffix(".gpg").is_some_and(|token| {
+            id.len() == 32
+                && is_lower_hex(id.as_bytes())
+                && token.len() == 16
+                && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    })
+}
+
+fn is_config_temporary_name(name: &str) -> bool {
+    name.strip_prefix(".noirpass-tmp-").is_some_and(|token| {
+        token.len() == 16 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn existing_directory(path: &Path, description: &str) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::Config(format!(
+            "cannot deinitialize {description} at {}; refusing to follow symlink",
+            path.display()
+        ))),
+        Ok(metadata) if !metadata.is_dir() => Err(Error::Config(format!(
+            "cannot deinitialize {description} at {}; expected a directory",
+            path.display()
+        ))),
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn safe_relative_path(data_dir: &Path, relative: &Path, description: &str) -> Result<PathBuf> {
+    validate_recipient_cert_path(relative)?;
+    let component_count = relative.components().count();
+    let mut path = data_dir.to_path_buf();
+    for (index, component) in relative.components().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(Error::Config(format!(
+                "cannot deinitialize {description}; path is not relative to the noirpass store"
+            )));
+        };
+        path.push(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Error::Config(format!(
+                    "cannot deinitialize {description} at {}; refusing to follow symlink",
+                    path.display()
+                )));
+            }
+            Ok(metadata) if index + 1 < component_count && !metadata.is_dir() => {
+                return Err(Error::Config(format!(
+                    "cannot deinitialize {description} at {}; expected a directory",
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(path)
+}
+
+fn checked_owned_file(
+    data_dir: &Path,
+    relative: &Path,
+    description: &str,
+) -> Result<Option<PathBuf>> {
+    let path = safe_relative_path(data_dir, relative, description)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::Config(format!(
+            "cannot deinitialize {description} at {}; refusing to follow symlink",
+            path.display()
+        ))),
+        Ok(metadata) if !metadata.is_file() => Err(Error::Config(format!(
+            "cannot deinitialize {description} at {}; expected a regular file",
+            path.display()
+        ))),
+        Ok(_) => Ok(Some(path)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn remove_owned_file(data_dir: &Path, relative: &Path, description: &str) -> Result<()> {
+    if let Some(path) = checked_owned_file(data_dir, relative, description)? {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn remove_empty_directory(data_dir: &Path, relative: &Path, description: &str) -> Result<()> {
+    let path = safe_relative_path(data_dir, relative, description)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::Config(format!(
+            "cannot deinitialize {description} at {}; refusing to follow symlink",
+            path.display()
+        ))),
+        Ok(metadata) if !metadata.is_dir() => Err(Error::Config(format!(
+            "cannot deinitialize {description} at {}; expected a directory",
+            path.display()
+        ))),
+        Ok(_) => match fs::remove_dir(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
+            Err(err) => Err(err.into()),
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn remove_known_secret_files(data_dir: &Path) -> Result<()> {
+    let secrets = data_dir.join(SECRETS_DIR);
+    if !existing_directory(&secrets, "the secrets directory")? {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&secrets)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if is_canonical_secret_name(&name) || is_recovery_secret_name(&name) {
+            remove_owned_file(
+                data_dir,
+                &Path::new(SECRETS_DIR).join(&name),
+                "a known secret file",
+            )?;
+        }
+    }
+    fs::File::open(&secrets)?.sync_all()?;
+    remove_empty_directory(data_dir, Path::new(SECRETS_DIR), "the secrets directory")
+}
+
+fn remove_config_temporary_files_in(
+    data_dir: &Path,
+    directory: &Path,
+    relative_directory: &Path,
+) -> Result<()> {
+    if !existing_directory(directory, "a configuration temporary-file directory")? {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if is_config_temporary_name(&name) {
+            remove_owned_file(
+                data_dir,
+                &relative_directory.join(&name),
+                "a known configuration temporary file",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn load_deinit_config(data_dir: &Path) -> Result<Option<Config>> {
+    let path = config_path(data_dir);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::Config(format!(
+            "cannot deinitialize configuration at {}; refusing to follow symlink",
+            path.display()
+        ))),
+        Ok(metadata) if !metadata.is_file() => Err(Error::Config(format!(
+            "cannot deinitialize configuration at {}; expected a regular file",
+            path.display()
+        ))),
+        Ok(_) => Ok(Some(parse_config(&fs::read_to_string(path)?)?)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn preflight_known_secret_files(data_dir: &Path) -> Result<()> {
+    let secrets = data_dir.join(SECRETS_DIR);
+    if !existing_directory(&secrets, "the secrets directory")? {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&secrets)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if is_canonical_secret_name(&name) || is_recovery_secret_name(&name) {
+            checked_owned_file(
+                data_dir,
+                &Path::new(SECRETS_DIR).join(&name),
+                "a known secret file",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_deinit(data_dir: &Path, recipient_rel: &Path) -> Result<()> {
+    checked_owned_file(data_dir, recipient_rel, "the recipient certificate")?;
+    checked_owned_file(data_dir, Path::new(INDEX_FILE), "the metadata database")?;
+    checked_owned_file(data_dir, Path::new(CONFIG_FILE), "the configuration")?;
+    preflight_known_secret_files(data_dir)?;
+    remove_config_temporary_files_in(data_dir, data_dir, Path::new(""))?;
+    remove_config_temporary_files_in(data_dir, &data_dir.join(KEYS_DIR), Path::new(KEYS_DIR))?;
+    Ok(())
+}
+
+fn open_complete_store(data_dir: &Path) -> Result<Option<Store>> {
+    let has_index =
+        checked_owned_file(data_dir, Path::new(INDEX_FILE), "the metadata database")?.is_some();
+    let has_secrets = existing_directory(&data_dir.join(SECRETS_DIR), "the secrets directory")?;
+    if has_index && has_secrets {
+        Ok(Some(Store::open_existing(data_dir)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Remove Noirpass-owned state without following symlinks or touching unknown files.
+pub fn deinit(data_dir: &Path) -> Result<()> {
+    if !existing_directory(data_dir, "the selected store")? {
+        return Ok(());
+    }
+
+    let config = load_deinit_config(data_dir)?;
+    let recipient_rel = config.as_ref().map_or_else(
+        || PathBuf::from(RECIPIENT_REL),
+        |config| config.recipient_cert.clone(),
+    );
+    preflight_deinit(data_dir, &recipient_rel)?;
+    let _store_guard = open_complete_store(data_dir)?;
+
+    remove_owned_file(data_dir, &recipient_rel, "the recipient certificate")?;
+    remove_known_secret_files(data_dir)?;
+    remove_owned_file(data_dir, Path::new(INDEX_FILE), "the metadata database")?;
+    remove_config_temporary_files_in(data_dir, data_dir, Path::new(""))?;
+    remove_config_temporary_files_in(data_dir, &data_dir.join(KEYS_DIR), Path::new(KEYS_DIR))?;
+    remove_empty_directory(data_dir, Path::new(KEYS_DIR), "the keys directory")?;
+    remove_owned_file(data_dir, Path::new(CONFIG_FILE), "the configuration")?;
+    fs::File::open(data_dir)?.sync_all()?;
+    Ok(())
+}
+
+fn load_configured_recipient(data_dir: &Path) -> Result<(Config, Cert, String)> {
     let config = Config::load(data_dir)?;
     if config.version != CONFIG_VERSION {
         return Err(Error::Config(format!(
@@ -322,15 +614,18 @@ pub fn load_recipient(data_dir: &Path) -> Result<Recipient> {
             config.recipient_fingerprint, actual
         )));
     }
+    Ok((config, cert, actual))
+}
+
+/// Load config and recipient certificate, validating consistency and key usability.
+pub fn load_recipient(data_dir: &Path) -> Result<Recipient> {
+    let (_, cert, fingerprint) = load_configured_recipient(data_dir)?;
     if !has_usable_encryption_key(&cert) {
         return Err(Error::Config(
             "recipient certificate has no usable encryption-capable key".into(),
         ));
     }
-    Ok(Recipient {
-        cert,
-        fingerprint: actual,
-    })
+    Ok(Recipient { cert, fingerprint })
 }
 
 /// Compute status without mutating store.
@@ -597,18 +892,85 @@ mod tests {
     }
 
     #[test]
-    fn reinit_different_recipient_succeeds_when_store_has_no_secret_files() {
+    fn deinit_removes_known_state_and_preserves_unknown_files() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+
+        let item_id = "0123456789abcdef0123456789abcdef";
+        let recovery = format!(".noirpass-create-{item_id}-0123456789abcdef.gpg");
+        drop(Store::open(tmp.path()).unwrap());
+        fs::create_dir_all(tmp.path().join(SECRETS_DIR)).unwrap();
+        fs::write(
+            tmp.path().join(SECRETS_DIR).join(format!("{item_id}.gpg")),
+            b"secret",
+        )
+        .unwrap();
+        fs::write(tmp.path().join(SECRETS_DIR).join(recovery), b"recovery").unwrap();
+        fs::write(tmp.path().join(SECRETS_DIR).join("keep.txt"), b"unrelated").unwrap();
+        fs::write(
+            tmp.path()
+                .join(KEYS_DIR)
+                .join(".noirpass-tmp-0123456789abcdef"),
+            b"temporary",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join(".noirpass-tmp-0123456789abcdef"),
+            b"temporary",
+        )
+        .unwrap();
+        fs::write(tmp.path().join("keep.txt"), b"unrelated").unwrap();
+
+        deinit(tmp.path()).unwrap();
+
+        assert!(!config_path(tmp.path()).exists());
+        assert!(!recipient_cert_path(tmp.path()).exists());
+        assert!(!tmp.path().join("index.redb").exists());
+        assert!(
+            !tmp.path()
+                .join(SECRETS_DIR)
+                .join(format!("{item_id}.gpg"))
+                .exists()
+        );
+        assert!(
+            !tmp.path()
+                .join(SECRETS_DIR)
+                .join(format!(".noirpass-create-{item_id}-0123456789abcdef.gpg"))
+                .exists()
+        );
+        assert!(tmp.path().join(SECRETS_DIR).join("keep.txt").exists());
+        assert!(tmp.path().join("keep.txt").exists());
+        assert!(
+            !tmp.path()
+                .join(KEYS_DIR)
+                .join(".noirpass-tmp-0123456789abcdef")
+                .exists()
+        );
+        assert!(!tmp.path().join(".noirpass-tmp-0123456789abcdef").exists());
+    }
+
+    #[test]
+    fn reinit_different_recipient_fails_even_when_store_has_no_secret_files() {
         let one = TestGnupg::new();
         let two = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
         init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        let old_config = fs::read(config_path(tmp.path())).unwrap();
+        let old_cert = fs::read(recipient_cert_path(tmp.path())).unwrap();
 
-        let config = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap();
+        let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
 
-        assert_eq!(config.recipient_fingerprint, two.fingerprint());
+        assert!(
+            err.to_string()
+                .contains("Noirpass is initialized with a different recipient")
+        );
+        assert!(err.to_string().contains("noirpass deinit"));
+        assert_eq!(fs::read(config_path(tmp.path())).unwrap(), old_config);
+        assert_eq!(fs::read(recipient_cert_path(tmp.path())).unwrap(), old_cert);
         assert_eq!(
             load_recipient(tmp.path()).unwrap().fingerprint,
-            two.fingerprint()
+            one.fingerprint()
         );
     }
 
@@ -623,7 +985,10 @@ mod tests {
 
         let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
 
-        assert!(err.to_string().contains("recipient rotation"));
+        assert!(
+            err.to_string()
+                .contains("Noirpass is initialized with a different recipient")
+        );
         assert_eq!(
             load_recipient(tmp.path()).unwrap().fingerprint,
             one.fingerprint()

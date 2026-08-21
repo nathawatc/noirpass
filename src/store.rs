@@ -237,7 +237,7 @@ fn ensure_dir_0700(dir: &Path) -> Result<()> {
 /// Validate store paths without opening redb.
 fn existing_store_paths(dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let secrets_dir = dir.join("secrets");
-    let secrets_meta = fs::metadata(&secrets_dir)?;
+    let secrets_meta = fs::symlink_metadata(&secrets_dir)?;
     if !secrets_meta.is_dir() {
         return Err(Error::Config(format!(
             "store secrets path is not a directory: {}",

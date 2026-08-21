@@ -128,20 +128,34 @@ noirpass status
 `noirpass status` should report `initialized: yes`; it also confirms matching secret-key access
 through `gpg-agent`.
 
-Do not replace recipient key after storing secrets. Existing secrets remain encrypted for original
-key. Noirpass rejects unsafe recipient changes in non-empty store.
+Primary OpenPGP fingerprint is Noirpass recipient identity. Reinitializing with a refreshed
+certificate for same primary is allowed. Recipient rotation/migration is unsupported, and Noirpass
+rejects different primary even when store has no secrets. To change primary, explicitly run:
+
+```sh
+noirpass deinit
+noirpass init --recipient <FILE|->
+```
+
+`init` never deletes data or invokes `deinit`.
 
 ## Commands
 
-| Command                               | Description                                      |
-| ------------------------------------- | ------------------------------------------------ |
-| `noirpass init --recipient <FILE\|->` | Set up recipient from file or standard input     |
-| `noirpass status`                     | Check setup and secret-key availability          |
-| `noirpass list`                       | List saved entries without showing secret values |
-| `noirpass delete <ITEM-ID>`           | Delete one entry after confirmation              |
-| `noirpass check`                      | Check store and offer integrity repairs          |
+| Command                               | Description                                              |
+| ------------------------------------- | -------------------------------------------------------- |
+| `noirpass init --recipient <FILE\|->` | Set up recipient from file or standard input             |
+| `noirpass deinit`                     | Permanently delete Noirpass data after two confirmations |
+| `noirpass status`                     | Check setup and secret-key availability                  |
+| `noirpass list`                       | List saved entries without showing secret values         |
+| `noirpass delete <ITEM-ID>`           | Delete one entry after confirmation                      |
+| `noirpass check`                      | Check store and offer integrity repairs                  |
 
-Use `--yes` with `delete` or `check` to skip confirmation.
+Use `--yes` with `delete` or `check` to skip confirmation. `deinit` deliberately has no `--yes`,
+force flag, non-interactive bypass, or piped-input authorization: it requires a real interactive TTY
+and two separate explicit `y`/`yes` confirmations. It permanently destroys Noirpass configuration,
+recipient information, metadata, encrypted secrets, and recognized recovery/transaction artifacts.
+Unknown or unowned files remain untouched; an unrelated file under `secrets/` does not block later
+fresh initialization, while possible `.gpg` ciphertext remains fail-closed.
 
 ### Data Location
 
@@ -173,7 +187,7 @@ By default, the daemon exits after five inactive minutes with no client session.
 
 ## Maintenance
 
-Stop daemon before `list`, `delete`, or `check`; maintenance needs exclusive store access:
+Stop daemon before `list`, `delete`, `check`, or `deinit`; maintenance needs exclusive store access:
 
 ```sh
 systemctl --user stop noirpass.service

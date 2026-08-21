@@ -17,7 +17,7 @@ D-Bus-activated daemon serves one shared store; exits after inactivity only with
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/lib.rs`                         | Crate modules and shared `Error`/`Result` exports.                                                                                                        |
 | `src/main.rs`                        | CLI, setup/maintenance commands, startup validation, D-Bus connection, object registration, name ownership, vanished-client reaper, idle/signal shutdown. |
-| `src/config.rs`                      | Versioned config, recipient import/load/status, path validation, atomic durable writes, unsafe rotation prevention.                                       |
+| `src/config.rs`                      | Versioned config, recipient import/load/status, path validation, atomic durable writes, recipient lifecycle enforcement, and safe deinitialization.       |
 | `src/gpg.rs`                         | Recipient validation, in-process OpenPGP encryption, `gpg-agent` decryption and secret-key availability checks.                                           |
 | `src/store.rs` and `src/store/*`     | redb metadata, ciphertext files, transactional mutation, recovery, integrity reporting, poisoned-store handling.                                          |
 | `src/service.rs` and `src/service/*` | Shared state, Service interface, session ownership, object-path helpers, registration coordination.                                                       |
@@ -81,14 +81,27 @@ not OpenPGP confidentiality.
 
 ## Configuration and Recipient Lifecycle
 
-`noirpass init` accepts armored or binary public certificate from file or stdin. Initialization:
+`noirpass init` accepts armored or binary public certificate from file or stdin. The primary OpenPGP
+fingerprint is Noirpass recipient identity. Initialization:
 
 1. Parses certificate and requires current usable encryption key.
-2. For non-empty store, verifies existing recipient and rejects fingerprint change.
-3. Writes binary certificate atomically and durably.
-4. Writes versioned config atomically and durably.
-5. Restores previous certificate if config write fails.
-6. Creates redb store and default collection.
+2. If `config.toml` already exists, verifies existing recipient and rejects a different primary
+   fingerprint before writing anything; this applies even when the store has zero secrets.
+3. If no config exists but encrypted secret files exist, verifies the existing recipient before
+   allowing initialization.
+4. Writes binary certificate atomically and durably.
+5. Writes versioned config atomically and durably.
+6. Restores previous certificate if config write fails.
+7. Creates redb store and default collection.
+
+Initialization probes store health only when `index.redb` exists. An empty or unrelated `secrets/`
+directory alone is not an existing Noirpass store and does not block fresh initialization. Possible
+`.gpg` ciphertext without metadata remains fail-closed through existing recipient/state validation.
+
+Reinitialization with a refreshed certificate whose primary fingerprint is unchanged is allowed.
+Recipient rotation and migration are unsupported. A different primary fingerprint requires the
+separate, explicit `noirpass deinit` command followed by a new `noirpass init`; `init` never invokes
+`deinit` and never deletes existing state.
 
 Configured certificate path: relative, non-empty, only normal components; cannot escape store root.
 `idle_exit` is an optional integer greater than or equal to -1. Omission defaults to 300; positive
@@ -102,8 +115,15 @@ field is absent.
 Startup and `status` validate config version, certificate presence, configured/actual fingerprint
 equality, usable encryption key, corresponding secret-key availability through `gpg-agent`.
 
-Recipient rotation not implemented. Recipient change with ciphertext would strand old values; reject
-instead of partial migration.
+Recipient rotation and migration are not implemented. Recipient change would strand existing
+values, so a different primary is rejected instead of partially migrating or re-encrypting.
+
+`noirpass deinit` permanently destroys Noirpass-owned configuration, recipient certificate, metadata
+(index), encrypted secret files, and recognized transaction/recovery artifacts. It removes only
+known paths inside the selected store, refuses symlinks, and retains unknown files. Deinitialization
+is interactive-only: stdin must be a TTY and two separate explicit `y`/`yes` confirmations must
+succeed. There is deliberately no `--yes`, force flag, environment bypass, or non-interactive path.
+No destructive operation starts before both confirmations succeed.
 
 ## Secret Boundaries
 
@@ -133,6 +153,9 @@ Core rules:
 - Secret file replacement uses private temporary/backup files, restrictive modes, rename, file sync,
   and parent-directory sync.
 - Startup maintenance recovers recognized interrupted-operation artifacts before serving.
+- Deinitialization removes canonical `<item-id>.gpg` files and recognized
+  `.noirpass-{create,update,quarantine,backup}-<item-id>-<token>.gpg` artifacts only; unknown files
+  remain.
 - Canonical corrupt item metadata is an explicit repair category. When a valid canonical item key
   holds malformed, unparseable, or invalid item-record metadata, `check` treats the item as
   corrupt as a whole: after confirmation it deletes metadata and associated ciphertext;
@@ -256,14 +279,16 @@ forever. SIGINT/SIGTERM trigger graceful name release and process exit.
 - `status`: validates config, certificate, recipient key, and `gpg-agent` secret-key access; exits
   nonzero when unusable.
 - `list`: reads metadata only and marks missing ciphertext.
+- `deinit`: after two TTY confirmations, removes known Noirpass state and leaves unknown files.
 - `delete`: removes one indexed item and ciphertext after terminal confirmation unless `--yes`.
 - `check`: reports all integrity categories; after confirmation or with `--yes`, repairs missing-
   ciphertext stale items, corrupt item records (full deletion for canonical keys, metadata-only for
   non-canonical keys), and corrupt aliases; it leaves findings without proven ownership or
   transaction state unresolved and exits nonzero while findings remain.
 
-Maintenance commands open existing redb store and recover interrupted operations. Stop daemon first;
-redb writer access is process-exclusive. Non-interactive destructive operation requires `--yes`.
+`list`, `delete`, and `check` open existing redb store and recover interrupted operations. Stop daemon
+first; redb writer access is process-exclusive. `delete` and `check` support `--yes`; `deinit` is
+intentionally TTY-only and has no non-interactive bypass.
 
 ## Systemd and Activation
 

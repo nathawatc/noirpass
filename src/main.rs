@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 use zbus::export::futures_core::Stream;
 
-use noirpass::config::{Config, init_from_path, load_recipient, status};
+use noirpass::config::{Config, deinit, init_from_path, load_recipient, status};
 use noirpass::gpg::Gpg;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
 use noirpass::session::Session;
@@ -65,6 +65,8 @@ enum Command {
         #[arg(long)]
         recipient: String,
     },
+    /// Permanently delete all Noirpass-owned state after two confirmations.
+    Deinit,
     /// Report whether the noirpass store is initialized and usable.
     Status,
     /// List indexed secrets without decrypting them.
@@ -107,15 +109,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Some(Command::Init { recipient }) => {
-            if store_dir.join("index.redb").exists() || store_dir.join("secrets").exists() {
-                Store::probe_health(&store_dir)?;
-            }
-            let config = init_from_path(&store_dir, &recipient)?;
-            let store = Store::open(&store_dir)?;
-            store.ensure_default()?;
-            println!("initialized: yes");
-            println!("data directory: {}", store_dir.display());
-            println!("recipient fingerprint: {}", config.recipient_fingerprint);
+            run_init(&store_dir, &recipient)?;
+            return Ok(());
+        }
+        Some(Command::Deinit) => {
+            run_deinit(&store_dir)?;
             return Ok(());
         }
         Some(Command::Status) => {
@@ -261,6 +259,59 @@ fn print_item(
     };
     println!("ciphertext: {ciphertext_state}");
     Ok(())
+}
+
+fn run_init(store_dir: &Path, recipient: &str) -> noirpass::Result<()> {
+    if store_dir.join("index.redb").exists() {
+        Store::probe_health(store_dir)?;
+    }
+    let config = init_from_path(store_dir, recipient)?;
+    let store = Store::open(store_dir)?;
+    store.ensure_default()?;
+    println!("initialized: yes");
+    println!("data directory: {}", store_dir.display());
+    println!("recipient fingerprint: {}", config.recipient_fingerprint);
+    Ok(())
+}
+
+fn run_deinit(store_dir: &Path) -> noirpass::Result<()> {
+    eprintln!(
+        "WARNING: This will permanently delete all Noirpass data,\nincluding encrypted secrets, metadata, configuration,\nand recipient information."
+    );
+    if !confirm_interactive("Continue?")? {
+        println!("deinitialization cancelled");
+        return Ok(());
+    }
+
+    eprintln!("This operation cannot be undone.");
+    if !confirm_interactive("Are you sure you want to permanently delete the Noirpass store?")? {
+        println!("deinitialization cancelled");
+        return Ok(());
+    }
+
+    deinit(store_dir)?;
+    println!("deinitialized: yes");
+    println!("data directory: {}", store_dir.display());
+    Ok(())
+}
+
+fn confirm_interactive(prompt: &str) -> noirpass::Result<bool> {
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        return Err(noirpass::Error::Config(
+            "deinitialization requires an interactive terminal; piped confirmation is not accepted"
+                .into(),
+        ));
+    }
+
+    eprint!("{prompt} [y/N] ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    stdin.read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn confirm(prompt: &str, assume_yes: bool) -> noirpass::Result<bool> {
