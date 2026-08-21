@@ -139,7 +139,7 @@ key. Noirpass rejects unsafe recipient changes in non-empty store.
 | `noirpass status`                     | Check setup and secret-key availability          |
 | `noirpass list`                       | List saved entries without showing secret values |
 | `noirpass delete <ITEM-ID>`           | Delete one entry after confirmation              |
-| `noirpass check`                      | Check store and offer safe repairs               |
+| `noirpass check`                      | Check store and offer integrity repairs          |
 
 Use `--yes` with `delete` or `check` to skip confirmation.
 
@@ -185,8 +185,9 @@ systemctl --user start noirpass.service
 Back up complete Noirpass data directory before repairs, upgrades, or key migration. Keep original
 OpenPGP secret key available; loss makes saved secret values unrecoverable.
 
-`noirpass check` removes only stale entries after confirmation. Unmatched encrypted files remain
-reported and preserved.
+`noirpass check` reports integrity findings and asks before applying repairs. A corrupt item with a
+valid canonical item ID is treated as corrupt as a whole: confirmation deletes its metadata and
+associated ciphertext.
 
 > [!NOTE]
 > Security Expectations

@@ -133,8 +133,16 @@ Core rules:
 - Secret file replacement uses private temporary/backup files, restrictive modes, rename, file sync,
   and parent-directory sync.
 - Startup maintenance recovers recognized interrupted-operation artifacts before serving.
-- Unknown, corrupt, mismatched, or ambiguous state is reported and retained rather than guessed
-  away.
+- Canonical corrupt item metadata is an explicit repair category. When a valid canonical item key
+  holds malformed, unparseable, or invalid item-record metadata, `check` treats the item as
+  corrupt as a whole: after confirmation it deletes metadata and associated ciphertext;
+  `check --yes` skips confirmation. It does not reconstruct metadata from ciphertext.
+- For a non-canonical item key, repair is metadata-only. `check` may delete the corrupt redb record
+  but never uses the invalid key to infer a ciphertext path.
+- Valid metadata with a ciphertext digest mismatch, invalid collection ownership, unknown/orphan
+  ciphertext, and recovery artifacts whose ownership or transaction state is not proven are
+  reported and retained. Other ambiguous state is retained as well; destructive recovery must
+  establish ownership and transaction state rather than guess or delete unrelated ciphertext.
 - Indeterminate redb commit poisons Store. All later operations fail; daemon must not continue with
   uncertain state.
 - Startup `ensure_safe_to_serve` blocks D-Bus service when integrity defects could expose
@@ -155,8 +163,11 @@ behavior.
 - orphan ciphertext;
 - recoverable backup/quarantine artifacts.
 
-Offline `check` may offer stale metadata deletion where ciphertext is absent. Preserve orphan or
-mismatched ciphertext; automatic ownership inference risks data loss.
+Offline `check` applies explicit repairs: it may remove stale metadata when ciphertext is absent
+and may delete canonical corrupt items—including associated ciphertext—after confirmation;
+`--yes` skips confirmation. It does not reconstruct metadata from ciphertext. Non-canonical
+corrupt item keys are metadata-only repairs. Orphan/unknown ciphertext and recovery artifacts with
+unproven ownership or transaction state remain preserved.
 
 ## D-Bus Object Model
 
@@ -245,8 +256,10 @@ forever. SIGINT/SIGTERM trigger graceful name release and process exit.
   nonzero when unusable.
 - `list`: reads metadata only and marks missing ciphertext.
 - `delete`: removes one indexed item and ciphertext after terminal confirmation unless `--yes`.
-- `check`: reports all integrity categories; repairs only approved stale metadata; exits nonzero
-  while unresolved findings remain.
+- `check`: reports all integrity categories; after confirmation or with `--yes`, repairs missing-
+  ciphertext stale items, corrupt item records (full deletion for canonical keys, metadata-only for
+  non-canonical keys), and corrupt aliases; it leaves findings without proven ownership or
+  transaction state unresolved and exits nonzero while findings remain.
 
 Maintenance commands open existing redb store and recover interrupted operations. Stop daemon first;
 redb writer access is process-exclusive. Non-interactive destructive operation requires `--yes`.

@@ -63,7 +63,12 @@ All gates must pass with zero warnings. Claim pass only with command output.
 - Keep object-server registration, persistent state, aliases, and emitted property signals
   synchronized.
 - Treat uncertain persistence commit as poisoned store; stop serving and writing.
-- Never repair corruption destructively without explicit, evidence-based policy.
+- Never repair corruption destructively without explicit, evidence-based policy. Canonical corrupt
+  item metadata is explicit policy: when table key is a valid canonical item ID, `check` treats the
+  item as corrupt as a whole and may delete metadata plus associated ciphertext after confirmation
+  or with `check --yes`; it never reconstructs metadata from ciphertext. Non-canonical keys,
+  orphan/unknown ciphertext, and uncertain ownership or transaction state remain conservative: never
+  infer paths or delete unrelated files.
 
 ## Test Safety
 
