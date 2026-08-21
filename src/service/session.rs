@@ -5,6 +5,7 @@
 //! Session objects live at `/org/freedesktop/secrets/session/s<n>` and only
 //! support `Close`.
 
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use zbus::interface;
 use zbus::object_server::ObjectServer;
 use zbus::zvariant::{OwnedObjectPath, Type};
+use zeroize::Zeroizing;
 
 use crate::service::{SecretError, ServiceState, message_sender};
 
@@ -22,16 +24,28 @@ use crate::service::{SecretError, ServiceState, message_sender};
 ///   for plain sessions.
 /// * `value` — the (possibly encrypted) secret value.
 /// * `content_type` — MIME content type of the plaintext value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[zvariant(signature = "(oayays)")]
 pub struct Secret {
     /// Session the secret is encoded for.
     pub session: OwnedObjectPath,
     /// Algorithm parameters (AES IV, or empty for plain).
     pub parameters: Vec<u8>,
     /// The possibly-encrypted secret value.
-    pub value: Vec<u8>,
+    pub value: Zeroizing<Vec<u8>>,
     /// MIME content type of the plaintext.
     pub content_type: String,
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Secret")
+            .field("session", &self.session)
+            .field("parameters", &self.parameters)
+            .field("value", &"[REDACTED]")
+            .field("content_type", &self.content_type)
+            .finish()
+    }
 }
 
 /// A `org.freedesktop.Secret.Session` D-Bus object.
@@ -115,11 +129,25 @@ mod tests {
     }
 
     #[test]
+    fn secret_debug_redacts_value() {
+        let secret = Secret {
+            session: OwnedObjectPath::try_from("/org/freedesktop/secrets/session/s1").unwrap(),
+            parameters: Vec::new(),
+            value: Zeroizing::new(b"do not print this".to_vec()),
+            content_type: "text/plain".to_string(),
+        };
+
+        let debug = format!("{secret:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("do not print this"));
+    }
+
+    #[test]
     fn secret_zvariant_roundtrip() {
         let secret = Secret {
             session: OwnedObjectPath::try_from("/org/freedesktop/secrets/session/s1").unwrap(),
             parameters: vec![1, 2, 3, 4],
-            value: vec![9, 8, 7],
+            value: Zeroizing::new(vec![9, 8, 7]),
             content_type: "text/plain".to_string(),
         };
 

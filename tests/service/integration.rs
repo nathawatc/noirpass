@@ -30,6 +30,7 @@ use noirpass::store::{CollectionMeta, Store};
 use redb::{Database, TableDefinition};
 use zbus::export::futures_core::Stream;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zeroize::Zeroizing;
 
 use super::common::{
     export_public_cert, fake_gpg_dir, init_noirpass_store, record_daemon_pid, setup_gnupg, sigterm,
@@ -438,7 +439,7 @@ async fn s6_get_secrets_bulk() {
     assert_eq!(secrets.len(), 3);
     for (path, secret) in &secrets {
         assert!(secret.parameters.is_empty());
-        assert_eq!(&secret.value, &expected[path]);
+        assert_eq!(secret.value.as_slice(), expected[path].as_slice());
         assert_eq!(secret.content_type, "text/plain");
     }
 
@@ -475,7 +476,9 @@ async fn s6_get_secrets_bulk() {
         .unwrap();
     assert_eq!(secrets.len(), 3);
     for (path, secret) in &secrets {
-        let plaintext = cipher.decrypt(&secret.parameters, &secret.value).unwrap();
+        let plaintext = cipher
+            .decrypt(&secret.parameters, secret.value.as_slice())
+            .unwrap();
         assert_eq!(&plaintext[..], &expected[path][..]);
     }
 
@@ -533,7 +536,7 @@ async fn assert_foreign_item_operations_rejected(
     let foreign_secret = WireSecret {
         session: session.clone(),
         parameters: Vec::new(),
-        value: b"foreign session value".to_vec(),
+        value: Zeroizing::new(b"foreign session value".to_vec()),
         content_type: "text/plain".to_string(),
     };
     let err = attacker_item

@@ -234,9 +234,9 @@ fn decrypt_blocking(
         .with_policy(&policy, None, helper)
         .map_err(pgp_err)?;
 
-    let mut out = Vec::new();
-    io::copy(&mut decryptor, &mut out)?;
-    Ok(Zeroizing::new(out))
+    let mut out = Zeroizing::new(Vec::new());
+    io::copy(&mut decryptor, &mut *out)?;
+    Ok(out)
 }
 
 /// A [`DecryptionHelper`] that unlocks PKESKs through `gpg-agent` keypairs.

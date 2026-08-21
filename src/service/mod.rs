@@ -562,7 +562,7 @@ mod tests {
         let occupied_cipher = state.session_cipher(&occupied, ":1.7").unwrap();
         let (parameters, value) = occupied_cipher.encrypt(b"collision probe");
         assert!(parameters.is_empty());
-        assert_eq!(value, b"collision probe");
+        assert_eq!(value.as_slice(), b"collision probe");
         assert!(state.session_cipher(&occupied, ":1.8").is_none());
         let replacement_cipher = state.session_cipher(&replacement, ":1.8").unwrap();
         let (parameters, _) = replacement_cipher.encrypt(b"collision probe");

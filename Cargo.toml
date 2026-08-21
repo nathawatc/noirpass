@@ -44,7 +44,7 @@ cbc = "0.2.1"
 # `env` (feature addition) enables `#[arg(env = ...)]` for NOIRPASS_STORE.
 clap = { version = "4.6.2", features = ["derive", "env"] }
 hkdf = "0.13.0"
-num-bigint-dig = "0.9.1"
+num-bigint-dig = { version = "0.9.1", features = ["zeroize"] }
 rand = "0.10.2"
 redb = "4.1.0"
 sequoia-gpg-agent = "0.6.2"
@@ -60,7 +60,7 @@ toml_edit = "0.25.13"
 # `p2p` (feature addition, not a version change) enables in-process
 # peer-to-peer connections used by the D-Bus layer smoke tests.
 zbus = { version = "5.18.0", default-features = false, features = ["tokio", "p2p"] }
-zeroize = "1.9.0"
+zeroize = { version = "1.9.0", features = ["serde"] }
 
 [dev-dependencies]
 oo7 = { version = "0.7.0-alpha", default-features = false, features = ["tokio", "native_crypto"] }

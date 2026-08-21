@@ -54,10 +54,10 @@ fn prime() -> BigUint {
 /// serialized as fixed-width 128-byte big-endian values so that the HKDF input
 /// (and the bytes on the wire) match the peer's.
 fn pad_be(value: &BigUint) -> Vec<u8> {
-    let raw = value.to_bytes_be();
+    let raw = Zeroizing::new(value.to_bytes_be());
     debug_assert!(raw.len() <= GROUP_BYTES);
     let mut out = vec![0u8; GROUP_BYTES - raw.len()];
-    out.extend_from_slice(&raw);
+    out.extend_from_slice(raw.as_slice());
     out
 }
 
@@ -79,7 +79,7 @@ pub struct DhKey {
 /// Holds the server's private exponent and matching public key until the
 /// client's public key arrives and the shared key is derived.
 pub struct DhHandshake {
-    private: BigUint,
+    private: Zeroizing<BigUint>,
     public: BigUint,
 }
 
@@ -88,16 +88,16 @@ impl DhHandshake {
     /// exponent and compute the matching public key `g^priv mod p`.
     #[must_use]
     pub fn generate() -> Self {
-        let private_bytes: [u8; GROUP_BYTES] = {
+        let private_bytes = {
             // 128 random bytes; the group order is ~2^1024 so this is a valid
             // exponent with overwhelming probability.
-            let mut buf = [0u8; GROUP_BYTES];
-            for b in &mut buf {
+            let mut buf = Zeroizing::new([0u8; GROUP_BYTES]);
+            for b in &mut *buf {
                 *b = rand::random();
             }
             buf
         };
-        Self::from_private_bytes(&private_bytes)
+        Self::from_private_bytes(&private_bytes[..])
     }
 
     /// Build a handshake from an explicit private exponent (used for
@@ -105,7 +105,7 @@ impl DhHandshake {
     fn from_private_bytes(private_bytes: &[u8]) -> Self {
         let p = prime();
         let g = BigUint::from(2u32);
-        let private = BigUint::from_bytes_be(private_bytes);
+        let private = Zeroizing::new(BigUint::from_bytes_be(private_bytes));
         let public = g.modpow(&private, &p);
         Self { private, public }
     }
@@ -144,11 +144,11 @@ impl DhHandshake {
             ));
         }
 
-        let shared = client.modpow(&self.private, &p);
-        let ikm = pad_be(&shared);
+        let shared = Zeroizing::new(client.modpow(&self.private, &p));
+        let ikm = Zeroizing::new(pad_be(&shared));
 
         // HKDF-SHA256 with no salt and empty info, per the spec / libsecret.
-        let hk = Hkdf::<Sha256>::new(None, &ikm);
+        let hk = Hkdf::<Sha256>::new(None, ikm.as_slice());
         let mut key = Zeroizing::new([0u8; 16]);
         hk.expand(&[], key.as_mut())
             .map_err(|e| Error::Crypto(format!("HKDF expand failed: {e}")))?;
@@ -164,9 +164,9 @@ impl SessionCipher {
     /// returned unchanged. For a DH session a fresh random 16-byte IV is used
     /// with AES-128-CBC/PKCS7.
     #[must_use]
-    pub fn encrypt(&self, plaintext: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    pub fn encrypt(&self, plaintext: &[u8]) -> (Vec<u8>, Zeroizing<Vec<u8>>) {
         match self {
-            SessionCipher::Plain => (Vec::new(), plaintext.to_vec()),
+            SessionCipher::Plain => (Vec::new(), Zeroizing::new(plaintext.to_vec())),
             SessionCipher::Dh(dh) => {
                 let iv: [u8; 16] = {
                     let mut buf = [0u8; 16];
@@ -175,15 +175,17 @@ impl SessionCipher {
                     }
                     buf
                 };
-                let key: [u8; 16] = *dh.key;
                 // Exact padded length: always at least one full padding block.
                 let padded_len = (plaintext.len() / 16 + 1) * 16;
-                let mut buf = vec![0u8; padded_len];
+                let mut buf = Zeroizing::new(vec![0u8; padded_len]);
                 buf[..plaintext.len()].copy_from_slice(plaintext);
-                let ct = Aes128CbcEnc::new(&key.into(), &iv.into())
-                    .encrypt_padded::<Pkcs7>(&mut buf, plaintext.len())
-                    .expect("buffer sized for PKCS7 padding")
-                    .to_vec();
+                let ct = Zeroizing::new(
+                    Aes128CbcEnc::new_from_slices(&dh.key[..], &iv)
+                        .expect("fixed-size AES key and IV")
+                        .encrypt_padded::<Pkcs7>(&mut buf[..], plaintext.len())
+                        .expect("buffer sized for PKCS7 padding")
+                        .to_vec(),
+                );
                 (iv.to_vec(), ct)
             }
         }
@@ -201,12 +203,14 @@ impl SessionCipher {
                 let iv: [u8; 16] = iv
                     .try_into()
                     .map_err(|_| Error::Crypto("IV must be 16 bytes".into()))?;
-                let key: [u8; 16] = *dh.key;
-                let mut buf = ciphertext.to_vec();
-                let pt = Aes128CbcDec::new(&key.into(), &iv.into())
-                    .decrypt_padded::<Pkcs7>(&mut buf)
-                    .map_err(|e| Error::Crypto(format!("AES-CBC decrypt failed: {e}")))?;
-                Ok(Zeroizing::new(pt.to_vec()))
+                let mut buf = Zeroizing::new(ciphertext.to_vec());
+                let plaintext_len = Aes128CbcDec::new_from_slices(&dh.key[..], &iv)
+                    .expect("fixed-size AES key and IV")
+                    .decrypt_padded::<Pkcs7>(&mut buf[..])
+                    .map_err(|e| Error::Crypto(format!("AES-CBC decrypt failed: {e}")))?
+                    .len();
+                buf.truncate(plaintext_len);
+                Ok(buf)
             }
         }
     }
@@ -315,11 +319,23 @@ mod tests {
     }
 
     #[test]
+    fn malformed_ciphertext_fails() {
+        let server = DhHandshake::generate();
+        let client = DhHandshake::generate();
+        let cipher = server.derive(&client.public_bytes()).unwrap();
+
+        assert!(cipher.decrypt(&[0u8; 16], &[]).is_err());
+        assert!(cipher.decrypt(&[0u8; 16], &[0u8; 15]).is_err());
+        assert!(cipher.decrypt(&[0u8; 16], &[0u8; 17]).is_err());
+        assert!(cipher.decrypt(&[0u8; 15], &[]).is_err());
+    }
+
+    #[test]
     fn plain_passthrough() {
         let cipher = SessionCipher::Plain;
         let (iv, ct) = cipher.encrypt(b"hello");
         assert!(iv.is_empty());
-        assert_eq!(ct, b"hello");
+        assert_eq!(ct.as_slice(), b"hello");
         let pt = cipher.decrypt(&iv, &ct).unwrap();
         assert_eq!(&pt[..], b"hello");
     }
