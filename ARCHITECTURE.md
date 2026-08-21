@@ -183,11 +183,12 @@ One `Collection` implementation serves canonical and alias paths. Alias-backed o
 through store per call; repointing becomes immediately visible. Alias names invalid as D-Bus path
 elements remain storable/readable through alias methods but lack served alias object.
 
-Noirpass logically always unlocked. `Locked` is false; `Lock` and `Unlock` complete immediately;
-actual access gate is `gpg-agent`.
+Noirpass has no lock state. `Item.Locked` and `Collection.Locked` are always false. `Unlock`
+reports requested objects as already unlocked. `Lock` cannot lock objects, so its `locked` result is
+always empty. The actual access gate is `gpg-agent`.
 
-No Prompt objects. Any prompt out-argument is root path `/`. Unknown alias from `ReadAlias` also
-returns `/`.
+No Prompt objects are exposed. `Lock` and `Unlock` return `/` as their prompt path. Unknown alias
+from `ReadAlias` also returns `/`.
 
 ## Object Lifecycle and Signals
 

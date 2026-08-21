@@ -9,11 +9,13 @@
 //!
 //! # Locking model
 //!
-//! noirpass is *always unlocked*: the real gate on secrets is `gpg-agent`,
-//! which enforces the user's passphrase/pinentry policy on every decryption.
-//! `Lock`/`Unlock` therefore complete immediately and `Locked` is always
-//! `false`; this is a deliberate, documented deviation from keyrings that
-//! implement their own locking.
+//! noirpass is *always unlocked*: `Item.Locked` and `Collection.Locked` are
+//! always `false`. The real gate on secrets is `gpg-agent`, which enforces the
+//! user's passphrase/pinentry policy on every decryption. `Unlock` reports
+//! requested objects as already unlocked. `Lock` cannot lock any object, so its
+//! `locked` result is empty. No Prompt object is exposed; both methods return
+//! `/` as their prompt path. This is a deliberate, documented deviation from
+//! keyrings that implement their own locking.
 
 mod objects;
 mod state;
@@ -234,16 +236,17 @@ impl Service {
         Ok((objects, root_path()))
     }
 
-    /// Lock objects. Deliberate no-op: the paths are echoed back as "locked",
-    /// but `Locked` stays `false` — `gpg-agent` is the real gate on secret
-    /// access, so noirpass has no lock state of its own.
+    /// Lock objects. Noirpass has no lock state, so no object can be
+    /// successfully locked. The `locked` result is empty, `Locked` stays
+    /// `false`, and `gpg-agent` remains the real gate on secret access.
     #[zbus(out_args("locked", "prompt"))]
     fn lock(
         &self,
         objects: Vec<OwnedObjectPath>,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
         let _activity = self.state.activity()?;
-        Ok((objects, root_path()))
+        drop(objects);
+        Ok((Vec::new(), root_path()))
     }
 
     /// Fetch the secrets of multiple items in one round trip.
