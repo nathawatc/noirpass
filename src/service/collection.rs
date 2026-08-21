@@ -15,11 +15,11 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{fdo, interface};
 
+use crate::service::session::Secret;
 use crate::service::{
     SERVICE_PATH, SecretError, Service, ServiceState, alias_path, collection_path, item_path,
     message_sender, object_removed_or_absent, register_item,
 };
-use crate::session::Secret;
 
 /// The "no prompt" object path.
 fn no_prompt() -> OwnedObjectPath {
@@ -198,7 +198,7 @@ impl Collection {
         for item_id in deleted.item_ids {
             if let Err(err) = object_removed_or_absent(
                 server
-                    .remove::<crate::item::Item, _>(&item_path(&id, &item_id))
+                    .remove::<crate::service::item::Item, _>(&item_path(&id, &item_id))
                     .await,
             ) && cleanup_error.is_none()
             {

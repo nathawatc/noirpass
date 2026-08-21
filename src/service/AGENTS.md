@@ -3,6 +3,11 @@
 Own Secret Service D-Bus behavior under `src/service/`, including service state, object
 registration, collections, items, and sessions.
 
+Standard Secret Service D-Bus compatibility is core product scope, not manager functionality. Keep
+collections, aliases, sessions, item properties, and required signals as protocol surface even when
+no Noirpass CLI command manages them. Rust module paths remain implementation details unless
+explicitly documented otherwise.
+
 ## Object Model and D-Bus Boundary
 
 Serve the Secret Service tree at:

@@ -19,6 +19,21 @@ Root rules. Read nearest `AGENTS.md` for narrower ownership guidance.
 Subsystem Rust files now live under their owning directories above. Keep new files within the
 nearest ownership boundary; do not duplicate guidance into child files.
 
+## Product Scope
+
+Noirpass is a simple, fast, secure persistent freedesktop Secret Service backend, not a
+password-manager or wallet-management product. Standard Secret Service D-Bus compatibility—including
+collections, aliases, sessions, item properties, and required signals—is core scope.
+
+The user-facing CLI is maintenance and lifecycle only: `init`, `deinit`, `status`, `list`, `delete`,
+and `check`. Secret editing/reveal, collection or alias management, recipient migration,
+re-encryption, import/export, backup management, sync, accounts, profiles, lock managers, prompts,
+UI, ACLs, plugins, and networking are out of scope.
+
+Rust module paths and internal Store APIs are implementation details unless explicitly documented
+otherwise. Do not add manager functionality unless required for standard Secret Service compatibility
+or core secret safety/persistence.
+
 ## Read First
 
 Before editing:

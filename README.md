@@ -2,6 +2,15 @@
 
 Minimal on-demand GPG-backed freedesktop Secret Service
 
+Noirpass is a minimal persistent freedesktop Secret Service backend. It stores Secret Service
+metadata in redb and OpenPGP-encrypted secret values on disk, using `gpg-agent` for private-key
+operations.
+
+Applications interact with Noirpass through the standard Secret Service D-Bus API. The Noirpass CLI
+is limited to initialization, inspection, deletion, integrity maintenance, and deinitialization.
+Noirpass intentionally does not provide password-manager UI, secret editing workflows, keyring
+management UI, recipient migration, sync, backup management, or other manager features.
+
 ## Before You Start
 
 Requirements:

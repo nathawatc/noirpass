@@ -8,7 +8,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use super::ServiceState;
 use crate::crypto::SessionCipher;
-use crate::session::Session;
+use crate::service::session::Session;
 
 /// Path of the service object.
 pub const SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -124,7 +124,7 @@ where
     }
 }
 
-/// Serve a [`crate::collection::Collection`] object for `collection_id`.
+/// Serve a [`crate::service::collection::Collection`] object for `collection_id`.
 pub async fn register_collection(
     server: &ObjectServer,
     state: &Arc<ServiceState>,
@@ -134,13 +134,13 @@ pub async fn register_collection(
     server
         .at(
             &path,
-            crate::collection::Collection::new(state.clone(), collection_id.to_string()),
+            crate::service::collection::Collection::new(state.clone(), collection_id.to_string()),
         )
         .await?;
     Ok(path)
 }
 
-/// Serve a [`crate::item::Item`] object for `item_id` in `collection_id`.
+/// Serve a [`crate::service::item::Item`] object for `item_id` in `collection_id`.
 pub async fn register_item(
     server: &ObjectServer,
     state: &Arc<ServiceState>,
@@ -151,7 +151,7 @@ pub async fn register_item(
     server
         .at(
             &path,
-            crate::item::Item::new(
+            crate::service::item::Item::new(
                 state.clone(),
                 collection_id.to_string(),
                 item_id.to_string(),
@@ -161,7 +161,7 @@ pub async fn register_item(
     Ok(path)
 }
 
-/// Serve a [`crate::collection::Collection`] object at the alias path
+/// Serve a [`crate::service::collection::Collection`] object at the alias path
 /// `/org/freedesktop/secrets/aliases/<name>` that resolves `name` at call
 /// time. Alias names that are not valid path elements are skipped.
 pub async fn register_alias(
@@ -173,7 +173,7 @@ pub async fn register_alias(
         server
             .at(
                 &path,
-                crate::collection::Collection::for_alias(state.clone(), name.to_string()),
+                crate::service::collection::Collection::for_alias(state.clone(), name.to_string()),
             )
             .await?;
     }
@@ -194,7 +194,7 @@ pub async fn unregister_alias(server: &ObjectServer, name: &str) -> zbus::Result
     if let Ok(path) = alias_path(name) {
         object_removed_or_absent(
             server
-                .remove::<crate::collection::Collection, _>(&path)
+                .remove::<crate::service::collection::Collection, _>(&path)
                 .await,
         )?;
     }

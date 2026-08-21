@@ -43,10 +43,10 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{fdo, interface};
 
 use crate::crypto::{DhHandshake, SessionCipher};
-use crate::session::Secret;
+use crate::service::session::Secret;
 
 #[cfg(test)]
-use crate::{gpg::Gpg, session::Session, store::Store};
+use crate::{gpg::Gpg, service::session::Session, store::Store};
 #[cfg(test)]
 use state::SESSION_ALLOCATION_ATTEMPTS;
 
@@ -63,8 +63,6 @@ pub enum SecretError {
     NoSession(String),
     /// The referenced object does not exist.
     NoSuchObject(String),
-    /// The object is locked (unused: noirpass is always unlocked).
-    IsLocked(String),
 }
 
 impl From<fdo::Error> for SecretError {
@@ -817,9 +815,14 @@ mod tests {
             zbus::MessageStream::for_match_rule(properties_rule, &client_conn, None)
                 .await
                 .unwrap();
-        object_removed_or_absent(server.remove::<crate::item::Item, _>(&first_path).await).unwrap();
+        object_removed_or_absent(
+            server
+                .remove::<crate::service::item::Item, _>(&first_path)
+                .await,
+        )
+        .unwrap();
 
-        crate::collection::Collection::new(state.clone(), collection.id.clone())
+        crate::service::collection::Collection::new(state.clone(), collection.id.clone())
             .delete_for_test(server, &server_conn)
             .await
             .unwrap();
@@ -853,14 +856,16 @@ mod tests {
         ));
         for path in [first_path, second_path] {
             assert!(matches!(
-                server.interface::<_, crate::item::Item>(&path).await,
+                server
+                    .interface::<_, crate::service::item::Item>(&path)
+                    .await,
                 Err(zbus::Error::InterfaceNotFound)
             ));
         }
         for path in [collection_path, alias_object] {
             assert!(matches!(
                 server
-                    .interface::<_, crate::collection::Collection>(&path)
+                    .interface::<_, crate::service::collection::Collection>(&path)
                     .await,
                 Err(zbus::Error::InterfaceNotFound)
             ));
@@ -943,7 +948,7 @@ mod tests {
                 .delete_item(&deletion_item.id)
                 .unwrap();
             deletion_server
-                .remove::<crate::item::Item, _>(&item_path(
+                .remove::<crate::service::item::Item, _>(&item_path(
                     &deletion_item.collection,
                     &deletion_item.id,
                 ))
@@ -962,7 +967,9 @@ mod tests {
             Err(crate::Error::NotFound(_))
         ));
         assert!(matches!(
-            server.interface::<_, crate::item::Item>(&item_object).await,
+            server
+                .interface::<_, crate::service::item::Item>(&item_object)
+                .await,
             Err(zbus::Error::InterfaceNotFound)
         ));
     }
@@ -1025,12 +1032,17 @@ mod tests {
                 .unwrap();
             for item_id in deleted.item_ids {
                 deletion_server
-                    .remove::<crate::item::Item, _>(&item_path(&deletion_collection, &item_id))
+                    .remove::<crate::service::item::Item, _>(&item_path(
+                        &deletion_collection,
+                        &item_id,
+                    ))
                     .await
                     .unwrap();
             }
             deletion_server
-                .remove::<crate::collection::Collection, _>(&collection_path(&deletion_collection))
+                .remove::<crate::service::collection::Collection, _>(&collection_path(
+                    &deletion_collection,
+                ))
                 .await
                 .unwrap();
         });
@@ -1047,13 +1059,13 @@ mod tests {
         ));
         assert!(matches!(
             server
-                .interface::<_, crate::item::Item>(item_path(&collection.id, &item_id))
+                .interface::<_, crate::service::item::Item>(item_path(&collection.id, &item_id))
                 .await,
             Err(zbus::Error::InterfaceNotFound)
         ));
         assert!(matches!(
             server
-                .interface::<_, crate::collection::Collection>(&collection_object)
+                .interface::<_, crate::service::collection::Collection>(&collection_object)
                 .await,
             Err(zbus::Error::InterfaceNotFound)
         ));
@@ -1109,7 +1121,9 @@ mod tests {
                 unregister_alias(&deletion_server, &name).await.unwrap();
             }
             deletion_server
-                .remove::<crate::collection::Collection, _>(&collection_path(&deletion_collection))
+                .remove::<crate::service::collection::Collection, _>(&collection_path(
+                    &deletion_collection,
+                ))
                 .await
                 .unwrap();
         });
@@ -1123,7 +1137,7 @@ mod tests {
         assert_eq!(state.store().read_alias(alias).unwrap(), None);
         assert!(matches!(
             server
-                .interface::<_, crate::collection::Collection>(&alias_object)
+                .interface::<_, crate::service::collection::Collection>(&alias_object)
                 .await,
             Err(zbus::Error::InterfaceNotFound)
         ));

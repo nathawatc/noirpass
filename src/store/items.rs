@@ -16,7 +16,8 @@ use super::{
 impl Store {
     /// Create an item in `collection`, writing its ciphertext to a fresh
     /// `0600` secret file. The collection must already exist.
-    pub fn create_item(
+    #[cfg(test)]
+    pub(crate) fn create_item(
         &self,
         collection: &str,
         label: &str,
@@ -263,7 +264,8 @@ impl Store {
     }
 
     /// Find an item in `collection` whose attribute set is *exactly* `attrs`.
-    pub fn find_item_by_attrs_exact(
+    #[cfg(test)]
+    pub(super) fn find_item_by_attrs_exact(
         &self,
         collection: &str,
         attrs: &HashMap<String, String>,

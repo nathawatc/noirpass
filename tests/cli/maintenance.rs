@@ -18,23 +18,27 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     let store = Store::open(dir.path()).unwrap();
     let collection = store.ensure_default().unwrap();
     let present = store
-        .create_item(
+        .create_or_replace_item(
             &collection.id,
             "present secret",
             HashMap::from([("service".to_string(), "present".to_string())]),
             "text/plain",
             b"ciphertext",
+            false,
         )
-        .unwrap();
+        .unwrap()
+        .0;
     let missing = store
-        .create_item(
+        .create_or_replace_item(
             &collection.id,
             "missing secret",
             HashMap::from([("service".to_string(), "missing".to_string())]),
             "text/plain",
             b"ciphertext",
+            false,
         )
-        .unwrap();
+        .unwrap()
+        .0;
     std::fs::remove_file(
         dir.path()
             .join("secrets")
@@ -110,14 +114,16 @@ fn cli_rejects_mismatched_item_id_without_deleting_valid_item() {
     let store = Store::open(dir.path()).unwrap();
     let collection = store.ensure_default().unwrap();
     let valid_b = store
-        .create_item(
+        .create_or_replace_item(
             &collection.id,
             "valid-b",
             HashMap::new(),
             "text/plain",
             b"ciphertext-b",
+            false,
         )
-        .unwrap();
+        .unwrap()
+        .0;
     let key_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let corrupt = ItemMeta {
         label: "corrupt-a".to_string(),
@@ -217,14 +223,16 @@ fn cli_check_recovers_quarantined_ciphertext_before_repair() {
     let store = Store::open(dir.path()).unwrap();
     let collection = store.ensure_default().unwrap();
     let item = store
-        .create_item(
+        .create_or_replace_item(
             &collection.id,
             "recoverable",
             HashMap::new(),
             "text/plain",
             b"recoverable-ciphertext",
+            false,
         )
-        .unwrap();
+        .unwrap()
+        .0;
     let canonical = dir.path().join("secrets").join(format!("{}.gpg", item.id));
     let quarantine = dir.path().join("secrets").join(format!(
         ".noirpass-quarantine-{}-0000000000000001.gpg",

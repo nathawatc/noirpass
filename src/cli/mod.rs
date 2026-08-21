@@ -16,9 +16,11 @@ use zbus::export::futures_core::Stream;
 
 use noirpass::config::{Config, load_recipient};
 use noirpass::gpg::Gpg;
+use noirpass::service::session::Session;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
-use noirpass::session::Session;
 use noirpass::store::Store;
+
+const SERVICE_NAME: &str = "org.freedesktop.secrets";
 
 const CLI_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().bold())
@@ -53,10 +55,6 @@ struct Cli {
         value_parser = clap::value_parser!(i64).range(-1..)
     )]
     idle_exit: Option<i64>,
-
-    /// Well-known bus name to claim (testing hook).
-    #[arg(long, hide = true, default_value = "org.freedesktop.secrets")]
-    bus_name: String,
 
     /// One-shot setup/status commands.
     #[command(subcommand)]
@@ -151,14 +149,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     register_existing(connection.object_server(), &state).await?;
     tokio::spawn(reap_vanished_clients(connection.clone(), state.clone()));
-    connection.request_name(cli.bus_name.as_str()).await?;
-    info!(name = %cli.bus_name, "secret service ready");
+    connection.request_name(SERVICE_NAME).await?;
+    info!(name = SERVICE_NAME, "secret service ready");
 
     wait_for_shutdown(&state, idle_exit).await;
 
     // Graceful shutdown: release the name so a future activation starts a
     // fresh instance, then drop the connection.
-    let _ = connection.release_name(cli.bus_name.as_str()).await;
+    let _ = connection.release_name(SERVICE_NAME).await;
     drop(connection);
     info!("exiting");
     Ok(())

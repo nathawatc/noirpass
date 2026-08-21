@@ -12,11 +12,11 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::zvariant::OwnedObjectPath;
 use zbus::{fdo, interface};
 
-use crate::collection::Collection;
+use crate::service::collection::Collection;
+use crate::service::session::Secret;
 use crate::service::{
     SecretError, ServiceState, collection_path, item_path, message_sender, object_removed_or_absent,
 };
-use crate::session::Secret;
 
 /// The "no prompt" object path.
 fn no_prompt() -> OwnedObjectPath {

@@ -3,6 +3,10 @@
 Own `redb` metadata, ciphertext files, durability, recovery, integrity checks, aliases persisted in
 store, and poisoned-store behavior under `src/store/`.
 
+Store is a persistence implementation boundary, not a password-manager feature API. Keep Rust Store
+methods at smallest visibility required by production callers and in-crate tests; do not add public
+methods solely for integration-test convenience.
+
 ## Storage Model and Path Safety
 
 The selected store is structured as:

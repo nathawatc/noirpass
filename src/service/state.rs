@@ -11,7 +11,7 @@ use zbus::zvariant::OwnedObjectPath;
 use super::{SecretError, session_path};
 use crate::crypto::SessionCipher;
 use crate::gpg::Gpg;
-use crate::session::Secret;
+use crate::service::session::Secret;
 use crate::store::Store;
 
 /// Bound retries so a broken entropy source fails instead of looping forever.

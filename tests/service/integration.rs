@@ -25,7 +25,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use noirpass::crypto::DhHandshake;
-use noirpass::session::Secret as WireSecret;
+use noirpass::service::session::Secret as WireSecret;
 use noirpass::store::{CollectionMeta, Store};
 use redb::{Database, TableDefinition};
 use zbus::export::futures_core::Stream;
@@ -1199,14 +1199,16 @@ fn daemon_recovers_pending_backup_and_quarantine() {
         let store = Store::open_existing(store_dir.path()).unwrap();
         let collection = store.ensure_default().unwrap();
         let item = store
-            .create_item(
+            .create_or_replace_item(
                 &collection.id,
                 kind,
                 HashMap::new(),
                 "text/plain",
                 b"old-ciphertext",
+                false,
             )
-            .unwrap();
+            .unwrap()
+            .0;
         let canonical = store_dir
             .path()
             .join("secrets")

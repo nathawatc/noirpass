@@ -3,6 +3,10 @@
 Own CLI entrypoints and runtime orchestration under `src/cli/`, with `src/main.rs` limited to
 process entry.
 
+CLI scope is maintenance and lifecycle only: `init`, `deinit`, `status`, `list`, `delete`, and `check`.
+Do not add manager workflows or hidden runtime/testing overrides. The daemon always claims the fixed
+`org.freedesktop.secrets` name; test isolation belongs to the private-bus fixtures.
+
 ## Command and Output Contracts
 
 - Own `init`, `status`, `list`, `delete`, `check`, and `deinit` parsing, dispatch, exit status, and
