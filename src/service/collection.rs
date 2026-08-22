@@ -8,11 +8,13 @@
 //! re-pointing an alias is reflected immediately. Collections are always
 //! unlocked (see [`crate::service`] module docs for the locking rationale).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use zbus::names::InterfaceName;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{fdo, interface};
 
 use crate::service::item::Item;
@@ -25,6 +27,76 @@ use crate::service::{
 /// The "no prompt" object path.
 fn no_prompt() -> OwnedObjectPath {
     OwnedObjectPath::try_from("/").expect("/ is a valid object path")
+}
+
+const COLLECTION_INTERFACE: &str = "org.freedesktop.Secret.Collection";
+
+/// Return the canonical path and every valid persisted alias path for `id`.
+fn collection_object_paths_for_id(
+    state: &ServiceState,
+    id: &str,
+) -> fdo::Result<Vec<OwnedObjectPath>> {
+    let mut paths = vec![collection_path(id)];
+    for (name, target) in state.store().list_aliases().map_err(fdo::Error::from)? {
+        if target == id
+            && let Ok(path) = alias_path(&name)
+        {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+/// Emit Label and Modified for every served path representing `id`.
+pub(crate) async fn emit_collection_label_modified(
+    state: &ServiceState,
+    server: &ObjectServer,
+    connection: &zbus::Connection,
+    id: &str,
+) -> fdo::Result<()> {
+    for path in collection_object_paths_for_id(state, id)? {
+        let collection_ref = server.interface::<_, Collection>(&path).await?;
+        let collection = collection_ref.get().await;
+        let emitter = SignalEmitter::new(connection, path)?;
+        collection.emit_label_changed(&emitter).await?;
+        collection.modified_changed(&emitter).await?;
+    }
+    Ok(())
+}
+
+/// Emit Items for every served path representing `id`.
+pub(crate) async fn emit_collection_items_changed(
+    state: &ServiceState,
+    server: &ObjectServer,
+    connection: &zbus::Connection,
+    id: &str,
+) -> fdo::Result<()> {
+    for path in collection_object_paths_for_id(state, id)? {
+        let collection_ref = server.interface::<_, Collection>(&path).await?;
+        let collection = collection_ref.get().await;
+        let emitter = SignalEmitter::new(connection, path)?;
+        collection.items_changed(&emitter).await?;
+    }
+    Ok(())
+}
+
+/// Invalidate alias properties that resolve through its persisted target.
+pub(crate) async fn emit_alias_target_invalidated(
+    connection: &zbus::Connection,
+    name: &str,
+) -> fdo::Result<()> {
+    let Ok(path) = alias_path(name) else {
+        return Ok(());
+    };
+    let emitter = SignalEmitter::new(connection, path)?;
+    fdo::Properties::properties_changed(
+        &emitter,
+        InterfaceName::from_static_str_unchecked(COLLECTION_INTERFACE),
+        HashMap::new(),
+        Cow::Borrowed(&["Items", "Label", "Created", "Modified"]),
+    )
+    .await?;
+    Ok(())
 }
 
 /// What a served collection object points at.
@@ -75,6 +147,20 @@ impl Collection {
                 .map_err(fdo::Error::from)?
                 .ok_or_else(|| fdo::Error::UnknownObject(format!("alias {name} is not set"))),
         }
+    }
+
+    /// Emit the changed signal for Label while mutation serialization remains held.
+    async fn emit_label_changed(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
+        let mut changed = HashMap::new();
+        changed.insert("Label", Value::from(self.label()?));
+        fdo::Properties::properties_changed(
+            emitter,
+            InterfaceName::from_static_str_unchecked(COLLECTION_INTERFACE),
+            changed,
+            Cow::Borrowed(&[]),
+        )
+        .await?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -171,12 +257,11 @@ impl Collection {
             item.emit_label_changed(&item_emitter).await?;
             item.modified_changed(&item_emitter).await?;
             Self::item_changed(&emitter, path.clone()).await?;
-            self.items_changed(&emitter).await?;
             return Ok((path, no_prompt()));
         }
         Self::item_created(&emitter, path.clone()).await?;
-        // Refresh client-side caches of the `Items` property.
-        self.items_changed(&emitter).await?;
+        // Refresh client-side caches of the `Items` property on every path.
+        emit_collection_items_changed(&self.state, server, connection, &id).await?;
         Ok((path, no_prompt()))
     }
 
@@ -265,7 +350,7 @@ impl Collection {
     }
 
     /// Human-readable label.
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     fn label(&self) -> fdo::Result<String> {
         let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
@@ -283,14 +368,17 @@ impl Collection {
     async fn set_label(
         &self,
         label: &str,
+        #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
         self.state
             .store()
             .set_collection_label(&id, label)
             .map_err(fdo::Error::from)?;
+        emit_collection_label_modified(&self.state, server, connection, &id).await?;
         let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;
         Service::collection_changed(&emitter, collection_path(&id)).await?;
         Ok(())

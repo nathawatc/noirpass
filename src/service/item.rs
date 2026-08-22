@@ -14,7 +14,7 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, Value};
 use zbus::{fdo, interface};
 
-use crate::service::collection::Collection;
+use crate::service::collection::{Collection, emit_collection_items_changed};
 use crate::service::session::Secret;
 use crate::service::{
     SecretError, ServiceState, collection_path, item_path, message_sender, object_removed_or_absent,
@@ -161,16 +161,9 @@ impl Item {
             .await
             .map_err(SecretError::ZBus)?;
         // Refresh client-side caches of the collection's `Items` property.
-        let col_ref = server
-            .interface::<_, Collection>(collection_path(&self.collection_id))
+        emit_collection_items_changed(&self.state, server, connection, &self.collection_id)
             .await
-            .map_err(SecretError::ZBus)?;
-        col_ref
-            .get()
-            .await
-            .items_changed(col_ref.signal_emitter())
-            .await
-            .map_err(SecretError::ZBus)?;
+            .map_err(SecretError::from)?;
 
         Ok(no_prompt())
     }

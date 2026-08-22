@@ -208,14 +208,13 @@ impl Service {
                     .store()
                     .set_collection_label(&existing, &label)
                     .map_err(fdo_err)?;
-                let collection_ref = server.interface::<_, collection::Collection>(&path).await?;
-                let collection = collection_ref.get().await;
-                collection
-                    .label_changed(collection_ref.signal_emitter())
-                    .await?;
-                collection
-                    .modified_changed(collection_ref.signal_emitter())
-                    .await?;
+                collection::emit_collection_label_modified(
+                    &self.state,
+                    server,
+                    emitter.connection(),
+                    &existing,
+                )
+                .await?;
                 Self::collection_changed(&emitter, path.clone()).await?;
             }
             return Ok((path, root_path()));
@@ -347,9 +346,11 @@ impl Service {
         name: &str,
         collection: OwnedObjectPath,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
+        let previous = self.state.store().read_alias(name)?;
         if collection.as_str() == "/" {
             self.state.store().set_alias(name, None)?;
             unregister_alias(server, name)
@@ -366,6 +367,14 @@ impl Service {
         register_alias(server, &self.state, name)
             .await
             .map_err(SecretError::ZBus)?;
+        if previous
+            .as_deref()
+            .is_some_and(|previous| previous != id.as_str())
+        {
+            collection::emit_alias_target_invalidated(connection, name)
+                .await
+                .map_err(SecretError::from)?;
+        }
         Ok(())
     }
 
