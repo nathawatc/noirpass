@@ -113,6 +113,33 @@ fn integrity_reports_missing_item_owner_and_dangling_alias() {
 }
 
 #[test]
+fn ensure_default_preserves_dangling_default_alias_and_integrity_blocks_serve() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    store.ensure_default().unwrap();
+    let dangling = "cccccccccccccccccccccccccccccccc";
+    let txn = store.db.begin_write().unwrap();
+    {
+        let mut aliases = txn.open_table(ALIASES).unwrap();
+        aliases.insert("default", dangling).unwrap();
+    }
+    txn.commit().unwrap();
+
+    store.ensure_default().unwrap();
+
+    assert_eq!(
+        store.read_alias("default").unwrap().as_deref(),
+        Some(dangling)
+    );
+    let report = store.check_integrity().unwrap();
+    assert_eq!(
+        report.corrupt_aliases,
+        vec![("default".to_string(), dangling.to_string())]
+    );
+    assert!(store.ensure_safe_to_serve().is_err());
+}
+
+#[test]
 fn integrity_reports_missing_and_orphan_ciphertext() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();

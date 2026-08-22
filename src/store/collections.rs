@@ -162,8 +162,8 @@ impl Store {
         Ok(DeletedCollection { item_ids, aliases })
     }
 
-    /// Ensure the well-known `default` collection (and its `default` alias)
-    /// exist, creating them if missing. Returns the collection metadata.
+    /// Ensure the well-known `default` collection exists and bootstrap its
+    /// `default` alias when absent. Returns the collection metadata.
     pub fn ensure_default(&self) -> Result<CollectionMeta> {
         let (_mutation_guard, txn) = self.begin_write_checked()?;
         let meta = {
@@ -193,7 +193,9 @@ impl Store {
                 meta
             };
             let mut aliases = txn.open_table(ALIASES)?;
-            aliases.insert("default", DEFAULT_COLLECTION_ID)?;
+            if aliases.get("default")?.is_none() {
+                aliases.insert("default", DEFAULT_COLLECTION_ID)?;
+            }
             meta
         };
         self.finish_metadata_commit(txn.commit())?;

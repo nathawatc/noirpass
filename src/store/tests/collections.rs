@@ -58,6 +58,19 @@ fn ensure_default_is_idempotent() {
 }
 
 #[test]
+fn ensure_default_preserves_custom_alias() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    store.ensure_default().unwrap();
+    let custom = store.create_collection("custom", None).unwrap();
+    store.set_alias("default", Some(&custom.id)).unwrap();
+
+    store.ensure_default().unwrap();
+
+    assert_eq!(store.read_alias("default").unwrap(), Some(custom.id));
+}
+
+#[test]
 fn alias_set_read_remove() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
@@ -119,7 +132,7 @@ fn delete_collection_cascades() {
 }
 
 #[test]
-fn ensure_default_repairs_missing_alias() {
+fn ensure_default_bootstraps_missing_alias() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let original = store.ensure_default().unwrap();
