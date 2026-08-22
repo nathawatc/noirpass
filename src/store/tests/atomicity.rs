@@ -319,3 +319,100 @@ fn create_install_cleanup_sync_failure_poisons_store() {
     assert!(store.is_poisoned());
     assert!(store.create_collection("blocked", None).is_err());
 }
+
+#[test]
+fn create_install_marker_cleanup_failure_poisons_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let path = store.secrets_dir.join("unindexed.gpg");
+    let marker = store.secrets_dir.join("create-marker.gpg");
+    fs::write(&path, b"ciphertext").unwrap();
+    fs::write(&marker, b"ciphertext").unwrap();
+    let sync_calls = std::cell::Cell::new(0);
+    let marker_removal_attempted = std::cell::Cell::new(false);
+
+    let err = store
+        .finish_create_install(
+            &path,
+            &marker,
+            || {
+                let call = sync_calls.get();
+                sync_calls.set(call + 1);
+                match call {
+                    0 => Err(Error::Io(io::Error::other("injected install sync failure"))),
+                    1 => Ok(()),
+                    _ => panic!("unexpected sync call"),
+                }
+            },
+            |candidate| {
+                if candidate == path.as_path() {
+                    fs::remove_file(candidate)
+                } else if candidate == marker.as_path() {
+                    marker_removal_attempted.set(true);
+                    Err(io::Error::other("injected marker cleanup failure"))
+                } else {
+                    Err(io::Error::other("unexpected cleanup path"))
+                }
+            },
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("marker cleanup failed"));
+    assert!(err.to_string().contains("injected marker cleanup failure"));
+    assert_eq!(sync_calls.get(), 2);
+    assert!(marker_removal_attempted.get());
+    assert!(!path.exists());
+    assert!(marker.exists());
+    assert!(store.is_poisoned());
+    assert!(store.create_collection("blocked", None).is_err());
+}
+
+#[test]
+fn create_install_final_marker_sync_failure_poisons_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let path = store.secrets_dir.join("unindexed.gpg");
+    let marker = store.secrets_dir.join("create-marker.gpg");
+    fs::write(&path, b"ciphertext").unwrap();
+    fs::write(&marker, b"ciphertext").unwrap();
+    let sync_calls = std::cell::Cell::new(0);
+    let remove_calls = std::cell::Cell::new(0);
+
+    let err = store
+        .finish_create_install(
+            &path,
+            &marker,
+            || {
+                let call = sync_calls.get();
+                sync_calls.set(call + 1);
+                match call {
+                    0 => Err(Error::Io(io::Error::other("injected install sync failure"))),
+                    1 => Ok(()),
+                    2 => Err(Error::Io(io::Error::other(
+                        "injected final directory sync failure",
+                    ))),
+                    _ => panic!("unexpected sync call"),
+                }
+            },
+            |candidate| {
+                remove_calls.set(remove_calls.get() + 1);
+                fs::remove_file(candidate)
+            },
+        )
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("marker was removed, but directory sync failed")
+    );
+    assert!(
+        err.to_string()
+            .contains("injected final directory sync failure")
+    );
+    assert_eq!(sync_calls.get(), 3);
+    assert_eq!(remove_calls.get(), 2);
+    assert!(!path.exists());
+    assert!(!marker.exists());
+    assert!(store.is_poisoned());
+    assert!(store.create_collection("blocked", None).is_err());
+}
