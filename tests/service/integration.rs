@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -2938,6 +2938,164 @@ fn daemon_rejects_path_unsafe_collection_identity() {
     );
     dbus.kill().expect("kill private dbus-daemon");
     let _ = dbus.wait();
+}
+
+fn startup_test_material() -> (tempfile::TempDir, Vec<u8>, tempfile::TempDir) {
+    let gnupg = tempfile::tempdir().unwrap();
+    setup_gnupg(gnupg.path());
+    let cert = export_public_cert(gnupg.path());
+    let (fake_gpg, _) = fake_gpg_dir();
+    (gnupg, cert, fake_gpg)
+}
+
+fn remove_default_collection(store_dir: &Path, preserve_alias: bool) {
+    const COLLECTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("collections");
+    const ALIASES: TableDefinition<&str, &str> = TableDefinition::new("aliases");
+
+    let db = Database::open(store_dir.join("index.redb")).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut collections = txn.open_table(COLLECTIONS).unwrap();
+        collections.remove("default").unwrap();
+    }
+    if !preserve_alias {
+        let mut aliases = txn.open_table(ALIASES).unwrap();
+        aliases.remove("default").unwrap();
+    }
+    txn.commit().unwrap();
+}
+
+fn wait_for_startup_exit(daemon: &mut Child) -> std::process::ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = daemon.try_wait().expect("try_wait") {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            sigterm(daemon.id());
+            return wait_with_timeout(daemon, Duration::from_secs(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn daemon_rejects_missing_default_collection_with_dangling_default_alias() {
+    let (gnupg, cert, fake_gpg) = startup_test_material();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    init_noirpass_store(store.path(), &cert);
+    remove_default_collection(store.path(), true);
+
+    let mut daemon = spawn_daemon(
+        &address,
+        gnupg.path(),
+        store.path(),
+        "0",
+        Some(fake_gpg.path()),
+    );
+    let status = wait_for_startup_exit(&mut daemon);
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+
+    assert!(
+        !status.success(),
+        "daemon must reject dangling default alias"
+    );
+    let persisted = Store::open_existing(store.path()).unwrap();
+    assert!(persisted.get_collection("default").is_err());
+    assert_eq!(
+        persisted.read_alias("default").unwrap().as_deref(),
+        Some("default")
+    );
+    let report = persisted.check_integrity().unwrap();
+    assert_eq!(
+        report.corrupt_aliases,
+        vec![("default".to_string(), "default".to_string())]
+    );
+}
+
+#[test]
+fn daemon_rejects_missing_default_collection_with_item_owner() {
+    let (gnupg, cert, fake_gpg) = startup_test_material();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    init_noirpass_store(store.path(), &cert);
+
+    let setup = Store::open_existing(store.path()).unwrap();
+    let item = setup
+        .create_or_replace_item(
+            "default",
+            "missing-owner",
+            HashMap::new(),
+            "text/plain",
+            b"valid-ciphertext",
+            false,
+        )
+        .unwrap()
+        .0;
+    drop(setup);
+    remove_default_collection(store.path(), false);
+
+    let mut daemon = spawn_daemon(
+        &address,
+        gnupg.path(),
+        store.path(),
+        "0",
+        Some(fake_gpg.path()),
+    );
+    let status = wait_for_startup_exit(&mut daemon);
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+
+    assert!(
+        !status.success(),
+        "daemon must reject item with missing owner"
+    );
+    let persisted = Store::open_existing(store.path()).unwrap();
+    assert!(persisted.get_collection("default").is_err());
+    assert_eq!(persisted.get_item(&item.id).unwrap().collection, "default");
+    assert_eq!(
+        persisted.read_secret_file(&item.id).unwrap(),
+        b"valid-ciphertext"
+    );
+    let report = persisted.check_integrity().unwrap();
+    assert_eq!(report.items_with_invalid_collection.len(), 1);
+    assert_eq!(report.items_with_invalid_collection[0].table_key, item.id);
+    assert!(report.corrupt_items.is_empty());
+    assert!(report.missing_secret_items.is_empty());
+    assert!(report.ciphertext_mismatches.is_empty());
+}
+
+#[test]
+fn daemon_bootstraps_default_collection_after_safe_admission() {
+    let (gnupg, cert, fake_gpg) = startup_test_material();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    init_noirpass_store(store.path(), &cert);
+    remove_default_collection(store.path(), false);
+
+    let mut daemon = spawn_daemon(
+        &address,
+        gnupg.path(),
+        store.path(),
+        "-1",
+        Some(fake_gpg.path()),
+    );
+    wait_for_name(&address);
+    sigterm(daemon.id());
+    let status = wait_with_timeout(&mut daemon, Duration::from_secs(10));
+    dbus.kill().expect("kill private dbus-daemon");
+    let _ = dbus.wait();
+
+    assert!(status.success(), "healthy store daemon failed: {status}");
+    let persisted = Store::open_existing(store.path()).unwrap();
+    assert!(persisted.get_collection("default").is_ok());
+    assert_eq!(
+        persisted.read_alias("default").unwrap().as_deref(),
+        Some("default")
+    );
+    assert!(persisted.check_integrity().unwrap().is_healthy());
 }
 
 #[test]

@@ -133,8 +133,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Store::probe_health(&store_dir)?;
     let store = Store::open(&store_dir)?;
     store.recover_interrupted_operations()?;
-    store.ensure_default()?;
     store.ensure_safe_to_serve()?;
+    store.ensure_default()?;
     let gpg = Gpg::from_cert(recipient.cert)?;
     gpg.ensure_recipient_secret_available().await?;
     info!(key = %gpg.fingerprint(), "using OpenPGP key");

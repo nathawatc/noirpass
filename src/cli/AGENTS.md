@@ -55,10 +55,12 @@ Startup order is observable security behavior:
 
 1. Load/validate config and recipient.
 2. Probe the existing index without creating a replacement.
-3. Open/recover the store, ensure the default collection, and require `ensure_safe_to_serve`.
-4. Verify recipient secret-key access through the GPG-agent boundary.
-5. Build/register the complete Secret Service object tree.
-6. Claim `org.freedesktop.secrets` only after registration completes.
+3. Open/recover the store.
+4. Require `ensure_safe_to_serve` before bootstrapping the default collection.
+5. Bootstrap the default collection.
+6. Verify recipient secret-key access through the GPG-agent boundary.
+7. Build/register the complete Secret Service object tree.
+8. Claim `org.freedesktop.secrets` only after registration completes.
 
 The daemon must honor D-Bus/systemd activation assumptions in `systemd/`; do not claim the well-known
 name before persisted collections, items, and aliases are registered. SIGINT and SIGTERM release the
