@@ -234,6 +234,121 @@ fn raw_ciphertext_reader_waits_for_rollback() {
 }
 
 #[test]
+fn create_persist_ciphertext_cleanup_failure_poisons_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let path = store.secret_path(id).unwrap();
+    let marker = store.recovery_path("create", id);
+    fs::create_dir(&path).unwrap();
+    fs::write(&marker, b"ciphertext").unwrap();
+
+    let err = store
+        .finish_create_persist(
+            id,
+            &marker,
+            Err(PersistError::Definite(Error::Config(
+                "injected metadata failure".into(),
+            ))),
+        )
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("item metadata write failed: config error: injected metadata failure"),
+        "{message}"
+    );
+    assert!(
+        message.contains("unindexed ciphertext cleanup failed"),
+        "{message}"
+    );
+    assert!(fs::symlink_metadata(&path).unwrap().is_dir());
+    assert!(marker.exists());
+    assert!(store.is_poisoned());
+    assert!(store.create_collection("blocked", None).is_err());
+}
+
+#[test]
+fn create_persist_cleanup_sync_failure_poisons_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let path = store.secret_path(id).unwrap();
+    let marker = store.recovery_path("create", id);
+    fs::write(&path, b"ciphertext").unwrap();
+    fs::write(&marker, b"ciphertext").unwrap();
+
+    let real_secrets_dir = tmp.path().join("secrets-real");
+    fs::rename(&store.secrets_dir, &real_secrets_dir).unwrap();
+    std::os::unix::fs::symlink(&real_secrets_dir, &store.secrets_dir).unwrap();
+
+    let err = store
+        .finish_create_persist(
+            id,
+            &marker,
+            Err(PersistError::Definite(Error::Config(
+                "injected metadata failure".into(),
+            ))),
+        )
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("item metadata write failed: config error: injected metadata failure"),
+        "{message}"
+    );
+    assert!(
+        message.contains("unindexed ciphertext was removed, but directory sync failed"),
+        "{message}"
+    );
+    assert!(!path.exists());
+    assert!(marker.exists());
+    assert!(
+        fs::symlink_metadata(&store.secrets_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(store.is_poisoned());
+    assert!(store.create_collection("blocked", None).is_err());
+}
+
+#[test]
+fn create_persist_marker_cleanup_failure_poisons_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let path = store.secret_path(id).unwrap();
+    let marker = store.recovery_path("create", id);
+    fs::write(&path, b"ciphertext").unwrap();
+    fs::create_dir(&marker).unwrap();
+
+    let err = store
+        .finish_create_persist(
+            id,
+            &marker,
+            Err(PersistError::Definite(Error::Config(
+                "injected metadata failure".into(),
+            ))),
+        )
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("item metadata write failed: config error: injected metadata failure"),
+        "{message}"
+    );
+    assert!(
+        message.contains("create marker cleanup failed"),
+        "{message}"
+    );
+    assert!(!path.exists());
+    assert!(fs::symlink_metadata(&marker).unwrap().is_dir());
+    assert!(store.is_poisoned());
+    assert!(store.create_collection("blocked", None).is_err());
+}
+
+#[test]
 fn create_install_sync_failure_removes_unindexed_ciphertext() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
