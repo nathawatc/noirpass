@@ -1,8 +1,17 @@
 //! Persistent noirpass configuration, recipient lifecycle, and deinitialization.
 
-use std::path::PathBuf;
+use std::fs::{self, File, Permissions};
+use std::io;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use sequoia_openpgp::Cert;
+
+use crate::error::{Error, Result};
+use crate::filesystem::{
+    open_directory_nofollow, open_regular_rw_create_nofollow, validate_no_symlink_components,
+};
 
 const CONFIG_FILE: &str = "config.toml";
 const INDEX_FILE: &str = "index.redb";
@@ -15,6 +24,66 @@ const RECOVERY_KINDS: [&str; 4] = ["create", "update", "quarantine", "backup"];
 pub const DEFAULT_IDLE_EXIT_SECONDS: i64 = 300;
 const INIT_HINT: &str = "run noirpass init --recipient ...";
 const DIFFERENT_RECIPIENT_ERROR: &str = "Noirpass is initialized with a different recipient.\n\nChanging recipient requires deleting the existing Noirpass store first.\n\nRun:\n    noirpass deinit\n\nThen run init again with the new recipient.";
+const LIFECYCLE_LOCK_FILE: &str = ".noirpass-lifecycle.lock";
+
+fn open_lifecycle_directory(data_dir: &Path) -> Result<File> {
+    validate_no_symlink_components(data_dir)?;
+    match fs::symlink_metadata(data_dir) {
+        Ok(_) => Ok(open_directory_nofollow(data_dir)?),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            match builder.create(data_dir) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err.into()),
+            }
+            Ok(open_directory_nofollow(data_dir)?)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Kernel-held exclusivity for persistent init/deinit mutations.
+///
+/// The lock file is persistent and may remain after a process exits. Ownership
+/// is held by its open file descriptor, not by file existence; dropping this
+/// guard closes the descriptor and releases the kernel lock automatically.
+/// This is separate from Secret Service `Item.Locked` and `Collection.Locked`,
+/// which remain always false.
+#[derive(Debug)]
+pub struct LifecycleLock {
+    _file: File,
+}
+
+impl LifecycleLock {
+    /// Open the selected store's lock file without following symlinks and
+    /// acquire its exclusive kernel lock, waiting for another lifecycle
+    /// process when necessary.
+    pub fn acquire(data_dir: &Path) -> Result<Self> {
+        let directory = open_lifecycle_directory(data_dir)?;
+        let path = data_dir.join(LIFECYCLE_LOCK_FILE);
+        let file = open_regular_rw_create_nofollow(&path, 0o600)?;
+
+        loop {
+            // SAFETY: `file` is an open regular file and its descriptor remains
+            // alive for the lifetime of the returned guard.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if result == 0 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(Error::Io(error));
+        }
+
+        directory.set_permissions(Permissions::from_mode(0o700))?;
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        Ok(Self { _file: file })
+    }
+}
 
 mod deinit;
 mod format;
@@ -95,7 +164,8 @@ mod tests {
     use sequoia_openpgp::serialize::Serialize;
     use std::collections::HashMap;
     use std::fs;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::time::{Duration, Instant};
 
     fn generated_recipient() -> (Vec<u8>, String) {
         let (cert, _) = CertBuilder::new()
@@ -604,6 +674,94 @@ mod tests {
                 .exists()
         );
         assert!(!tmp.path().join(".noirpass-tmp-0123456789abcdef").exists());
+    }
+
+    #[test]
+    fn lifecycle_lock_rejects_symlinked_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside");
+        fs::write(&outside_file, b"outside").unwrap();
+        symlink(&outside_file, tmp.path().join(LIFECYCLE_LOCK_FILE)).unwrap();
+
+        let err = LifecycleLock::acquire(tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("symlink"));
+        assert_eq!(fs::read(outside_file).unwrap(), b"outside");
+    }
+
+    #[test]
+    fn lifecycle_contender_does_not_normalize_permissions_before_flock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(LIFECYCLE_LOCK_FILE);
+        let owner = LifecycleLock::acquire(tmp.path()).unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let contender_path = tmp.path().to_path_buf();
+        let contender = std::thread::spawn(move || LifecycleLock::acquire(&contender_path));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut open_descriptors = 0;
+        while Instant::now() < deadline {
+            open_descriptors = fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| fs::read_link(entry.path()).is_ok_and(|path| path == lock_path))
+                .count();
+            if open_descriptors >= 2 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let mode_while_contended = fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
+
+        drop(owner);
+        let contender = contender.join().unwrap().unwrap();
+        drop(contender);
+        let mode_after_acquisition = fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
+
+        assert!(open_descriptors >= 2);
+        assert_eq!(mode_while_contended, 0o644);
+        assert_eq!(mode_after_acquisition, 0o600);
+    }
+
+    #[test]
+    fn lifecycle_contender_does_not_normalize_directory_permissions_before_flock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store");
+        let owner = LifecycleLock::acquire(&store_path).unwrap();
+        assert_eq!(
+            fs::metadata(&store_path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::set_permissions(&store_path, fs::Permissions::from_mode(0o750)).unwrap();
+
+        let lock_path = store_path.join(LIFECYCLE_LOCK_FILE);
+        let contender_path = store_path.clone();
+        let contender = std::thread::spawn(move || LifecycleLock::acquire(&contender_path));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut open_descriptors = 0;
+        while Instant::now() < deadline {
+            open_descriptors = fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| fs::read_link(entry.path()).is_ok_and(|path| path == lock_path))
+                .count();
+            if open_descriptors >= 2 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let mode_while_contended = fs::metadata(&store_path).unwrap().permissions().mode() & 0o777;
+
+        drop(owner);
+        let contender = contender.join().unwrap().unwrap();
+        drop(contender);
+        let mode_after_acquisition =
+            fs::metadata(&store_path).unwrap().permissions().mode() & 0o777;
+
+        assert!(open_descriptors >= 2);
+        assert_eq!(mode_while_contended, 0o750);
+        assert_eq!(mode_after_acquisition, 0o700);
     }
 
     #[test]

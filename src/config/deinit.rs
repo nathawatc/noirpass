@@ -241,8 +241,6 @@ fn preflight_deinit(data_dir: &Path, recipient_rel: &Path) -> Result<()> {
     checked_owned_file(data_dir, Path::new(INDEX_FILE), "the metadata database")?;
     checked_owned_file(data_dir, Path::new(CONFIG_FILE), "the configuration")?;
     preflight_known_secret_files(data_dir)?;
-    remove_config_temporary_files_in(data_dir, data_dir, Path::new(""))?;
-    remove_config_temporary_files_in(data_dir, &data_dir.join(KEYS_DIR), Path::new(KEYS_DIR))?;
     Ok(())
 }
 
@@ -270,7 +268,19 @@ pub fn deinit(data_dir: &Path) -> Result<()> {
         |config| config.recipient_cert.clone(),
     );
     preflight_deinit(data_dir, &recipient_rel)?;
-    let _store_guard = open_complete_store(data_dir)?;
+    let preopened_store = open_complete_store(data_dir)?;
+    let _lifecycle_lock = super::LifecycleLock::acquire(data_dir)?;
+
+    let config = load_deinit_config(data_dir)?;
+    let recipient_rel = config.as_ref().map_or_else(
+        || PathBuf::from(RECIPIENT_REL),
+        |config| config.recipient_cert.clone(),
+    );
+    preflight_deinit(data_dir, &recipient_rel)?;
+    let _store_guard = match preopened_store {
+        Some(store) => Some(store),
+        None => open_complete_store(data_dir)?,
+    };
 
     remove_owned_file(data_dir, &recipient_rel, "the recipient certificate")?;
     remove_known_secret_files(data_dir)?;

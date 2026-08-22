@@ -34,6 +34,17 @@ recipient identity = primary OpenPGP fingerprint
   it explicitly through the destructive lifecycle path.
 - Keep config/certificate contents unchanged on all rejected lifecycle paths, including corrupt
   config, missing metadata, different-primary input, and failed writes.
+- `init` and `deinit` acquire shared lifecycle exclusivity before config, certificate, recognized
+  temporary-file, or destructive store mutation. For complete existing stores, they first acquire
+  Store/redb ownership so a busy-store rejection cannot create `.noirpass-lifecycle.lock`; they
+  then acquire lifecycle ownership and revalidate state. Fresh/incomplete init acquires lifecycle
+  ownership first, then revalidates before creating Store state. The guard holds a kernel fd lock on
+  persistent `.noirpass-lifecycle.lock`; file existence is not ownership, and process exit releases
+  ownership automatically. Existing store-directory and lock-file modes normalize only after flock;
+  an absent store directory is created recursively with `0700` before lock-file creation. This
+  consistent Store/redb → lifecycle-lock order avoids cycles among complete-store lifecycle
+  commands. This lifecycle guard is separate from Secret Service Item/Collection lock state, which
+  remains always unlocked.
 
 ## Fresh Versus Incomplete State
 

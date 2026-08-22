@@ -24,16 +24,29 @@ Do not add manager workflows or hidden runtime/testing overrides. The daemon alw
 
 ## Initialization and Maintenance
 
-- `init` must validate/probe existing state before any write. Never rely on `Store::open` as a probe:
-  it creates `index.redb`. Config-layer preflight rejects configured recipient state with a missing
-  index, so `init` cannot rebuild a new empty database around old ciphertext. Fresh-store and
-  recipient-lifecycle rules belong to [`../config/AGENTS.md`](../config/AGENTS.md).
+- `init` must acquire redb ownership before creating lifecycle state for a complete existing store,
+  then acquire lifecycle exclusivity and revalidate whether the selected store is fresh or
+  existing. Fresh/incomplete state acquires lifecycle exclusivity first, then revalidates before
+  creating the store. The persistent `.noirpass-lifecycle.lock` file is normal; kernel fd
+  ownership, not file existence, holds the lock, and process exit releases it. Never rely on
+  `Store::open` as a probe: it creates `index.redb`. Config-layer preflight rejects configured
+  recipient state with a missing index, so `init` cannot rebuild a new empty database around old
+  ciphertext. Fresh-store and recipient-lifecycle rules belong to
+  [`../config/AGENTS.md`](../config/AGENTS.md).
 - For an existing index, run store health validation before configuration writes. After successful
   configuration, open the store, ensure the default collection, and report the selected directory
   and recipient fingerprint.
 - `deinit` removes only recognized Noirpass state after both confirmations. It must never invoke
   itself from `init`, change recipient implicitly, or delete unknown files. Store path and symlink
-  safety remain enforced by the config/store layers.
+  safety remain enforced by the config/store layers. After pure preflight, it acquires the same
+  lifecycle exclusivity before removing recognized temporary files; complete stores acquire redb
+  ownership first so busy-store rejection cannot create a new lifecycle path.
+
+Complete existing-store lifecycle operations use `Store`/redb → lifecycle-lock ordering. Fresh
+initialization, with no existing Store to claim, uses lifecycle-lock → newly created Store ordering.
+
+Lifecycle exclusivity serializes `init`/`deinit` persistence only. It is unrelated to Secret Service
+`Item.Locked` and `Collection.Locked`; Noirpass still exposes both properties as `false`.
 
 ## Destructive Confirmation
 
