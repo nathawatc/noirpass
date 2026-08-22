@@ -52,22 +52,30 @@ use state::SESSION_ALLOCATION_ATTEMPTS;
 
 // --- errors ----------------------------------------------------------------
 
-/// Custom Secret Service D-Bus errors (`org.freedesktop.Secret.Error.*`).
+/// Secret Service and standard D-Bus method errors.
 #[derive(Debug, zbus::DBusError)]
-#[zbus(prefix = "org.freedesktop.Secret.Error")]
+#[zbus(prefix = "org.freedesktop")]
 pub enum SecretError {
-    /// Transparent wrapper so standard zbus/fdo errors keep their names.
+    /// Transparent wrapper for errors without a dedicated public variant.
     #[zbus(error)]
     ZBus(zbus::Error),
+    /// Invalid client arguments.
+    #[zbus(name = "DBus.Error.InvalidArgs")]
+    InvalidArgs(String),
     /// The session named in a `Secret` does not exist.
+    #[zbus(name = "Secret.Error.NoSession")]
     NoSession(String),
     /// The referenced object does not exist.
+    #[zbus(name = "Secret.Error.NoSuchObject")]
     NoSuchObject(String),
 }
 
 impl From<fdo::Error> for SecretError {
     fn from(err: fdo::Error) -> Self {
-        Self::ZBus(zbus::Error::FDO(Box::new(err)))
+        match err {
+            fdo::Error::InvalidArgs(message) => Self::InvalidArgs(message),
+            other => Self::ZBus(zbus::Error::FDO(Box::new(other))),
+        }
     }
 }
 
@@ -107,9 +115,10 @@ pub(crate) fn message_sender(header: &zbus::message::Header<'_>) -> Result<Strin
 impl Service {
     /// Open a transport session.
     ///
-    /// `plain` ignores `input` and returns an empty string; the DH algorithm
-    /// expects the client's public key as a byte array and returns ours.
-    /// Unknown algorithms yield `org.freedesktop.DBus.Error.NotSupported`.
+    /// `plain` requires an empty string as `input` and returns an empty string;
+    /// the DH algorithm expects the client's public key as a byte array and
+    /// returns ours. Unknown algorithms yield
+    /// `org.freedesktop.DBus.Error.NotSupported`.
     #[zbus(out_args("output", "result"))]
     async fn open_session(
         &self,
@@ -120,12 +129,22 @@ impl Service {
     ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
         let _activity = self.state.activity()?;
         let (output, cipher) = match algorithm {
-            ALGORITHM_PLAIN => (
-                Value::from("")
-                    .try_to_owned()
-                    .map_err(|e| fdo::Error::Failed(e.to_string()))?,
-                SessionCipher::Plain,
-            ),
+            ALGORITHM_PLAIN => {
+                let input = String::try_from(input).map_err(|_| {
+                    fdo::Error::InvalidArgs("plain session input must be an empty string".into())
+                })?;
+                if !input.is_empty() {
+                    return Err(fdo::Error::InvalidArgs(
+                        "plain session input must be an empty string".into(),
+                    ));
+                }
+                (
+                    Value::from("")
+                        .try_to_owned()
+                        .map_err(|e| fdo::Error::Failed(e.to_string()))?,
+                    SessionCipher::Plain,
+                )
+            }
             ALGORITHM_DH => {
                 let client_pub = Vec::<u8>::try_from(input).map_err(|_| {
                     fdo::Error::InvalidArgs("expected client public key as byte array".into())
@@ -397,6 +416,15 @@ mod tests {
     use crate::gpg::test_support::TestGnupg;
     use zbus::connection::Builder;
     use zbus::export::futures_core::Stream;
+
+    #[test]
+    fn invalid_args_preserve_standard_dbus_error_name() {
+        let error: SecretError = fdo::Error::InvalidArgs("bad input".into()).into();
+        assert_eq!(
+            zbus::DBusError::name(&error).as_str(),
+            "org.freedesktop.DBus.Error.InvalidArgs"
+        );
+    }
 
     #[test]
     fn path_helpers_roundtrip() {

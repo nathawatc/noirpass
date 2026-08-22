@@ -262,6 +262,11 @@ impl ServiceState {
         let cipher = self
             .session_cipher(&secret.session, owner)
             .ok_or_else(|| SecretError::NoSession(format!("no session {}", secret.session)))?;
+        if matches!(cipher.as_ref(), SessionCipher::Plain) && !secret.parameters.is_empty() {
+            return Err(
+                fdo::Error::InvalidArgs("plain Secret parameters must be empty".into()).into(),
+            );
+        }
         let plaintext = cipher.decrypt(&secret.parameters, &secret.value)?;
         Ok(self.gpg.encrypt(&plaintext)?)
     }
