@@ -173,17 +173,34 @@ impl Service {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
 
+        let label_property = properties.get("org.freedesktop.Secret.Collection.Label");
+        let label_supplied = label_property.is_some();
+        let label = label_property
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
+
         if !alias.is_empty()
             && let Some(existing) = self.state.store().read_alias(alias).map_err(fdo_err)?
             && self.state.store().get_collection(&existing).is_ok()
         {
-            return Ok((collection_path(&existing), root_path()));
+            let path = collection_path(&existing);
+            if label_supplied {
+                self.state
+                    .store()
+                    .set_collection_label(&existing, &label)
+                    .map_err(fdo_err)?;
+                let collection_ref = server.interface::<_, collection::Collection>(&path).await?;
+                let collection = collection_ref.get().await;
+                collection
+                    .label_changed(collection_ref.signal_emitter())
+                    .await?;
+                collection
+                    .modified_changed(collection_ref.signal_emitter())
+                    .await?;
+                Self::collection_changed(&emitter, path.clone()).await?;
+            }
+            return Ok((path, root_path()));
         }
-
-        let label = properties
-            .get("org.freedesktop.Secret.Collection.Label")
-            .and_then(|v| String::try_from(v.clone()).ok())
-            .unwrap_or_default();
 
         let alias_opt = (!alias.is_empty()).then_some(alias);
         let meta = self
