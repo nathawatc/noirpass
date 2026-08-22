@@ -86,7 +86,7 @@ Install Arch build tools, clone repository, then build included [`archlinux/PKGB
 ```sh
 sudo pacman -S --needed base-devel git
 git clone https://codeberg.org/koharu/noirpass.git
-cd noirpass/arch
+cd noirpass/archlinux
 makepkg -si
 systemctl --user daemon-reload
 ```
@@ -187,7 +187,10 @@ noirpass --store-dir /path/to/store <COMMAND>
 NOIRPASS_STORE=/path/to/store noirpass <COMMAND>
 ```
 
-Use same location in daemon service configuration and maintenance commands.
+Use same location in daemon service configuration and maintenance commands. The included user systemd
+unit grants write access under `%h/.local/share` only. If `XDG_DATA_HOME`, `NOIRPASS_STORE`, or
+`--store-dir` places daemon state outside that tree, add a user service override extending
+`ReadWritePaths` to the selected store's parent rather than weakening systemd hardening globally.
 
 ### Configuration
 
@@ -205,8 +208,8 @@ noirpass check
 systemctl --user start noirpass.service
 ```
 
-Back up complete Noirpass data directory before repairs, upgrades, or key migration. Keep original
-OpenPGP secret key available; loss makes saved secret values unrecoverable.
+Back up complete Noirpass data directory before repairs or upgrades. Keep original OpenPGP secret key
+available; loss makes saved secret values unrecoverable.
 
 `noirpass check` reports integrity findings and asks before applying repairs. A corrupt item with a
 valid canonical item ID is treated as corrupt as a whole: confirmation deletes its metadata and

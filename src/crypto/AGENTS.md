@@ -9,8 +9,9 @@ by [`../gpg/AGENTS.md`](../gpg/AGENTS.md).
 Support the specification identifiers exactly:
 
 - `plain`: no additional transport encryption; D-Bus socket protections remain the transport boundary.
-- `dh-ietf1024-sha256-aes128-cbc-pkcs7`: RFC 2409 Second Oakley 1024-bit MODP group, with fixed-
-  width 128-byte public/shared values.
+- `dh-ietf1024-sha256-aes128-cbc-pkcs7`: RFC 2409 Second Oakley 1024-bit MODP group. D-Bus DH
+  public integers use unsigned big-endian integer encoding and are not fixed-width; the internal
+  shared secret passed to HKDF is left-padded to the group's 128-byte width.
 
 For the DH algorithm:
 
