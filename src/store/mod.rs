@@ -11,8 +11,8 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::fd::AsRawFd;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -23,6 +23,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+use crate::filesystem::{
+    ensure_dir_0700, open_regular_read_nofollow, open_regular_rw_create_nofollow,
+    open_regular_rw_nofollow, validate_no_symlink_components,
+};
 
 mod collections;
 mod files;
@@ -234,15 +238,29 @@ fn decode_item(table_key: &str, value: &[u8]) -> Result<ItemMeta> {
     Ok(metadata)
 }
 
-/// Create `dir` (if absent) and force its permissions to `0700`.
-fn ensure_dir_0700(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    Ok(())
+/// Open redb through a verified no-follow descriptor.
+fn open_readonly_database_nofollow(
+    path: &Path,
+) -> std::result::Result<ReadOnlyDatabase, DatabaseError> {
+    // redb 4.1 accepts only a path for read-only opens. Keep the no-follow
+    // descriptor alive while redb opens its procfs alias, which remains pinned
+    // to the verified file even if the original path is replaced meanwhile.
+    let file = open_regular_read_nofollow(path).map_err(DatabaseError::from)?;
+    let proc_path = PathBuf::from("/proc/self/fd").join(file.as_raw_fd().to_string());
+    ReadOnlyDatabase::open(proc_path)
 }
 
 /// Validate store paths without opening redb.
 fn existing_store_paths(dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    validate_no_symlink_components(dir)?;
+    let store_metadata = fs::symlink_metadata(dir)?;
+    if !store_metadata.is_dir() {
+        return Err(Error::Config(format!(
+            "store path is not a directory: {}",
+            dir.display()
+        )));
+    }
+
     let secrets_dir = dir.join("secrets");
     let secrets_meta = fs::symlink_metadata(&secrets_dir)?;
     if !secrets_meta.is_dir() {
@@ -254,10 +272,7 @@ fn existing_store_paths(dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let _ = fs::read_dir(&secrets_dir)?;
 
     let index_path = dir.join("index.redb");
-    fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&index_path)?;
+    let _ = open_regular_rw_nofollow(&index_path)?;
 
     Ok((secrets_dir, index_path))
 }
@@ -364,7 +379,8 @@ impl Store {
         let secrets_dir = dir.join("secrets");
         ensure_dir_0700(&secrets_dir)?;
 
-        let db = Database::create(dir.join("index.redb"))?;
+        let index = open_regular_rw_create_nofollow(&dir.join("index.redb"), 0o600)?;
+        let db = Database::builder().create_file(index)?;
         // Ensure all tables exist so read-only transactions never fail on a
         // brand-new database.
         {
@@ -390,7 +406,14 @@ impl Store {
     /// while the daemon is using the same index.
     pub fn open_existing(dir: &Path) -> Result<Self> {
         let (secrets_dir, index_path) = existing_store_paths(dir)?;
-        let db = match Database::open(&index_path) {
+        let index = open_regular_rw_nofollow(&index_path)?;
+        if index.metadata()?.len() == 0 {
+            return Err(Error::Config(format!(
+                "metadata database is empty: {}",
+                index_path.display()
+            )));
+        }
+        let db = match Database::builder().create_file(index) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => {
                 return Err(Error::Config(format!(
@@ -417,7 +440,7 @@ impl Store {
     /// Check whether an existing store is usable without mutating it.
     pub fn probe_health(dir: &Path) -> Result<()> {
         let (_, index_path) = existing_store_paths(dir)?;
-        let db = match ReadOnlyDatabase::open(index_path) {
+        let db = match open_readonly_database_nofollow(&index_path) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => return Ok(()),
             Err(err) => return Err(err.into()),

@@ -43,6 +43,39 @@ fn item_crud_and_secret_perms() {
 }
 
 #[test]
+fn symlinked_canonical_ciphertext_is_not_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.create_collection("c", None).unwrap();
+    let item = store
+        .create_item(
+            &collection.id,
+            "item",
+            HashMap::new(),
+            "text/plain",
+            b"outside ciphertext",
+        )
+        .unwrap();
+    let canonical = store.secret_path(&item.id).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_ciphertext = outside.path().join("ciphertext.gpg");
+    fs::write(&outside_ciphertext, b"outside ciphertext").unwrap();
+    let outside_before = fs::read(&outside_ciphertext).unwrap();
+    fs::remove_file(&canonical).unwrap();
+    std::os::unix::fs::symlink(&outside_ciphertext, &canonical).unwrap();
+
+    assert!(store.read_secret_file(&item.id).is_err());
+    assert!(store.read_item_secret(&item.id).is_err());
+    assert_eq!(fs::read(&outside_ciphertext).unwrap(), outside_before);
+    assert!(
+        fs::symlink_metadata(canonical)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
 fn create_item_in_missing_collection_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();

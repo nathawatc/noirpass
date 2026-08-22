@@ -5,9 +5,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use redb::{DatabaseError, ReadOnlyDatabase, ReadableDatabase, ReadableTable};
+use redb::{DatabaseError, ReadableDatabase, ReadableTable};
 
 use crate::error::{Error, Result};
+use crate::filesystem::{read_regular_file_nofollow, validate_no_symlink_components};
 
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, ITEMS, IndexedItem,
@@ -34,7 +35,7 @@ impl Store {
     /// Cross-check an existing store without acquiring its writer lock.
     pub(crate) fn probe_integrity(dir: &Path) -> Result<IntegrityReport> {
         let (secrets_dir, index_path) = super::existing_store_paths(dir)?;
-        let db = match ReadOnlyDatabase::open(&index_path) {
+        let db = match super::open_readonly_database_nofollow(&index_path) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => {
                 // The running daemon already passed startup integrity admission. Preserve the
@@ -52,6 +53,7 @@ impl Store {
     reason = "single read transaction validates related collection, item, and alias tables"
 )]
 fn scan_integrity<D: ReadableDatabase>(db: &D, secrets_dir: &Path) -> Result<IntegrityReport> {
+    validate_no_symlink_components(secrets_dir)?;
     let txn = db.begin_read()?;
     let mut collection_ids = HashSet::new();
     let mut present_collection_ids = HashSet::new();
@@ -150,7 +152,7 @@ fn scan_integrity<D: ReadableDatabase>(db: &D, secrets_dir: &Path) -> Result<Int
         match fs::symlink_metadata(&path) {
             Ok(file_metadata) if file_metadata.file_type().is_file() => {
                 if let Some(expected_hash) = &metadata.ciphertext_sha256 {
-                    let ciphertext = fs::read(&path)?;
+                    let ciphertext = read_regular_file_nofollow(&path)?;
                     if ciphertext_sha256(&ciphertext) != *expected_hash {
                         ciphertext_mismatches.push(IndexedItem {
                             table_key,

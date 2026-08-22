@@ -7,6 +7,9 @@ use std::os::unix::fs::MetadataExt;
 use redb::ReadableDatabase;
 
 use crate::error::{Error, Result};
+use crate::filesystem::{
+    read_regular_file_nofollow, validate_existing_regular_or_absent, validate_no_symlink_components,
+};
 
 use super::{ITEMS, Store, ciphertext_sha256, is_valid_item_id};
 
@@ -18,6 +21,7 @@ impl Store {
     )]
     pub fn recover_interrupted_operations(&self) -> Result<()> {
         let _recovery_guard = self.write_guard_checked()?;
+        validate_no_symlink_components(&self.secrets_dir)?;
         let mut recovery_files = fs::read_dir(&self.secrets_dir)?
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<io::Result<Vec<_>>>()?;
@@ -75,6 +79,7 @@ impl Store {
             }
 
             let canonical = self.secret_path(id)?;
+            validate_existing_regular_or_absent(&canonical)?;
             if kind == "create" {
                 match self.get_item(id) {
                     Ok(metadata) => {
@@ -84,7 +89,7 @@ impl Store {
                                 recovery.display()
                             ))
                         })?;
-                        let ciphertext = fs::read(&canonical)?;
+                        let ciphertext = read_regular_file_nofollow(&canonical)?;
                         if ciphertext_sha256(&ciphertext) != expected_hash {
                             return Err(Error::Config(format!(
                                 "create recovery file does not match committed ciphertext: {}",
@@ -93,9 +98,10 @@ impl Store {
                         }
                         fs::remove_file(&recovery)?;
                     }
-                    Err(Error::NotFound(_)) => match fs::metadata(&canonical) {
+                    Err(Error::NotFound(_)) => match fs::symlink_metadata(&canonical) {
                         Ok(canonical_metadata)
-                            if canonical_metadata.dev() == file_metadata.dev()
+                            if canonical_metadata.file_type().is_file()
+                                && canonical_metadata.dev() == file_metadata.dev()
                                 && canonical_metadata.ino() == file_metadata.ino() =>
                         {
                             fs::remove_file(&canonical)?;
@@ -147,7 +153,7 @@ impl Store {
                 fs::rename(&recovery, &canonical)?;
                 continue;
             };
-            match fs::read(&canonical) {
+            match read_regular_file_nofollow(&canonical) {
                 Ok(ciphertext) if ciphertext_sha256(&ciphertext) == expected_hash => {
                     fs::remove_file(&recovery)?;
                 }

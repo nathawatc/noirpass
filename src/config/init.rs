@@ -2,10 +2,14 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::filesystem::{
+    ensure_dir_0700, open_regular_rw_nofollow, path_entry_exists,
+    validate_existing_directory_or_absent, validate_existing_regular_or_absent,
+    validate_no_symlink_components,
+};
 use crate::gpg::{cert_to_binary, has_usable_encryption_key, parse_recipient_cert};
 
 use super::format::{
@@ -60,18 +64,15 @@ fn has_encrypted_secret_files(data_dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn path_entry_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err.into()),
-    }
-}
-
 fn reject_missing_index_for_initialized_store(data_dir: &Path) -> Result<()> {
+    let index_path = data_dir.join(INDEX_FILE);
+    validate_existing_regular_or_absent(&index_path)?;
+    if path_entry_exists(&index_path)? {
+        let _ = open_regular_rw_nofollow(&index_path)?;
+    }
     let initialized = path_entry_exists(&config_path(data_dir))?
         || path_entry_exists(&recipient_cert_path(data_dir))?;
-    if initialized && !path_entry_exists(&data_dir.join(INDEX_FILE))? {
+    if initialized && !path_entry_exists(&index_path)? {
         return Err(Error::Config(
             "cannot initialize an already initialized store because metadata database `index.redb` is missing; run `noirpass deinit` before initializing again".into(),
         ));
@@ -97,6 +98,7 @@ pub fn init_from_path(data_dir: &Path, path: &str) -> Result<Config> {
 
 /// Import an armored or binary recipient cert from bytes.
 pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
+    validate_no_symlink_components(data_dir)?;
     let cert = parse_recipient_cert(bytes)?;
     if !has_usable_encryption_key(&cert) {
         return Err(Error::Config(
@@ -107,7 +109,7 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     reject_missing_index_for_initialized_store(data_dir)?;
     let has_encrypted_files = has_encrypted_secret_files(data_dir)?;
 
-    if config_path(data_dir).exists() {
+    if path_entry_exists(&config_path(data_dir))? {
         let (_, _, existing_fingerprint) = load_configured_recipient(data_dir).map_err(|err| {
             Error::Config(format!(
                 "cannot initialize an already initialized store because existing recipient fingerprint cannot be verified: {err}"
@@ -127,9 +129,12 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     let idle_exit =
         Config::load(data_dir).map_or(DEFAULT_IDLE_EXIT_SECONDS, |config| config.idle_exit);
 
-    fs::create_dir_all(data_dir.join(KEYS_DIR))?;
-    fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
-    fs::set_permissions(data_dir.join(KEYS_DIR), fs::Permissions::from_mode(0o700))?;
+    let keys_dir = data_dir.join(KEYS_DIR);
+    validate_existing_directory_or_absent(&keys_dir)?;
+    validate_existing_regular_or_absent(&recipient_cert_path(data_dir))?;
+    validate_existing_regular_or_absent(&config_path(data_dir))?;
+    ensure_dir_0700(data_dir)?;
+    ensure_dir_0700(&keys_dir)?;
 
     let cert_path = recipient_cert_path(data_dir);
     let previous_cert = read_optional(&cert_path)?;

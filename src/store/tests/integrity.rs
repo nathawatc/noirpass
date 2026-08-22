@@ -27,6 +27,28 @@ fn collection_reads_and_updates_reject_embedded_id_mismatch() {
 }
 
 #[test]
+fn index_symlink_is_rejected_without_touching_target() {
+    let selected = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_index = outside.path().join("index.redb");
+    drop(Store::open(outside.path()).unwrap());
+    let outside_before = fs::read(&outside_index).unwrap();
+    fs::create_dir(selected.path().join("secrets")).unwrap();
+    std::os::unix::fs::symlink(&outside_index, selected.path().join("index.redb")).unwrap();
+
+    assert!(Store::open(selected.path()).is_err());
+    assert!(Store::open_existing(selected.path()).is_err());
+    assert!(Store::probe_health(selected.path()).is_err());
+    assert_eq!(fs::read(&outside_index).unwrap(), outside_before);
+    assert!(
+        fs::symlink_metadata(selected.path().join("index.redb"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
 fn readonly_integrity_probe_preserves_busy_store_behavior() {
     let tmp = tempfile::tempdir().unwrap();
     let setup = Store::open(tmp.path()).unwrap();

@@ -7,6 +7,7 @@
 pub mod config;
 pub mod crypto;
 pub mod error;
+mod filesystem;
 pub mod gpg;
 pub mod service;
 pub mod store;

@@ -1,12 +1,14 @@
 //! Recipient loading and read-only status reporting.
 
-use std::fs;
 use std::io;
 use std::path::Path;
 
 use sequoia_openpgp::Cert;
 
 use crate::error::{Error, Result};
+use crate::filesystem::{
+    path_entry_exists, read_regular_file_nofollow, validate_no_symlink_components,
+};
 use crate::gpg::{has_usable_encryption_key, parse_recipient_cert};
 use crate::store::Store;
 
@@ -23,7 +25,7 @@ pub(super) fn load_configured_recipient(data_dir: &Path) -> Result<(Config, Cert
     }
 
     let path = recipient_cert_path_from_config(data_dir, &config.recipient_cert)?;
-    let bytes = fs::read(&path).map_err(|e| {
+    let bytes = read_regular_file_nofollow(&path).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             Error::Config(format!(
                 "recipient certificate missing at {}; {INIT_HINT}",
@@ -60,7 +62,7 @@ pub fn load_recipient(data_dir: &Path) -> Result<Recipient> {
 pub fn status(data_dir: &Path) -> Status {
     let mut out = Status {
         data_dir: data_dir.to_path_buf(),
-        config_present: config_path(data_dir).exists(),
+        config_present: false,
         config_valid: false,
         recipient_cert_present: false,
         configured_fingerprint: None,
@@ -69,6 +71,12 @@ pub fn status(data_dir: &Path) -> Status {
         cert_has_encryption_key: None,
         errors: Vec::new(),
     };
+
+    if let Err(err) = validate_no_symlink_components(data_dir) {
+        out.errors.push(format!("store path is unsafe: {err}"));
+        return out;
+    }
+    out.config_present = path_entry_exists(&config_path(data_dir)).unwrap_or(false);
 
     let config = match Config::load(data_dir) {
         Ok(config) => {
@@ -91,8 +99,8 @@ pub fn status(data_dir: &Path) -> Status {
     if let Some(config) = config {
         match recipient_cert_path_from_config(data_dir, &config.recipient_cert) {
             Ok(cert_path) => {
-                out.recipient_cert_present = cert_path.exists();
-                match fs::read(&cert_path) {
+                out.recipient_cert_present = path_entry_exists(&cert_path).unwrap_or(false);
+                match read_regular_file_nofollow(&cert_path) {
                     Ok(bytes) => match parse_recipient_cert(&bytes) {
                         Ok(cert) => {
                             let actual = cert.fingerprint().to_hex();

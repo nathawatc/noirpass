@@ -1382,6 +1382,7 @@ dependencies = [
  "cbc",
  "clap",
  "hkdf",
+ "libc",
  "num-bigint-dig",
  "oo7",
  "rand 0.10.2",

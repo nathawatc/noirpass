@@ -9,6 +9,9 @@ use super::{
     CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, RECOVERY_KINDS, SECRETS_DIR,
 };
 use crate::error::{Error, Result};
+use crate::filesystem::{
+    open_directory_nofollow, read_regular_file_nofollow, validate_no_symlink_components,
+};
 use crate::store::Store;
 
 fn is_lower_hex(bytes: &[u8]) -> bool {
@@ -162,7 +165,7 @@ fn remove_known_secret_files(data_dir: &Path) -> Result<()> {
             )?;
         }
     }
-    fs::File::open(&secrets)?.sync_all()?;
+    open_directory_nofollow(&secrets)?.sync_all()?;
     remove_empty_directory(data_dir, Path::new(SECRETS_DIR), "the secrets directory")
 }
 
@@ -201,7 +204,12 @@ fn load_deinit_config(data_dir: &Path) -> Result<Option<Config>> {
             "cannot deinitialize configuration at {}; expected a regular file",
             path.display()
         ))),
-        Ok(_) => Ok(Some(parse_config(&fs::read_to_string(path)?)?)),
+        Ok(_) => {
+            let bytes = read_regular_file_nofollow(&path)?;
+            let text = String::from_utf8(bytes)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            Ok(Some(parse_config(&text)?))
+        }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
@@ -251,6 +259,7 @@ fn open_complete_store(data_dir: &Path) -> Result<Option<Store>> {
 
 /// Remove Noirpass-owned state without following symlinks or touching unknown files.
 pub fn deinit(data_dir: &Path) -> Result<()> {
+    validate_no_symlink_components(data_dir)?;
     if !existing_directory(data_dir, "the selected store")? {
         return Ok(());
     }
@@ -270,6 +279,6 @@ pub fn deinit(data_dir: &Path) -> Result<()> {
     remove_config_temporary_files_in(data_dir, &data_dir.join(KEYS_DIR), Path::new(KEYS_DIR))?;
     remove_empty_directory(data_dir, Path::new(KEYS_DIR), "the keys directory")?;
     remove_owned_file(data_dir, Path::new(CONFIG_FILE), "the configuration")?;
-    fs::File::open(data_dir)?.sync_all()?;
+    open_directory_nofollow(data_dir)?.sync_all()?;
     Ok(())
 }

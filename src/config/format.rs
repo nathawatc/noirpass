@@ -2,25 +2,34 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use toml_edit::{DocumentMut, value};
 
 use crate::error::{Error, Result};
+use crate::filesystem::{
+    create_regular_nofollow, ensure_dir_0700, open_directory_nofollow, read_regular_file_nofollow,
+    validate_existing_regular_or_absent, validate_no_symlink_components,
+};
 
 use super::{CONFIG_FILE, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT, RECIPIENT_REL};
 
 impl Config {
     /// Load `config.toml`.
     pub fn load(data_dir: &Path) -> Result<Self> {
-        let text = fs::read_to_string(config_path(data_dir)).map_err(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                Error::Config(format!("noirpass is not initialized; {INIT_HINT}"))
-            } else {
-                Error::Io(e)
-            }
-        })?;
+        validate_no_symlink_components(data_dir)?;
+        let text = read_regular_file_nofollow(&config_path(data_dir))
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    Error::Config(format!("noirpass is not initialized; {INIT_HINT}"))
+                } else {
+                    Error::Io(e)
+                }
+            })
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::InvalidData, e)))
+            })?;
         parse_config(&text)
     }
 
@@ -28,8 +37,8 @@ impl Config {
     pub fn write(&self, data_dir: &Path) -> Result<()> {
         validate_recipient_cert_path(&self.recipient_cert)?;
         validate_idle_exit(self.idle_exit)?;
-        fs::create_dir_all(data_dir)?;
-        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
+        let _ = recipient_cert_path_from_config(data_dir, &self.recipient_cert)?;
+        ensure_dir_0700(data_dir)?;
 
         let mut doc = DocumentMut::new();
         doc["version"] = value(self.version);
@@ -71,24 +80,35 @@ pub(super) fn validate_recipient_cert_path(path: &Path) -> Result<()> {
 
 pub(super) fn recipient_cert_path_from_config(data_dir: &Path, path: &Path) -> Result<PathBuf> {
     validate_recipient_cert_path(path)?;
-    Ok(data_dir.join(path))
+    let full_path = data_dir.join(path);
+    validate_no_symlink_components(&full_path).map_err(|err| {
+        Error::Config(format!(
+            "configured recipient certificate path is unsafe at {}; refusing to follow symlink: {err}",
+            full_path.display()
+        ))
+    })?;
+    validate_existing_regular_or_absent(&full_path).map_err(|err| {
+        Error::Config(format!(
+            "configured recipient certificate path is not a regular file at {}: {err}",
+            full_path.display()
+        ))
+    })?;
+    Ok(full_path)
 }
 
 pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    validate_no_symlink_components(path)?;
+    validate_existing_regular_or_absent(path)?;
     let parent = path.parent().ok_or_else(|| {
         Error::Config(format!(
             "cannot determine parent directory for {}",
             path.display()
         ))
     })?;
+    let _parent_directory = open_directory_nofollow(parent)?;
     for _ in 0..16 {
         let tmp = parent.join(format!(".noirpass-tmp-{:016x}", rand::random::<u64>()));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)
-        {
+        match create_regular_nofollow(&tmp, mode) {
             Ok(mut file) => {
                 let write_result = (|| -> io::Result<()> {
                     file.write_all(bytes)?;
@@ -103,7 +123,7 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
                     let _ = fs::remove_file(&tmp);
                     return Err(Error::Io(err));
                 }
-                fs::File::open(parent)?.sync_all()?;
+                open_directory_nofollow(parent)?.sync_all()?;
                 return Ok(());
             }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
@@ -117,7 +137,7 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 }
 
 pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
+    match read_regular_file_nofollow(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(Error::Io(err)),
@@ -125,6 +145,7 @@ pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 pub(super) fn restore_recipient_cert(path: &Path, previous: Option<&[u8]>) -> Result<()> {
+    validate_existing_regular_or_absent(path)?;
     if let Some(bytes) = previous {
         atomic_write(path, bytes, 0o600)
     } else {

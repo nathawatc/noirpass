@@ -2,10 +2,14 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::filesystem::{
+    create_regular_nofollow, open_directory_nofollow, read_regular_file_nofollow,
+    validate_existing_regular_or_absent,
+};
 
 use super::{PersistError, Store};
 
@@ -13,7 +17,7 @@ impl Store {
     // --- secret files ----------------------------------------------------
 
     pub(super) fn sync_secrets_dir(&self) -> Result<()> {
-        fs::File::open(&self.secrets_dir)?.sync_all()?;
+        open_directory_nofollow(&self.secrets_dir)?.sync_all()?;
         Ok(())
     }
 
@@ -27,12 +31,7 @@ impl Store {
     pub(super) fn reserve_recovery_path(&self, kind: &str, id: &str) -> Result<PathBuf> {
         for _ in 0..16 {
             let path = self.recovery_path(kind, id);
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-            {
+            match create_regular_nofollow(&path, 0o600) {
                 Ok(file) => {
                     if let Err(sync_err) = file.sync_all() {
                         return match fs::remove_file(&path) {
@@ -112,12 +111,7 @@ impl Store {
     ) -> Result<PathBuf> {
         for _ in 0..16 {
             let path = self.recovery_path(kind, id);
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-            {
+            match create_regular_nofollow(&path, 0o600) {
                 Ok(mut file) => {
                     if let Err(write_err) =
                         file.write_all(ciphertext).and_then(|()| file.sync_all())
@@ -198,6 +192,7 @@ impl Store {
         staged: &Path,
         commit: impl FnOnce() -> std::result::Result<T, PersistError>,
     ) -> Result<T> {
+        validate_existing_regular_or_absent(path)?;
         let id = path
             .file_stem()
             .and_then(|name| name.to_str())
@@ -233,7 +228,7 @@ impl Store {
         }
         if let Err(sync_err) = self.sync_secrets_dir() {
             let rollback = fs::rename(&backup, path)
-                .and_then(|()| fs::File::open(&self.secrets_dir)?.sync_all());
+                .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all());
             return match rollback {
                 Ok(()) => Err(sync_err),
                 Err(rollback_err) => self.poison_error(Error::Config(format!(
@@ -255,7 +250,7 @@ impl Store {
             }
             Err(PersistError::Definite(err)) => {
                 let rollback = fs::rename(&backup, path)
-                    .and_then(|()| fs::File::open(&self.secrets_dir)?.sync_all());
+                    .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all());
                 match rollback {
                     Ok(()) => Err(err),
                     Err(rollback_err) => self.poison_error(Error::Config(format!(
@@ -278,6 +273,7 @@ impl Store {
         path: &Path,
         commit: impl FnOnce() -> std::result::Result<T, PersistError>,
     ) -> Result<T> {
+        validate_existing_regular_or_absent(path)?;
         let id = path
             .file_stem()
             .and_then(|name| name.to_str())
@@ -287,7 +283,7 @@ impl Store {
             Ok(()) => {
                 if let Err(sync_err) = self.sync_secrets_dir() {
                     let restore = fs::rename(&quarantine, path)
-                        .and_then(|()| fs::File::open(&self.secrets_dir)?.sync_all());
+                        .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all());
                     return match restore {
                         Ok(()) => Err(sync_err),
                         Err(restore_err) => self.poison_error(Error::Config(format!(
@@ -325,7 +321,7 @@ impl Store {
             }
             Ok(value) => Ok(value),
             Err(PersistError::Definite(err)) if quarantined => match fs::rename(&quarantine, path)
-                .and_then(|()| fs::File::open(&self.secrets_dir)?.sync_all())
+                .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all())
             {
                 Ok(()) => Err(err),
                 Err(restore_err) => self.poison_error(Error::Config(format!(
@@ -351,6 +347,7 @@ impl Store {
         let validated = paths
             .iter()
             .map(|path| {
+                validate_existing_regular_or_absent(path)?;
                 let id = path
                     .file_stem()
                     .and_then(|name| name.to_str())
@@ -445,6 +442,7 @@ impl Store {
     /// permissions.
     pub(super) fn write_secret_file(&self, id: &str, ciphertext: &[u8]) -> Result<PathBuf> {
         let path = self.secret_path(id)?;
+        validate_existing_regular_or_absent(&path)?;
         let staged = self.stage_secret_file(id, ciphertext, "create")?;
         if let Err(install_err) = fs::hard_link(&staged, &path) {
             return match Self::cleanup_files(&[&staged]) {
@@ -472,7 +470,7 @@ impl Store {
     pub(super) fn read_secret_file_unlocked(&self, id: &str) -> Result<Vec<u8>> {
         self.ensure_not_poisoned()?;
         let path = self.secret_path(id)?;
-        match fs::read(&path) {
+        match read_regular_file_nofollow(&path) {
             Ok(bytes) => Ok(bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 Err(Error::NotFound(format!("secret file for item {id}")))
