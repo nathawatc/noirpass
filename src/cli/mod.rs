@@ -220,15 +220,21 @@ async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: i64) {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("received SIGINT");
+                state.begin_shutdown();
+                state.wait_for_active_calls().await;
                 return;
             }
             _ = sigterm.recv() => {
                 info!("received SIGTERM");
+                state.begin_shutdown();
+                state.wait_for_active_calls().await;
                 return;
             }
             _ = poison_ticker.tick() => {
                 if state.store().is_poisoned() {
                     info!("store commit outcome indeterminate; shutting down");
+                    state.begin_shutdown();
+                    state.wait_for_active_calls().await;
                     return;
                 }
                 if idle_exit == 0 && state.try_begin_idle_shutdown(idle_exit) {

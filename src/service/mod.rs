@@ -391,6 +391,7 @@ fn fdo_err(err: crate::Error) -> fdo::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use std::pin::Pin;
 
     use crate::gpg::test_support::TestGnupg;
@@ -496,6 +497,45 @@ mod tests {
 
         assert!(state.try_begin_idle_shutdown(0));
         assert!(state.activity().is_err());
+    }
+
+    #[tokio::test]
+    async fn explicit_shutdown_closes_admission_and_drains_active_handlers() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let activity = state.activity().unwrap();
+
+        state.begin_shutdown();
+        assert!(state.activity().is_err());
+
+        let mut drain = Box::pin(state.wait_for_active_calls());
+        let pending = std::future::poll_fn(|cx| {
+            if drain.as_mut().poll(cx).is_pending() {
+                std::task::Poll::Ready(true)
+            } else {
+                std::task::Poll::Ready(false)
+            }
+        })
+        .await;
+        assert!(pending, "active-call drain completed before guard drop");
+
+        drop(activity);
+        tokio::time::timeout(Duration::from_secs(1), &mut drain)
+            .await
+            .expect("active-call drain did not complete after guard drop");
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_completes_with_no_active_handlers() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+
+        state.begin_shutdown();
+        tokio::time::timeout(Duration::from_secs(1), state.wait_for_active_calls())
+            .await
+            .expect("zero-active shutdown drain did not complete");
     }
 
     #[test]

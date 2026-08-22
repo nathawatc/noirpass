@@ -4,7 +4,7 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify};
 use zbus::fdo;
 use zbus::zvariant::OwnedObjectPath;
 
@@ -41,9 +41,15 @@ pub(crate) struct ActivityGuard<'a> {
 
 impl Drop for ActivityGuard<'_> {
     fn drop(&mut self) {
-        let mut activity = self.state.activity.lock().expect("activity lock poisoned");
-        activity.active_calls -= 1;
-        activity.last_activity = Instant::now();
+        let notify = {
+            let mut activity = self.state.activity.lock().expect("activity lock poisoned");
+            activity.active_calls -= 1;
+            activity.last_activity = Instant::now();
+            activity.active_calls == 0
+        };
+        if notify {
+            self.state.activity_complete.notify_one();
+        }
     }
 }
 
@@ -53,6 +59,7 @@ pub struct ServiceState {
     gpg: Gpg,
     sessions: Mutex<HashMap<OwnedObjectPath, SessionEntry>>,
     activity: Mutex<ActivityState>,
+    activity_complete: Notify,
     object_lifecycle: AsyncMutex<()>,
 }
 
@@ -70,6 +77,7 @@ impl ServiceState {
                 last_activity: Instant::now(),
                 shutting_down: false,
             }),
+            activity_complete: Notify::new(),
             object_lifecycle: AsyncMutex::new(()),
         })
     }
@@ -100,6 +108,32 @@ impl ServiceState {
         activity.active_calls += 1;
         activity.had_activity = true;
         Ok(ActivityGuard { state: self })
+    }
+
+    /// Close admission for new application handlers.
+    pub fn begin_shutdown(&self) {
+        self.activity
+            .lock()
+            .expect("activity lock poisoned")
+            .shutting_down = true;
+    }
+
+    /// Wait until every already-admitted application handler has returned.
+    pub async fn wait_for_active_calls(&self) {
+        loop {
+            // Create notification future before checking the condition. `notify_one`
+            // preserves a completion that races with the check as a stored permit.
+            let notified = self.activity_complete.notified();
+            let active_calls = self
+                .activity
+                .lock()
+                .expect("activity lock poisoned")
+                .active_calls;
+            if active_calls == 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Atomically select idle shutdown against application-handler admission.
