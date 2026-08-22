@@ -15,6 +15,7 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{fdo, interface};
 
+use crate::service::item::Item;
 use crate::service::session::Secret;
 use crate::service::{
     SERVICE_PATH, SecretError, Service, ServiceState, alias_path, collection_path, item_path,
@@ -164,6 +165,11 @@ impl Collection {
             .await
             .map_err(SecretError::ZBus)?;
         if replaced {
+            let item_emitter = SignalEmitter::new(connection, path.clone())?;
+            let item_ref = server.interface::<_, Item>(&path).await?;
+            let item = item_ref.get().await;
+            item.emit_label_changed(&item_emitter).await?;
+            item.modified_changed(&item_emitter).await?;
             Self::item_changed(&emitter, path.clone()).await?;
             self.items_changed(&emitter).await?;
             return Ok((path, no_prompt()));

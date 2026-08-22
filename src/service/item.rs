@@ -5,11 +5,13 @@
 //! exist in plaintext transiently, between the session cipher and the
 //! `OpenPGP` layer.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use zbus::names::InterfaceName;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::OwnedObjectPath;
+use zbus::zvariant::{OwnedObjectPath, Value};
 use zbus::{fdo, interface};
 
 use crate::service::collection::Collection;
@@ -22,6 +24,8 @@ use crate::service::{
 fn no_prompt() -> OwnedObjectPath {
     OwnedObjectPath::try_from("/").expect("/ is a valid object path")
 }
+
+const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
 
 /// A `org.freedesktop.Secret.Item` D-Bus object.
 pub struct Item {
@@ -44,6 +48,37 @@ impl Item {
     /// This item's D-Bus path.
     fn path(&self) -> OwnedObjectPath {
         item_path(&self.collection_id, &self.id)
+    }
+
+    /// Emit the changed signal for Attributes while mutation serialization remains held.
+    pub(crate) async fn emit_attributes_changed(
+        &self,
+        emitter: &SignalEmitter<'_>,
+    ) -> fdo::Result<()> {
+        let mut changed = HashMap::new();
+        changed.insert("Attributes", Value::from(self.attributes()?));
+        fdo::Properties::properties_changed(
+            emitter,
+            InterfaceName::from_static_str_unchecked(ITEM_INTERFACE),
+            changed,
+            Cow::Borrowed(&[]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Emit the changed signal for Label while mutation serialization remains held.
+    pub(crate) async fn emit_label_changed(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
+        let mut changed = HashMap::new();
+        changed.insert("Label", Value::from(self.label()?));
+        fdo::Properties::properties_changed(
+            emitter,
+            InterfaceName::from_static_str_unchecked(ITEM_INTERFACE),
+            changed,
+            Cow::Borrowed(&[]),
+        )
+        .await?;
+        Ok(())
     }
 }
 
@@ -72,12 +107,14 @@ impl Item {
         clippy::needless_pass_by_value,
         reason = "zbus deserializes method arguments by value"
     )]
-    fn set_secret(
+    async fn set_secret(
         &self,
         secret: Secret,
         #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
         let _activity = self.state.activity()?;
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         let owner = message_sender(&header)?;
         let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
         self.state.store().update_item(
@@ -87,6 +124,19 @@ impl Item {
             Some(&secret.content_type),
             Some(&ciphertext),
         )?;
+
+        let item_path = self.path();
+        let item_emitter =
+            SignalEmitter::new(connection, item_path.clone()).map_err(SecretError::ZBus)?;
+        let collection_emitter =
+            SignalEmitter::new(connection, collection_path(&self.collection_id))
+                .map_err(SecretError::ZBus)?;
+        self.modified_changed(&item_emitter)
+            .await
+            .map_err(SecretError::ZBus)?;
+        Collection::item_changed(&collection_emitter, item_path)
+            .await
+            .map_err(SecretError::ZBus)?;
         Ok(())
     }
 
@@ -133,7 +183,7 @@ impl Item {
     }
 
     /// Lookup attributes.
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     fn attributes(&self) -> fdo::Result<HashMap<String, String>> {
         let _activity = self.state.activity()?;
         let meta = self
@@ -146,17 +196,30 @@ impl Item {
 
     /// Replace the lookup attributes (bumps the modified timestamp).
     #[zbus(property)]
-    fn set_attributes(&self, attributes: HashMap<String, String>) -> fdo::Result<()> {
+    async fn set_attributes(
+        &self,
+        attributes: HashMap<String, String>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         self.state
             .store()
             .update_item(&self.id, None, Some(attributes), None, None)
             .map_err(fdo::Error::from)?;
+
+        let item_path = self.path();
+        let item_emitter = SignalEmitter::new(connection, item_path.clone())?;
+        let collection_emitter =
+            SignalEmitter::new(connection, collection_path(&self.collection_id))?;
+        self.emit_attributes_changed(&item_emitter).await?;
+        self.modified_changed(&item_emitter).await?;
+        Collection::item_changed(&collection_emitter, item_path).await?;
         Ok(())
     }
 
     /// Human-readable label.
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     fn label(&self) -> fdo::Result<String> {
         let _activity = self.state.activity()?;
         let meta = self
@@ -169,12 +232,25 @@ impl Item {
 
     /// Relabel the item (bumps the modified timestamp).
     #[zbus(property)]
-    fn set_label(&self, label: &str) -> fdo::Result<()> {
+    async fn set_label(
+        &self,
+        label: &str,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
+        let _lifecycle = self.state.lock_object_lifecycle().await;
         self.state
             .store()
             .update_item(&self.id, Some(label), None, None, None)
             .map_err(fdo::Error::from)?;
+
+        let item_path = self.path();
+        let item_emitter = SignalEmitter::new(connection, item_path.clone())?;
+        let collection_emitter =
+            SignalEmitter::new(connection, collection_path(&self.collection_id))?;
+        self.emit_label_changed(&item_emitter).await?;
+        self.modified_changed(&item_emitter).await?;
+        Collection::item_changed(&collection_emitter, item_path).await?;
         Ok(())
     }
 

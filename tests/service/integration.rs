@@ -41,6 +41,7 @@ const SERVICE_NAME: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
 const SERVICE_IFACE: &str = "org.freedesktop.Secret.Service";
 const COLLECTION_IFACE: &str = "org.freedesktop.Secret.Collection";
+const ITEM_IFACE: &str = "org.freedesktop.Secret.Item";
 const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 const NO_SESSION_ERROR: &str = "org.freedesktop.Secret.Error.NoSession";
 const UNKNOWN_OBJECT_ERROR: &str = "org.freedesktop.DBus.Error.UnknownObject";
@@ -187,6 +188,46 @@ async fn service_proxy(conn: &zbus::Connection) -> zbus::Proxy<'static> {
     zbus::Proxy::new(conn, SERVICE_NAME, SERVICE_PATH, SERVICE_IFACE)
         .await
         .expect("service proxy")
+}
+
+async fn next_property_name<S>(stream: Pin<&mut S>) -> String
+where
+    S: Stream<Item = zbus::Message>,
+{
+    let message = tokio::time::timeout(Duration::from_secs(10), next_event(stream))
+        .await
+        .expect("timed out waiting for PropertiesChanged")
+        .expect("PropertiesChanged stream ended");
+    let (interface, changed, invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
+        message.body().deserialize().unwrap();
+    assert_eq!(interface, ITEM_IFACE);
+    assert!(invalidated.is_empty());
+    assert_eq!(changed.len(), 1);
+    changed.into_keys().next().unwrap()
+}
+
+async fn assert_no_signal<S>(stream: Pin<&mut S>, description: &str)
+where
+    S: Stream<Item = zbus::Message>,
+{
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), next_event(stream))
+            .await
+            .is_err(),
+        "unexpected {description}"
+    );
+}
+
+async fn next_item_changed<S>(stream: Pin<&mut S>, expected: &OwnedObjectPath)
+where
+    S: Stream<Item = zbus::Message>,
+{
+    let message = tokio::time::timeout(Duration::from_secs(10), next_event(stream))
+        .await
+        .expect("timed out waiting for ItemChanged")
+        .expect("ItemChanged stream ended");
+    let (item,): (OwnedObjectPath,) = message.body().deserialize().unwrap();
+    assert_eq!(&item, expected);
 }
 
 async fn locked_property(proxy: &zbus::Proxy<'_>, interface: &str) -> bool {
@@ -911,6 +952,253 @@ async fn s11_lock_semantics() {
     collection.delete(None).await.unwrap();
 }
 
+/// Scenario 12: item mutations emit required property and collection signals.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one private-bus scenario covers every item mutation notification path"
+)]
+async fn s12_item_mutation_signals() {
+    let h = harness();
+    let service = oo7::dbus::Service::plain().await.unwrap();
+    let collection = service
+        .create_collection("s12-mutations", None, None)
+        .await
+        .unwrap();
+    let attributes = attrs("s12");
+    let item = collection
+        .create_item(
+            "s12-initial",
+            &attributes,
+            oo7::Secret::text("initial secret"),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+    let collection_path = OwnedObjectPath::from(collection.path().to_owned());
+    let item_path = OwnedObjectPath::from(item.path().to_owned());
+
+    let conn = zbus::Connection::session().await.unwrap();
+    let service_proxy = service_proxy(&conn).await;
+    let item_proxy = zbus::Proxy::new(&conn, SERVICE_NAME, item_path.clone(), ITEM_IFACE)
+        .await
+        .unwrap();
+    let item_properties =
+        zbus::Proxy::new(&conn, SERVICE_NAME, item_path.clone(), PROPERTIES_IFACE)
+            .await
+            .unwrap();
+    let collection_proxy = zbus::Proxy::new(
+        &conn,
+        SERVICE_NAME,
+        collection_path.clone(),
+        COLLECTION_IFACE,
+    )
+    .await
+    .unwrap();
+    let (_, session): (OwnedValue, OwnedObjectPath) = service_proxy
+        .call("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap();
+
+    // SetSecret emits ItemChanged and Modified.
+    let mut item_changed = std::pin::pin!(
+        collection_proxy
+            .receive_signal("ItemChanged")
+            .await
+            .unwrap()
+    );
+    let mut properties_changed = std::pin::pin!(
+        item_properties
+            .receive_signal("PropertiesChanged")
+            .await
+            .unwrap()
+    );
+    let secret = WireSecret {
+        session: session.clone(),
+        parameters: Vec::new(),
+        value: Zeroizing::new(b"changed secret".to_vec()),
+        content_type: "text/plain".to_string(),
+    };
+    item_proxy
+        .call::<_, _, ()>("SetSecret", &(&secret,))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_property_name(properties_changed.as_mut()).await,
+        "Modified"
+    );
+    assert_no_signal(
+        properties_changed.as_mut(),
+        "duplicate SetSecret property signal",
+    )
+    .await;
+    next_item_changed(item_changed.as_mut(), &item_path).await;
+    assert_no_signal(item_changed.as_mut(), "duplicate SetSecret ItemChanged").await;
+
+    // Label setter emits one explicit Label signal plus Modified and ItemChanged.
+    let mut item_changed = std::pin::pin!(
+        collection_proxy
+            .receive_signal("ItemChanged")
+            .await
+            .unwrap()
+    );
+    let mut properties_changed = std::pin::pin!(
+        item_properties
+            .receive_signal("PropertiesChanged")
+            .await
+            .unwrap()
+    );
+    item_proxy.set_property("Label", "s12-label").await.unwrap();
+    let label_names = vec![
+        next_property_name(properties_changed.as_mut()).await,
+        next_property_name(properties_changed.as_mut()).await,
+    ];
+    assert_eq!(label_names, ["Label", "Modified"]);
+    assert_no_signal(
+        properties_changed.as_mut(),
+        "duplicate Label property signal",
+    )
+    .await;
+    next_item_changed(item_changed.as_mut(), &item_path).await;
+    assert_no_signal(item_changed.as_mut(), "duplicate Label ItemChanged").await;
+
+    // Attributes setter emits one explicit Attributes signal plus Modified and ItemChanged.
+    let mut item_changed = std::pin::pin!(
+        collection_proxy
+            .receive_signal("ItemChanged")
+            .await
+            .unwrap()
+    );
+    let mut properties_changed = std::pin::pin!(
+        item_properties
+            .receive_signal("PropertiesChanged")
+            .await
+            .unwrap()
+    );
+    let replacement_attributes = HashMap::from([
+        ("app".to_string(), "noirpass-e2e".to_string()),
+        ("case".to_string(), "s12-updated".to_string()),
+    ]);
+    item_proxy
+        .set_property("Attributes", replacement_attributes.clone())
+        .await
+        .unwrap();
+    let attribute_names = vec![
+        next_property_name(properties_changed.as_mut()).await,
+        next_property_name(properties_changed.as_mut()).await,
+    ];
+    assert_eq!(attribute_names, ["Attributes", "Modified"]);
+    assert_no_signal(
+        properties_changed.as_mut(),
+        "duplicate Attributes property signal",
+    )
+    .await;
+    next_item_changed(item_changed.as_mut(), &item_path).await;
+    assert_no_signal(item_changed.as_mut(), "duplicate Attributes ItemChanged").await;
+
+    // Replacement emits one Label, one Modified, ItemChanged, but not ItemCreated.
+    let mut item_changed = std::pin::pin!(
+        collection_proxy
+            .receive_signal("ItemChanged")
+            .await
+            .unwrap()
+    );
+    let mut item_created = std::pin::pin!(
+        collection_proxy
+            .receive_signal("ItemCreated")
+            .await
+            .unwrap()
+    );
+    let mut properties_changed = std::pin::pin!(
+        item_properties
+            .receive_signal("PropertiesChanged")
+            .await
+            .unwrap()
+    );
+    let replacement = collection
+        .create_item(
+            "s12-replaced",
+            &replacement_attributes,
+            oo7::Secret::text("replaced secret"),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replacement.path(), item.path());
+    let replacement_names = vec![
+        next_property_name(properties_changed.as_mut()).await,
+        next_property_name(properties_changed.as_mut()).await,
+    ];
+    assert_eq!(replacement_names, ["Label", "Modified"]);
+    assert_no_signal(
+        properties_changed.as_mut(),
+        "duplicate replacement property signal",
+    )
+    .await;
+    next_item_changed(item_changed.as_mut(), &item_path).await;
+    assert_no_signal(item_changed.as_mut(), "duplicate replacement ItemChanged").await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            next_event(item_created.as_mut())
+        )
+        .await
+        .is_err(),
+        "replacement must not emit ItemCreated"
+    );
+
+    // A failed persistence mutation emits no property or ItemChanged signals.
+    let mut item_changed = std::pin::pin!(
+        collection_proxy
+            .receive_signal("ItemChanged")
+            .await
+            .unwrap()
+    );
+    let mut properties_changed = std::pin::pin!(
+        item_properties
+            .receive_signal("PropertiesChanged")
+            .await
+            .unwrap()
+    );
+    let secrets_dir = h.store_dir.join("secrets");
+    let hidden_secrets_dir = h.store_dir.join("s12-secrets-hidden");
+    std::fs::rename(&secrets_dir, &hidden_secrets_dir).unwrap();
+    std::fs::write(&secrets_dir, b"not a directory").unwrap();
+    let failed_secret = WireSecret {
+        session,
+        parameters: Vec::new(),
+        value: Zeroizing::new(b"must not persist".to_vec()),
+        content_type: "text/plain".to_string(),
+    };
+    let failure = item_proxy
+        .call::<_, _, ()>("SetSecret", &(&failed_secret,))
+        .await;
+    std::fs::remove_file(&secrets_dir).unwrap();
+    std::fs::rename(&hidden_secrets_dir, &secrets_dir).unwrap();
+    assert!(failure.is_err(), "SetSecret persistence must fail");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            next_event(properties_changed.as_mut())
+        )
+        .await
+        .is_err(),
+        "failed persistence must not emit PropertiesChanged"
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            next_event(item_changed.as_mut())
+        )
+        .await
+        .is_err(),
+        "failed persistence must not emit ItemChanged"
+    );
+
+    collection.delete(None).await.unwrap();
+}
+
 // --- orchestrator --------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -943,7 +1231,9 @@ async fn end_to_end() {
     s10_signals().await;
     eprintln!("scenario 11: lock semantics");
     s11_lock_semantics().await;
-    eprintln!("scenario 12: no daemon gpg spawn");
+    eprintln!("scenario 12: item mutation signals");
+    s12_item_mutation_signals().await;
+    eprintln!("scenario 13: no daemon gpg spawn");
     daemon_runtime_does_not_spawn_gpg();
 
     // Graceful teardown before the process exits: SIGTERM (asserts a clean
