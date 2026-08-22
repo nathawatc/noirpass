@@ -76,6 +76,29 @@ pub fn export_public_cert(dir: &Path) -> Vec<u8> {
     output.stdout
 }
 
+/// Add an encryption subkey to the fixture's existing primary key.
+#[allow(dead_code)]
+pub fn add_encryption_subkey(dir: &Path) {
+    let fingerprint = secret_fingerprint(dir);
+    let status = Command::new("gpg")
+        .args(["--batch", "--no-tty", "--homedir"])
+        .arg(dir)
+        .args([
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-add-key",
+            &fingerprint,
+            "rsa2048",
+            "encr",
+            "never",
+        ])
+        .status()
+        .expect("spawn gpg --quick-add-key");
+    assert!(status.success(), "gpg --quick-add-key failed");
+}
+
 /// Initialize an isolated store with an explicit recipient certificate.
 pub fn init_noirpass_store(store: &Path, recipient: &[u8]) {
     let recipient_path = store.join("recipient.asc");

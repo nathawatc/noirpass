@@ -9,8 +9,9 @@ use noirpass::store::{ItemMeta, Store};
 use redb::{Database, TableDefinition};
 
 use super::common::{
-    export_public_cert, fake_gpg_dir, init_noirpass_store, init_noirpass_store_from_stdin,
-    setup_gnupg, sigterm, spawn_daemon, spawn_dbus_daemon, wait_for_name, wait_with_timeout,
+    add_encryption_subkey, export_public_cert, fake_gpg_dir, init_noirpass_store,
+    init_noirpass_store_from_stdin, setup_gnupg, sigterm, spawn_daemon, spawn_dbus_daemon,
+    wait_for_name, wait_with_timeout,
 };
 
 #[test]
@@ -309,6 +310,139 @@ fn cli_check_recovers_quarantined_ciphertext_before_repair() {
     );
     assert!(!quarantine.exists());
     assert!(store.check_integrity().unwrap().is_healthy());
+}
+
+#[test]
+fn cli_init_rejects_busy_existing_store_before_writing() {
+    let gnupg = tempfile::tempdir().unwrap();
+    setup_gnupg(gnupg.path());
+    let initial_cert = export_public_cert(gnupg.path());
+    let store = tempfile::tempdir().unwrap();
+    init_noirpass_store(store.path(), &initial_cert);
+
+    add_encryption_subkey(gnupg.path());
+    let refreshed_cert = export_public_cert(gnupg.path());
+    let recipient_path = store.path().join("recipient-refresh.asc");
+    std::fs::write(&recipient_path, &refreshed_cert).unwrap();
+
+    let held_store = Store::open_existing(store.path()).unwrap();
+    let collection = held_store.ensure_default().unwrap();
+    let item = held_store
+        .create_or_replace_item(
+            &collection.id,
+            "busy init sentinel",
+            HashMap::new(),
+            "text/plain",
+            b"ciphertext",
+            false,
+        )
+        .unwrap()
+        .0;
+    let config_before = fs::read(store.path().join("config.toml")).unwrap();
+    let recipient_before = fs::read(store.path().join("keys/recipient.pgp")).unwrap();
+    let index_before = fs::read(store.path().join("index.redb")).unwrap();
+    let ciphertext_path = store
+        .path()
+        .join("secrets")
+        .join(format!("{}.gpg", item.id));
+    let ciphertext_before = fs::read(&ciphertext_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
+        .arg("--store-dir")
+        .arg(store.path())
+        .args(["init", "--recipient"])
+        .arg(&recipient_path)
+        .output()
+        .expect("spawn noirpass init with busy store");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("store is in use"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(store.path().join("config.toml")).unwrap(),
+        config_before
+    );
+    assert_eq!(
+        fs::read(store.path().join("keys/recipient.pgp")).unwrap(),
+        recipient_before
+    );
+    assert_eq!(
+        fs::read(store.path().join("index.redb")).unwrap(),
+        index_before
+    );
+    assert_eq!(fs::read(ciphertext_path).unwrap(), ciphertext_before);
+}
+
+#[test]
+fn cli_init_refreshes_unlocked_existing_store() {
+    let gnupg = tempfile::tempdir().unwrap();
+    setup_gnupg(gnupg.path());
+    let initial_cert = export_public_cert(gnupg.path());
+    let store = tempfile::tempdir().unwrap();
+    init_noirpass_store(store.path(), &initial_cert);
+    let recipient_before = fs::read(store.path().join("keys/recipient.pgp")).unwrap();
+
+    add_encryption_subkey(gnupg.path());
+    let recipient_path = store.path().join("recipient-refresh.asc");
+    fs::write(&recipient_path, export_public_cert(gnupg.path())).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
+        .arg("--store-dir")
+        .arg(store.path())
+        .args(["init", "--recipient"])
+        .arg(&recipient_path)
+        .output()
+        .expect("spawn noirpass init with unlocked store");
+
+    assert!(
+        output.status.success(),
+        "init failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(
+        fs::read(store.path().join("keys/recipient.pgp")).unwrap(),
+        recipient_before
+    );
+    assert!(Store::open_existing(store.path()).is_ok());
+}
+
+#[test]
+fn cli_init_rejects_different_primary_without_writing() {
+    let first_gnupg = tempfile::tempdir().unwrap();
+    setup_gnupg(first_gnupg.path());
+    let second_gnupg = tempfile::tempdir().unwrap();
+    setup_gnupg(second_gnupg.path());
+    let store = tempfile::tempdir().unwrap();
+    init_noirpass_store(store.path(), &export_public_cert(first_gnupg.path()));
+    let config_before = fs::read(store.path().join("config.toml")).unwrap();
+    let recipient_before = fs::read(store.path().join("keys/recipient.pgp")).unwrap();
+    let recipient_path = store.path().join("different-recipient.asc");
+    fs::write(&recipient_path, export_public_cert(second_gnupg.path())).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
+        .arg("--store-dir")
+        .arg(store.path())
+        .args(["init", "--recipient"])
+        .arg(&recipient_path)
+        .output()
+        .expect("spawn noirpass init with different recipient");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("different recipient"));
+    assert_eq!(
+        fs::read(store.path().join("config.toml")).unwrap(),
+        config_before
+    );
+    assert_eq!(
+        fs::read(store.path().join("keys/recipient.pgp")).unwrap(),
+        recipient_before
+    );
 }
 
 #[test]
