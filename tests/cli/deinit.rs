@@ -371,16 +371,19 @@ fn empty_secrets_directory_without_database_does_not_block_init() {
 }
 
 #[test]
-fn existing_valid_database_still_gets_health_probe() {
+fn existing_database_without_config_rejects_init() {
     let store = tempdir().unwrap();
     drop(Store::open(store.path()).unwrap());
     let recipient = write_recipient(store.path(), "recipient.pgp", "existing-db");
 
     let output = run_init(store.path(), &recipient);
 
-    assert!(output.status.success());
-    assert!(store.path().join("config.toml").exists());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("config.toml"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("noirpass deinit"));
+    assert!(!store.path().join("config.toml").exists());
     assert!(store.path().join("index.redb").exists());
+    assert!(!store.path().join("keys/recipient.pgp").exists());
 }
 
 #[test]

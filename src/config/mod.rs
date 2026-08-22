@@ -118,9 +118,9 @@ mod tests {
         let mut cert_bytes = Vec::new();
         cert.serialize(&mut cert_bytes).unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
         init_from_bytes(tmp.path(), &cert_bytes).unwrap();
         let store = Store::open(tmp.path()).unwrap();
+        store.ensure_default().unwrap();
         let item = store
             .create_item(
                 "default",
@@ -302,8 +302,8 @@ mod tests {
     fn symlinked_recipient_is_rejected_by_load_and_status() {
         let (recipient, _) = generated_recipient();
         let tmp = tempfile::tempdir().unwrap();
-        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
         init_from_bytes(tmp.path(), &recipient).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         let outside = tempfile::tempdir().unwrap();
         let outside_cert = outside.path().join("recipient.pgp");
         fs::write(&outside_cert, &recipient).unwrap();
@@ -351,8 +351,8 @@ mod tests {
     fn status_rejects_symlinked_index_without_reading_target() {
         let (recipient, _) = generated_recipient();
         let tmp = tempfile::tempdir().unwrap();
-        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
         init_from_bytes(tmp.path(), &recipient).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         let outside = tempfile::tempdir().unwrap();
         let outside_index = outside.path().join(INDEX_FILE);
         drop(Store::open(outside.path()).unwrap());
@@ -430,6 +430,95 @@ mod tests {
             load_recipient(tmp.path()).unwrap().fingerprint,
             gnupg.fingerprint()
         );
+    }
+
+    #[test]
+    fn reinit_rejects_existing_index_with_missing_config_before_writing() {
+        let one = TestGnupg::new();
+        let two = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
+        let old_recipient = fs::read(recipient_cert_path(tmp.path())).unwrap();
+        let old_index = fs::read(tmp.path().join(INDEX_FILE)).unwrap();
+        fs::remove_file(config_path(tmp.path())).unwrap();
+
+        let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("config.toml"));
+        assert!(message.contains("noirpass deinit"));
+        assert!(!config_path(tmp.path()).exists());
+        assert_eq!(
+            fs::read(recipient_cert_path(tmp.path())).unwrap(),
+            old_recipient
+        );
+        assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), old_index);
+    }
+
+    #[test]
+    fn reinit_rejects_existing_index_with_missing_recipient_before_writing() {
+        let one = TestGnupg::new();
+        let two = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
+        let old_config = fs::read(config_path(tmp.path())).unwrap();
+        let old_index = fs::read(tmp.path().join(INDEX_FILE)).unwrap();
+        fs::remove_file(recipient_cert_path(tmp.path())).unwrap();
+
+        let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
+
+        assert!(err.to_string().contains("cannot be verified"));
+        assert_eq!(fs::read(config_path(tmp.path())).unwrap(), old_config);
+        assert!(!recipient_cert_path(tmp.path()).exists());
+        assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), old_index);
+    }
+
+    #[test]
+    fn reinit_rejects_existing_index_with_corrupt_config_before_writing() {
+        let one = TestGnupg::new();
+        let two = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
+        let old_recipient = fs::read(recipient_cert_path(tmp.path())).unwrap();
+        let old_index = fs::read(tmp.path().join(INDEX_FILE)).unwrap();
+        fs::write(config_path(tmp.path()), b"not toml").unwrap();
+
+        let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("already initialized store"));
+        assert!(message.contains("cannot be verified"));
+        assert_eq!(fs::read(config_path(tmp.path())).unwrap(), b"not toml");
+        assert_eq!(
+            fs::read(recipient_cert_path(tmp.path())).unwrap(),
+            old_recipient
+        );
+        assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), old_index);
+    }
+
+    #[test]
+    fn reinit_rejects_existing_index_with_corrupt_recipient_before_writing() {
+        let one = TestGnupg::new();
+        let two = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &one.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
+        let old_config = fs::read(config_path(tmp.path())).unwrap();
+        let old_index = fs::read(tmp.path().join(INDEX_FILE)).unwrap();
+        fs::write(recipient_cert_path(tmp.path()), b"not openpgp").unwrap();
+
+        let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
+
+        assert!(err.to_string().contains("cannot be verified"));
+        assert_eq!(fs::read(config_path(tmp.path())).unwrap(), old_config);
+        assert_eq!(
+            fs::read(recipient_cert_path(tmp.path())).unwrap(),
+            b"not openpgp"
+        );
+        assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), old_index);
     }
 
     #[test]
@@ -526,6 +615,7 @@ mod tests {
         drop(Store::open(tmp.path()).unwrap());
         let old_config = fs::read(config_path(tmp.path())).unwrap();
         let old_cert = fs::read(recipient_cert_path(tmp.path())).unwrap();
+        let old_index = fs::read(tmp.path().join(INDEX_FILE)).unwrap();
 
         let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
 
@@ -536,6 +626,7 @@ mod tests {
         assert!(err.to_string().contains("noirpass deinit"));
         assert_eq!(fs::read(config_path(tmp.path())).unwrap(), old_config);
         assert_eq!(fs::read(recipient_cert_path(tmp.path())).unwrap(), old_cert);
+        assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), old_index);
         assert_eq!(
             load_recipient(tmp.path()).unwrap().fingerprint,
             one.fingerprint()
@@ -581,10 +672,8 @@ mod tests {
 
         let err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("cannot initialize non-empty store")
-        );
+        assert!(err.to_string().contains("config.toml"));
+        assert!(err.to_string().contains("noirpass deinit"));
         assert!(!config_path(tmp.path()).exists());
         assert_eq!(fs::read(recipient_cert_path(tmp.path())).unwrap(), old_cert);
     }
@@ -713,8 +802,8 @@ mod tests {
     fn status_reports_usable_initialized_store() {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
-        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
         init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
 
         let status = status(tmp.path());
         assert!(status.usable(), "{:?}", status.errors);
@@ -865,8 +954,8 @@ mod tests {
     fn status_detects_corrupted_index() {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
-        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
         init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         fs::write(tmp.path().join("index.redb"), b"not a database").unwrap();
 
         let status = status(tmp.path());
@@ -878,8 +967,8 @@ mod tests {
     fn status_detects_broken_secrets_dir() {
         let gnupg = TestGnupg::new();
         let tmp = tempfile::tempdir().unwrap();
-        Store::open(tmp.path()).unwrap().ensure_default().unwrap();
         init_from_bytes(tmp.path(), &gnupg.export_public_binary()).unwrap();
+        drop(Store::open(tmp.path()).unwrap());
         fs::remove_dir(tmp.path().join("secrets")).unwrap();
         fs::write(tmp.path().join("secrets"), b"not a dir").unwrap();
 

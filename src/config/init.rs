@@ -77,6 +77,11 @@ fn reject_missing_index_for_initialized_store(data_dir: &Path) -> Result<()> {
             "cannot initialize an already initialized store because metadata database `index.redb` is missing; run `noirpass deinit` before initializing again".into(),
         ));
     }
+    if path_entry_exists(&index_path)? && !path_entry_exists(&config_path(data_dir))? {
+        return Err(Error::Config(
+            "cannot initialize an already initialized store because `config.toml` is missing; run `noirpass deinit` before initializing again".into(),
+        ));
+    }
     Ok(())
 }
 
