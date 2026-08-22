@@ -4,11 +4,351 @@ use std::time::Duration;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::super::{
-    SERVICE_PATH, alias_path, object_removed_or_absent, register_alias, register_collection,
-    register_item, unregister_alias,
+    SERVICE_PATH, alias_path, collection_path, item_path, object_removed_or_absent, register_alias,
+    register_collection, register_item, unregister_alias,
 };
 use super::{next_stream_item, p2p_pair, test_state};
 use crate::gpg::test_support::TestGnupg;
+
+async fn get_property(
+    connection: &zbus::Connection,
+    path: &OwnedObjectPath,
+    interface: &str,
+    property: &str,
+) -> OwnedValue {
+    connection
+        .call_method(
+            None::<zbus::names::BusName<'_>>,
+            path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &(interface, property),
+        )
+        .await
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn repeated_collection_registration_is_idempotent() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let collection = state.store().create_collection("repeat", None).unwrap();
+    let collections_before = state.store().list_collections().unwrap();
+    let (server_conn, client_conn) = p2p_pair(state.clone()).await;
+    let server = server_conn.object_server();
+
+    let first_path = register_collection(server, &state, &collection.id)
+        .await
+        .unwrap();
+    let second_path = register_collection(server, &state, &collection.id)
+        .await
+        .unwrap();
+
+    assert_eq!(first_path, collection_path(&collection.id));
+    assert_eq!(second_path, first_path);
+    assert!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&first_path)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        String::try_from(
+            get_property(
+                &client_conn,
+                &first_path,
+                "org.freedesktop.Secret.Collection",
+                "Label",
+            )
+            .await,
+        )
+        .unwrap(),
+        collection.label
+    );
+    assert_eq!(
+        state.store().list_collections().unwrap(),
+        collections_before
+    );
+}
+
+#[tokio::test]
+async fn repeated_item_registration_is_idempotent() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let collection = state
+        .store()
+        .get_collection(crate::store::DEFAULT_COLLECTION_ID)
+        .unwrap();
+    let attributes = HashMap::from([("kind".to_string(), "repeat".to_string())]);
+    let item = state
+        .store()
+        .create_item(
+            &collection.id,
+            "before",
+            attributes,
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    let (server_conn, client_conn) = p2p_pair(state.clone()).await;
+    let server = server_conn.object_server();
+
+    let first_path = register_item(server, &state, &collection.id, &item.id)
+        .await
+        .unwrap();
+    let second_path = register_item(server, &state, &collection.id, &item.id)
+        .await
+        .unwrap();
+
+    assert_eq!(first_path, item_path(&collection.id, &item.id));
+    assert_eq!(second_path, first_path);
+    assert!(
+        server
+            .interface::<_, crate::service::item::Item>(&first_path)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        String::try_from(
+            get_property(
+                &client_conn,
+                &first_path,
+                "org.freedesktop.Secret.Item",
+                "Label",
+            )
+            .await,
+        )
+        .unwrap(),
+        "before"
+    );
+
+    let updated_attributes = HashMap::from([("kind".to_string(), "updated".to_string())]);
+    let updated = state
+        .store()
+        .update_item(
+            &item.id,
+            Some("after"),
+            Some(updated_attributes),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(updated.collection, collection.id);
+    assert_eq!(
+        String::try_from(
+            get_property(
+                &client_conn,
+                &first_path,
+                "org.freedesktop.Secret.Item",
+                "Label",
+            )
+            .await,
+        )
+        .unwrap(),
+        updated.label
+    );
+    assert_eq!(
+        HashMap::<String, String>::try_from(
+            get_property(
+                &client_conn,
+                &first_path,
+                "org.freedesktop.Secret.Item",
+                "Attributes",
+            )
+            .await,
+        )
+        .unwrap(),
+        updated.attributes
+    );
+}
+
+#[tokio::test]
+async fn alias_reregistration_follows_repointed_store_target() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let collection_a = state.store().create_collection("alias-a", None).unwrap();
+    let collection_b = state.store().create_collection("alias-b", None).unwrap();
+    let alias = "repeat_alias";
+    state
+        .store()
+        .set_alias(alias, Some(&collection_a.id))
+        .unwrap();
+    let (server_conn, client_conn) = p2p_pair(state.clone()).await;
+    let server = server_conn.object_server();
+    register_alias(server, &state, alias).await.unwrap();
+    let path = alias_path(alias).unwrap();
+    assert!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&path)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        String::try_from(
+            get_property(
+                &client_conn,
+                &path,
+                "org.freedesktop.Secret.Collection",
+                "Label",
+            )
+            .await,
+        )
+        .unwrap(),
+        collection_a.label
+    );
+
+    state
+        .store()
+        .set_alias(alias, Some(&collection_b.id))
+        .unwrap();
+    let aliases_after_repoint = state.store().list_aliases().unwrap();
+    register_alias(server, &state, alias).await.unwrap();
+
+    assert!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&path)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        String::try_from(
+            get_property(
+                &client_conn,
+                &path,
+                "org.freedesktop.Secret.Collection",
+                "Label",
+            )
+            .await,
+        )
+        .unwrap(),
+        collection_b.label
+    );
+    assert_eq!(
+        state.store().read_alias(alias).unwrap(),
+        Some(collection_b.id.clone())
+    );
+    assert_eq!(state.store().list_aliases().unwrap(), aliases_after_repoint);
+}
+
+#[tokio::test]
+async fn registration_errors_can_leave_persisted_interfaces_served() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let collection = state.store().create_collection("error", None).unwrap();
+    let item = state
+        .store()
+        .create_item(
+            &collection.id,
+            "error-item",
+            HashMap::new(),
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    let alias = "error_alias";
+    state
+        .store()
+        .set_alias(alias, Some(&collection.id))
+        .unwrap();
+
+    let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+    let server = server_conn.object_server().clone();
+    assert!(
+        server
+            .at(SERVICE_PATH, zbus::fdo::ObjectManager)
+            .await
+            .unwrap()
+    );
+    let connection_guard = server_conn.clone();
+    server_conn.close().await.unwrap();
+
+    assert!(
+        register_collection(&server, &state, &collection.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        state.store().get_collection(&collection.id).unwrap(),
+        collection
+    );
+    assert!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&collection_path(
+                &collection.id
+            ))
+            .await
+            .is_ok()
+    );
+
+    assert!(
+        register_item(&server, &state, &collection.id, &item.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(state.store().get_item(&item.id).unwrap(), item);
+    assert!(
+        server
+            .interface::<_, crate::service::item::Item>(&item_path(&collection.id, &item.id))
+            .await
+            .is_ok()
+    );
+
+    assert!(register_alias(&server, &state, alias).await.is_err());
+    assert_eq!(
+        state.store().read_alias(alias).unwrap(),
+        Some(collection.id.clone())
+    );
+    assert!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&alias_path(alias).unwrap())
+            .await
+            .is_ok()
+    );
+    drop(connection_guard);
+}
+
+#[tokio::test]
+async fn alias_removal_error_leaves_store_cleared_and_interface_absent() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let collection = state.store().create_collection("clear", None).unwrap();
+    let alias = "clear_alias";
+    state
+        .store()
+        .set_alias(alias, Some(&collection.id))
+        .unwrap();
+    let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+    let server = server_conn.object_server().clone();
+    register_alias(&server, &state, alias).await.unwrap();
+    let path = alias_path(alias).unwrap();
+    assert!(
+        server
+            .at(SERVICE_PATH, zbus::fdo::ObjectManager)
+            .await
+            .unwrap()
+    );
+    let connection_guard = server_conn.clone();
+    server_conn.close().await.unwrap();
+
+    state.store().set_alias(alias, None).unwrap();
+    assert!(unregister_alias(&server, alias).await.is_err());
+    assert_eq!(state.store().read_alias(alias).unwrap(), None);
+    assert!(matches!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&path)
+            .await,
+        Err(zbus::Error::InterfaceNotFound)
+    ));
+    drop(connection_guard);
+}
 
 #[tokio::test]
 async fn alias_removal_is_idempotent() {
