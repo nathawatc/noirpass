@@ -220,17 +220,25 @@ impl Collection {
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
+        let label = match properties.get("org.freedesktop.Secret.Item.Label") {
+            None => String::new(),
+            Some(value) => String::try_from(value.clone()).map_err(|_| {
+                SecretError::InvalidArgs(
+                    "org.freedesktop.Secret.Item.Label must be a string".into(),
+                )
+            })?,
+        };
+        let attributes = match properties.get("org.freedesktop.Secret.Item.Attributes") {
+            None => HashMap::new(),
+            Some(value) => HashMap::<String, String>::try_from(value.clone()).map_err(|_| {
+                SecretError::InvalidArgs(
+                    "org.freedesktop.Secret.Item.Attributes must be a string dictionary".into(),
+                )
+            })?,
+        };
+
         let id = self.resolve_id()?;
         let owner = message_sender(&header)?;
-
-        let label = properties
-            .get("org.freedesktop.Secret.Item.Label")
-            .and_then(|v| String::try_from(v.clone()).ok())
-            .unwrap_or_default();
-        let attributes = properties
-            .get("org.freedesktop.Secret.Item.Attributes")
-            .and_then(|v| HashMap::<String, String>::try_from(v.clone()).ok())
-            .unwrap_or_default();
 
         let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
 

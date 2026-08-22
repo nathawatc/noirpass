@@ -192,21 +192,24 @@ impl Service {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
 
-        let label_property = properties.get("org.freedesktop.Secret.Collection.Label");
-        let label_supplied = label_property.is_some();
-        let label = label_property
-            .and_then(|v| String::try_from(v.clone()).ok())
-            .unwrap_or_default();
+        let label = match properties.get("org.freedesktop.Secret.Collection.Label") {
+            None => None,
+            Some(value) => Some(String::try_from(value.clone()).map_err(|_| {
+                fdo::Error::InvalidArgs(
+                    "org.freedesktop.Secret.Collection.Label must be a string".into(),
+                )
+            })?),
+        };
 
         if !alias.is_empty()
             && let Some(existing) = self.state.store().read_alias(alias).map_err(fdo_err)?
             && self.state.store().get_collection(&existing).is_ok()
         {
             let path = collection_path(&existing);
-            if label_supplied {
+            if let Some(label) = label.as_deref() {
                 self.state
                     .store()
-                    .set_collection_label(&existing, &label)
+                    .set_collection_label(&existing, label)
                     .map_err(fdo_err)?;
                 collection::emit_collection_label_modified(
                     &self.state,
@@ -224,7 +227,7 @@ impl Service {
         let meta = self
             .state
             .store()
-            .create_collection(&label, alias_opt)
+            .create_collection(label.as_deref().unwrap_or(""), alias_opt)
             .map_err(fdo_err)?;
 
         let path = register_collection(server, &self.state, &meta.id).await?;
