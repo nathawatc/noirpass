@@ -2,5 +2,5 @@
 mod common;
 #[path = "cli/deinit.rs"]
 mod deinit;
-#[path = "cli/maintenance.rs"]
+#[path = "cli/maintenance/mod.rs"]
 mod maintenance;
