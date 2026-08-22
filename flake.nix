@@ -42,7 +42,7 @@
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
 
             postPatch = ''
-              substituteInPlace tests/service/integration.rs \
+              substituteInPlace tests/common/mod.rs \
                 --replace-fail \
                   '.args(["--session", "--nofork", "--print-address"])' \
                   '.args(["--config-file", "${pkgs.dbus}/share/dbus-1/session.conf", "--nofork", "--print-address"])'
