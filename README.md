@@ -81,18 +81,13 @@ Rebuild and replace executable manually after each update.
 <details>
 <summary><h3>Arch Linux</h3></summary>
 
-Install Arch build tools, clone repository, then build included [`archlinux/PKGBUILD`](archlinux/PKGBUILD):
+### Install from AUR
+
+Example:
 
 ```sh
-sudo pacman -S --needed base-devel git
-git clone https://codeberg.org/koharu/noirpass.git
-cd noirpass/archlinux
-makepkg -si
-systemctl --user daemon-reload
+paru -S noirpass
 ```
-
-PKGBUILD installs executable to `/usr/bin`, D-Bus activation file to `/usr/share/dbus-1/services`,
-and systemd user unit to `/usr/lib/systemd/user`.
 
 </details>
 
