@@ -1,7 +1,9 @@
 //! `org.freedesktop.Secret.Collection` objects.
 //!
-//! One object per stored collection, served at
-//! `/org/freedesktop/secrets/collection/<id>`. The same interface is *also*
+//! One object per collection, served at
+//! `/org/freedesktop/secrets/collection/<id>`. Persistent collections resolve
+//! through the store; the built-in `session` collection is process-memory-only.
+//! The same interface is *also*
 //! served at the spec's alias paths (`/org/freedesktop/secrets/aliases/<name>`,
 //! e.g. `aliases/default`, which libsecret uses directly): an alias-backed
 //! instance resolves the target collection through the store on every call, so
@@ -20,8 +22,9 @@ use zbus::{fdo, interface};
 use crate::service::item::Item;
 use crate::service::session::Secret;
 use crate::service::{
-    SERVICE_PATH, SecretError, Service, ServiceState, alias_path, collection_path, item_path,
-    message_sender, object_removed_or_absent, register_item,
+    SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError, Service,
+    ServiceState, alias_path, collection_path, item_path, message_sender, object_removed_or_absent,
+    register_item,
 };
 
 /// The "no prompt" object path.
@@ -37,8 +40,15 @@ fn collection_object_paths_for_id(
     id: &str,
 ) -> fdo::Result<Vec<OwnedObjectPath>> {
     let mut paths = vec![collection_path(id)];
+    if id == SESSION_COLLECTION_ID {
+        if let Ok(path) = alias_path(SESSION_COLLECTION_ALIAS) {
+            paths.push(path);
+        }
+        return Ok(paths);
+    }
     for (name, target) in state.store().list_aliases().map_err(fdo::Error::from)? {
-        if target == id
+        if name != SESSION_COLLECTION_ALIAS
+            && target == id
             && let Ok(path) = alias_path(&name)
         {
             paths.push(path);
@@ -77,6 +87,31 @@ pub(crate) async fn emit_collection_items_changed(
         let emitter = SignalEmitter::new(connection, path)?;
         collection.items_changed(&emitter).await?;
     }
+    Ok(())
+}
+
+/// Notify clients when an item mutation modifies the temporary collection.
+pub(crate) async fn emit_session_collection_modified(
+    state: &ServiceState,
+    connection: &zbus::Connection,
+    id: &str,
+) -> fdo::Result<()> {
+    if id != SESSION_COLLECTION_ID {
+        return Ok(());
+    }
+    let modified = state.session_collection_meta().modified;
+    for path in collection_object_paths_for_id(state, id)? {
+        let emitter = SignalEmitter::new(connection, path)?;
+        fdo::Properties::properties_changed(
+            &emitter,
+            InterfaceName::from_static_str_unchecked(COLLECTION_INTERFACE),
+            HashMap::from([("Modified", Value::from(modified))]),
+            Cow::Borrowed(&[]),
+        )
+        .await?;
+    }
+    let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;
+    Service::collection_changed(&emitter, collection_path(id)).await?;
     Ok(())
 }
 
@@ -140,6 +175,9 @@ impl Collection {
     fn resolve_id(&self) -> fdo::Result<String> {
         match &self.target {
             Target::Collection(id) => Ok(id.clone()),
+            Target::Alias(name) if name == SESSION_COLLECTION_ALIAS => {
+                Ok(SESSION_COLLECTION_ID.to_string())
+            }
             Target::Alias(name) => self
                 .state
                 .store()
@@ -188,22 +226,28 @@ impl Collection {
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
         let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
-        let results = self
-            .state
-            .store()
-            .search_items(&attributes)
-            .map_err(fdo::Error::from)?
+        let items = if id == SESSION_COLLECTION_ID {
+            self.state.search_session_items(&attributes)
+        } else {
+            self.state
+                .store()
+                .search_items(&attributes)
+                .map_err(fdo::Error::from)?
+                .into_iter()
+                .filter(|meta| meta.collection == id)
+                .collect()
+        };
+        Ok(items
             .into_iter()
-            .filter(|meta| meta.collection == id)
             .map(|meta| item_path(&meta.collection, &meta.id))
-            .collect();
-        Ok(results)
+            .collect())
     }
 
     /// Create (or replace) an item in this collection.
     ///
-    /// The incoming [`Secret`] is decrypted with its session cipher and
-    /// re-encrypted to the user's `OpenPGP` key before it touches disk. With
+    /// The incoming [`Secret`] is decrypted with its transport session cipher.
+    /// Persistent collections re-encrypt it to the user's `OpenPGP` key before
+    /// disk; the built-in `session` collection keeps only zeroizing memory. With
     /// `replace = true`, an item whose attributes match exactly is updated in
     /// place (`ItemChanged`); otherwise a new item is created (`ItemCreated`).
     /// Signals are emitted from the canonical collection path, also when this
@@ -240,21 +284,31 @@ impl Collection {
         let id = self.resolve_id()?;
         let owner = message_sender(&header)?;
 
-        let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
-
         // Emit from the canonical collection path regardless of how we were
         // addressed (id or alias).
         let emitter =
             SignalEmitter::new(connection, collection_path(&id)).map_err(SecretError::ZBus)?;
 
-        let (meta, replaced) = self.state.store().create_or_replace_item(
-            &id,
-            &label,
-            attributes,
-            &secret.content_type,
-            &ciphertext,
-            replace,
-        )?;
+        let (meta, replaced) = if id == SESSION_COLLECTION_ID {
+            let plaintext = self.state.secret_to_plaintext(&secret, &owner)?;
+            self.state.create_or_replace_session_item(
+                &label,
+                attributes,
+                &secret.content_type,
+                plaintext,
+                replace,
+            )?
+        } else {
+            let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
+            self.state.store().create_or_replace_item(
+                &id,
+                &label,
+                attributes,
+                &secret.content_type,
+                &ciphertext,
+                replace,
+            )?
+        };
         let path = register_item(server, &self.state, &id, &meta.id)
             .await
             .map_err(SecretError::ZBus)?;
@@ -265,11 +319,13 @@ impl Collection {
             item.emit_label_changed(&item_emitter).await?;
             item.modified_changed(&item_emitter).await?;
             Self::item_changed(&emitter, path.clone()).await?;
+            emit_session_collection_modified(&self.state, connection, &id).await?;
             return Ok((path, no_prompt()));
         }
         Self::item_created(&emitter, path.clone()).await?;
         // Refresh client-side caches of the `Items` property on every path.
         emit_collection_items_changed(&self.state, server, connection, &id).await?;
+        emit_session_collection_modified(&self.state, connection, &id).await?;
         Ok((path, no_prompt()))
     }
 
@@ -287,6 +343,12 @@ impl Collection {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
+        if id == SESSION_COLLECTION_ID {
+            return Err(fdo::Error::NotSupported(
+                "the built-in session collection cannot be deleted".into(),
+            )
+            .into());
+        }
         let real_path = collection_path(&id);
 
         let deleted = self.state.store().delete_collection(&id)?;
@@ -310,6 +372,9 @@ impl Collection {
             cleanup_error = Some(err);
         }
         for name in deleted.aliases {
+            if name == SESSION_COLLECTION_ALIAS {
+                continue;
+            }
             if let Ok(path) = alias_path(&name)
                 && let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&path).await)
                 && cleanup_error.is_none()
@@ -346,11 +411,14 @@ impl Collection {
     fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
         let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
-        let items = self
-            .state
-            .store()
-            .list_items(&id)
-            .map_err(fdo::Error::from)?;
+        let items = if id == SESSION_COLLECTION_ID {
+            self.state.list_session_items()
+        } else {
+            self.state
+                .store()
+                .list_items(&id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(items
             .into_iter()
             .map(|meta| item_path(&meta.collection, &meta.id))
@@ -362,11 +430,14 @@ impl Collection {
     fn label(&self) -> fdo::Result<String> {
         let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
-        let meta = self
-            .state
-            .store()
-            .get_collection(&id)
-            .map_err(fdo::Error::from)?;
+        let meta = if id == SESSION_COLLECTION_ID {
+            self.state.session_collection_meta()
+        } else {
+            self.state
+                .store()
+                .get_collection(&id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(meta.label)
     }
 
@@ -382,10 +453,14 @@ impl Collection {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
-        self.state
-            .store()
-            .set_collection_label(&id, label)
-            .map_err(fdo::Error::from)?;
+        if id == SESSION_COLLECTION_ID {
+            self.state.set_session_collection_label(label);
+        } else {
+            self.state
+                .store()
+                .set_collection_label(&id, label)
+                .map_err(fdo::Error::from)?;
+        }
         emit_collection_label_modified(&self.state, server, connection, &id).await?;
         let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;
         Service::collection_changed(&emitter, collection_path(&id)).await?;
@@ -404,11 +479,14 @@ impl Collection {
     fn created(&self) -> fdo::Result<u64> {
         let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
-        let meta = self
-            .state
-            .store()
-            .get_collection(&id)
-            .map_err(fdo::Error::from)?;
+        let meta = if id == SESSION_COLLECTION_ID {
+            self.state.session_collection_meta()
+        } else {
+            self.state
+                .store()
+                .get_collection(&id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(meta.created)
     }
 
@@ -417,11 +495,14 @@ impl Collection {
     fn modified(&self) -> fdo::Result<u64> {
         let _activity = self.state.activity()?;
         let id = self.resolve_id()?;
-        let meta = self
-            .state
-            .store()
-            .get_collection(&id)
-            .map_err(fdo::Error::from)?;
+        let meta = if id == SESSION_COLLECTION_ID {
+            self.state.session_collection_meta()
+        } else {
+            self.state
+                .store()
+                .get_collection(&id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(meta.modified)
     }
 

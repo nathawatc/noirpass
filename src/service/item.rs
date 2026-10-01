@@ -1,9 +1,9 @@
 //! `org.freedesktop.Secret.Item` objects.
 //!
-//! One object per stored secret, served at
-//! `/org/freedesktop/secrets/collection/<col>/<item>`. Secret values only
-//! exist in plaintext transiently, between the session cipher and the
-//! `OpenPGP` layer.
+//! One object per secret, served at
+//! `/org/freedesktop/secrets/collection/<col>/<item>`. Persistent values only
+//! exist in plaintext transiently around the `OpenPGP` layer; values in the
+//! built-in `session` collection remain only in zeroizing process memory.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -14,10 +14,13 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, Value};
 use zbus::{fdo, interface};
 
-use crate::service::collection::{Collection, emit_collection_items_changed};
+use crate::service::collection::{
+    Collection, emit_collection_items_changed, emit_session_collection_modified,
+};
 use crate::service::session::Secret;
 use crate::service::{
-    SecretError, ServiceState, collection_path, item_path, message_sender, object_removed_or_absent,
+    SESSION_COLLECTION_ID, SecretError, ServiceState, collection_path, item_path, message_sender,
+    object_removed_or_absent,
 };
 
 /// The "no prompt" object path.
@@ -94,11 +97,16 @@ impl Item {
     ) -> Result<(Secret,), SecretError> {
         let _activity = self.state.activity()?;
         let owner = message_sender(&header)?;
-        let (meta, ciphertext) = self.state.store().read_item_secret(&self.id)?;
-        let secret = self
-            .state
-            .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
-            .await?;
+        let secret = if self.collection_id == SESSION_COLLECTION_ID {
+            let (meta, plaintext) = self.state.read_session_item_secret(&self.id)?;
+            self.state
+                .plaintext_to_secret(&session, &plaintext, &meta.content_type, &owner)?
+        } else {
+            let (meta, ciphertext) = self.state.store().read_item_secret(&self.id)?;
+            self.state
+                .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
+                .await?
+        };
         Ok((secret,))
     }
 
@@ -116,14 +124,25 @@ impl Item {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
         let owner = message_sender(&header)?;
-        let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
-        self.state.store().update_item(
-            &self.id,
-            None,
-            None,
-            Some(&secret.content_type),
-            Some(&ciphertext),
-        )?;
+        if self.collection_id == SESSION_COLLECTION_ID {
+            let plaintext = self.state.secret_to_plaintext(&secret, &owner)?;
+            self.state.update_session_item(
+                &self.id,
+                None,
+                None,
+                Some(&secret.content_type),
+                Some(plaintext),
+            )?;
+        } else {
+            let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
+            self.state.store().update_item(
+                &self.id,
+                None,
+                None,
+                Some(&secret.content_type),
+                Some(&ciphertext),
+            )?;
+        }
 
         let item_path = self.path();
         let item_emitter =
@@ -137,10 +156,11 @@ impl Item {
         Collection::item_changed(&collection_emitter, item_path)
             .await
             .map_err(SecretError::ZBus)?;
+        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
         Ok(())
     }
 
-    /// Delete this item and its secret file.
+    /// Delete this item and its secret value (and persistent file, when present).
     #[zbus(out_args("prompt"))]
     async fn delete(
         &self,
@@ -149,7 +169,11 @@ impl Item {
     ) -> Result<OwnedObjectPath, SecretError> {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
-        self.state.store().delete_item(&self.id)?;
+        if self.collection_id == SESSION_COLLECTION_ID {
+            self.state.delete_session_item(&self.id)?;
+        } else {
+            self.state.store().delete_item(&self.id)?;
+        }
 
         object_removed_or_absent(server.remove::<Self, _>(&self.path()).await)
             .map_err(SecretError::ZBus)?;
@@ -164,6 +188,7 @@ impl Item {
         emit_collection_items_changed(&self.state, server, connection, &self.collection_id)
             .await
             .map_err(SecretError::from)?;
+        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
 
         Ok(no_prompt())
     }
@@ -179,11 +204,16 @@ impl Item {
     #[zbus(property(emits_changed_signal = "false"))]
     fn attributes(&self) -> fdo::Result<HashMap<String, String>> {
         let _activity = self.state.activity()?;
-        let meta = self
-            .state
-            .store()
-            .get_item(&self.id)
-            .map_err(fdo::Error::from)?;
+        let meta = if self.collection_id == SESSION_COLLECTION_ID {
+            self.state
+                .get_session_item(&self.id)
+                .map_err(fdo::Error::from)?
+        } else {
+            self.state
+                .store()
+                .get_item(&self.id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(meta.attributes)
     }
 
@@ -196,10 +226,16 @@ impl Item {
     ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
-        self.state
-            .store()
-            .update_item(&self.id, None, Some(attributes), None, None)
-            .map_err(fdo::Error::from)?;
+        if self.collection_id == SESSION_COLLECTION_ID {
+            self.state
+                .update_session_item(&self.id, None, Some(attributes), None, None)
+                .map_err(fdo::Error::from)?;
+        } else {
+            self.state
+                .store()
+                .update_item(&self.id, None, Some(attributes), None, None)
+                .map_err(fdo::Error::from)?;
+        }
 
         let item_path = self.path();
         let item_emitter = SignalEmitter::new(connection, item_path.clone())?;
@@ -208,6 +244,7 @@ impl Item {
         self.emit_attributes_changed(&item_emitter).await?;
         self.modified_changed(&item_emitter).await?;
         Collection::item_changed(&collection_emitter, item_path).await?;
+        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
         Ok(())
     }
 
@@ -215,11 +252,16 @@ impl Item {
     #[zbus(property(emits_changed_signal = "false"))]
     fn label(&self) -> fdo::Result<String> {
         let _activity = self.state.activity()?;
-        let meta = self
-            .state
-            .store()
-            .get_item(&self.id)
-            .map_err(fdo::Error::from)?;
+        let meta = if self.collection_id == SESSION_COLLECTION_ID {
+            self.state
+                .get_session_item(&self.id)
+                .map_err(fdo::Error::from)?
+        } else {
+            self.state
+                .store()
+                .get_item(&self.id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(meta.label)
     }
 
@@ -232,10 +274,16 @@ impl Item {
     ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
-        self.state
-            .store()
-            .update_item(&self.id, Some(label), None, None, None)
-            .map_err(fdo::Error::from)?;
+        if self.collection_id == SESSION_COLLECTION_ID {
+            self.state
+                .update_session_item(&self.id, Some(label), None, None, None)
+                .map_err(fdo::Error::from)?;
+        } else {
+            self.state
+                .store()
+                .update_item(&self.id, Some(label), None, None, None)
+                .map_err(fdo::Error::from)?;
+        }
 
         let item_path = self.path();
         let item_emitter = SignalEmitter::new(connection, item_path.clone())?;
@@ -244,6 +292,7 @@ impl Item {
         self.emit_label_changed(&item_emitter).await?;
         self.modified_changed(&item_emitter).await?;
         Collection::item_changed(&collection_emitter, item_path).await?;
+        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
         Ok(())
     }
 
@@ -251,11 +300,16 @@ impl Item {
     #[zbus(property)]
     fn created(&self) -> fdo::Result<u64> {
         let _activity = self.state.activity()?;
-        let meta = self
-            .state
-            .store()
-            .get_item(&self.id)
-            .map_err(fdo::Error::from)?;
+        let meta = if self.collection_id == SESSION_COLLECTION_ID {
+            self.state
+                .get_session_item(&self.id)
+                .map_err(fdo::Error::from)?
+        } else {
+            self.state
+                .store()
+                .get_item(&self.id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(meta.created)
     }
 
@@ -263,11 +317,16 @@ impl Item {
     #[zbus(property)]
     fn modified(&self) -> fdo::Result<u64> {
         let _activity = self.state.activity()?;
-        let meta = self
-            .state
-            .store()
-            .get_item(&self.id)
-            .map_err(fdo::Error::from)?;
+        let meta = if self.collection_id == SESSION_COLLECTION_ID {
+            self.state
+                .get_session_item(&self.id)
+                .map_err(fdo::Error::from)?
+        } else {
+            self.state
+                .store()
+                .get_item(&self.id)
+                .map_err(fdo::Error::from)?
+        };
         Ok(meta.modified)
     }
 }

@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::gpg::test_support::TestGnupg;
+use zeroize::Zeroizing;
 
+use super::super::SecretError;
 use super::super::state::SESSION_ALLOCATION_ATTEMPTS;
 use super::super::{DhHandshake, SessionCipher, session_path};
 use super::test_state;
@@ -120,6 +123,94 @@ fn zero_idle_exit_waits_for_first_completed_handler() {
     assert!(!state.try_begin_idle_shutdown(0));
     drop(activity);
     assert!(state.try_begin_idle_shutdown(0));
+}
+
+#[test]
+fn temporary_session_items_stay_out_of_persistent_store() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let attributes = HashMap::from([("type".to_string(), "luks".to_string())]);
+
+    let (created, replaced) = state
+        .create_or_replace_session_item(
+            "temporary",
+            attributes.clone(),
+            "text/plain",
+            Zeroizing::new(b"secret one".to_vec()),
+            false,
+        )
+        .unwrap();
+    assert!(!replaced);
+    assert_eq!(state.session_secret_count(), 1);
+    assert!(state.store().get_item(&created.id).is_err());
+
+    let (metadata, secret) = state.read_session_item_secret(&created.id).unwrap();
+    assert_eq!(metadata.attributes, attributes);
+    assert_eq!(secret.as_slice(), b"secret one");
+
+    let (replacement, replaced) = state
+        .create_or_replace_session_item(
+            "replacement",
+            attributes,
+            "application/octet-stream",
+            Zeroizing::new(b"secret two".to_vec()),
+            true,
+        )
+        .unwrap();
+    assert!(replaced);
+    assert_eq!(replacement.id, created.id);
+    assert_eq!(state.session_secret_count(), 1);
+    let (metadata, secret) = state.read_session_item_secret(&created.id).unwrap();
+    assert_eq!(metadata.label, "replacement");
+    assert_eq!(metadata.content_type, "application/octet-stream");
+    assert_eq!(secret.as_slice(), b"secret two");
+
+    state.delete_session_item(&created.id).unwrap();
+    assert_eq!(state.session_secret_count(), 0);
+    assert!(state.read_session_item_secret(&created.id).is_err());
+}
+
+#[test]
+fn temporary_session_item_blocks_idle_shutdown_until_deleted() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    drop(state.activity().unwrap());
+
+    let (item, _) = state
+        .create_or_replace_session_item(
+            "temporary",
+            HashMap::new(),
+            "text/plain",
+            Zeroizing::new(b"secret".to_vec()),
+            false,
+        )
+        .unwrap();
+    assert!(!state.try_begin_idle_shutdown(0));
+
+    state.delete_session_item(&item.id).unwrap();
+    assert!(state.try_begin_idle_shutdown(0));
+}
+
+#[tokio::test]
+async fn persistent_decryption_rejects_foreign_and_closed_sessions_before_gpg() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let session = state
+        .register_session(SessionCipher::Plain, ":1.7".into())
+        .unwrap();
+    // Invalid OpenPGP bytes would return a GPG error if decryption were attempted.
+    let foreign = state
+        .ciphertext_to_secret(&session, b"invalid ciphertext", "", ":1.8")
+        .await;
+    assert!(matches!(foreign, Err(SecretError::NoSession(_))));
+    assert!(state.remove_session(&session, ":1.7"));
+    let closed = state
+        .ciphertext_to_secret(&session, b"invalid ciphertext", "", ":1.7")
+        .await;
+    assert!(matches!(closed, Err(SecretError::NoSession(_))));
 }
 
 #[test]

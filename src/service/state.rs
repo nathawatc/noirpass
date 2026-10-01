@@ -2,21 +2,35 @@
 
 use std::collections::{HashMap, hash_map::Entry};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify};
 use zbus::fdo;
 use zbus::zvariant::OwnedObjectPath;
+use zeroize::Zeroizing;
 
-use super::{SecretError, session_path};
+use super::{SESSION_COLLECTION_ID, SecretError, session_path};
 use crate::crypto::SessionCipher;
 use crate::gpg::Gpg;
 use crate::service::session::Secret;
-use crate::store::Store;
+use crate::store::{CollectionMeta, ItemMeta, Store};
 
 /// Bound retries so a broken entropy source fails instead of looping forever.
 /// Exhausting this with random 128-bit IDs requires 128 consecutive collisions.
 pub(super) const SESSION_ALLOCATION_ATTEMPTS: usize = 128;
+
+/// Bound retries for temporary item identifiers for the same reason as session paths.
+const SESSION_ITEM_ALLOCATION_ATTEMPTS: usize = 128;
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn session_item_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
 
 // --- shared state -----------------------------------------------------------
 
@@ -32,6 +46,31 @@ struct ActivityState {
     had_activity: bool,
     last_activity: Instant,
     shutting_down: bool,
+}
+
+struct SessionItem {
+    metadata: ItemMeta,
+    secret: Zeroizing<Vec<u8>>,
+}
+
+struct SessionCollectionState {
+    metadata: CollectionMeta,
+    items: HashMap<String, SessionItem>,
+}
+
+impl SessionCollectionState {
+    fn new() -> Self {
+        let now = now_secs();
+        Self {
+            metadata: CollectionMeta {
+                id: SESSION_COLLECTION_ID.to_string(),
+                label: "Session".to_string(),
+                created: now,
+                modified: now,
+            },
+            items: HashMap::new(),
+        }
+    }
 }
 
 /// Marks one in-flight D-Bus method as activity until handler return.
@@ -58,6 +97,7 @@ pub struct ServiceState {
     store: Store,
     gpg: Gpg,
     sessions: Mutex<HashMap<OwnedObjectPath, SessionEntry>>,
+    session_collection: Mutex<SessionCollectionState>,
     activity: Mutex<ActivityState>,
     activity_complete: Notify,
     object_lifecycle: AsyncMutex<()>,
@@ -71,6 +111,7 @@ impl ServiceState {
             store,
             gpg,
             sessions: Mutex::new(HashMap::new()),
+            session_collection: Mutex::new(SessionCollectionState::new()),
             activity: Mutex::new(ActivityState {
                 active_calls: 0,
                 had_activity: false,
@@ -151,6 +192,12 @@ impl ServiceState {
             .lock()
             .expect("session lock poisoned")
             .is_empty()
+            || !self
+                .session_collection
+                .lock()
+                .expect("session collection lock poisoned")
+                .items
+                .is_empty()
         {
             return false;
         }
@@ -167,6 +214,217 @@ impl ServiceState {
             activity.shutting_down = true;
         }
         eligible
+    }
+
+    /// Metadata for the built-in in-memory session collection.
+    pub(crate) fn session_collection_meta(&self) -> CollectionMeta {
+        self.session_collection
+            .lock()
+            .expect("session collection lock poisoned")
+            .metadata
+            .clone()
+    }
+
+    /// Update the session collection label without persisting it.
+    pub(crate) fn set_session_collection_label(&self, label: &str) {
+        let mut collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+        collection.metadata.label = label.to_string();
+        collection.metadata.modified = now_secs();
+    }
+
+    /// List temporary items in stable id order.
+    pub(crate) fn list_session_items(&self) -> Vec<ItemMeta> {
+        let collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+        let mut items: Vec<_> = collection
+            .items
+            .values()
+            .map(|item| item.metadata.clone())
+            .collect();
+        items.sort_by(|left, right| left.id.cmp(&right.id));
+        items
+    }
+
+    /// Search temporary items by Secret Service superset attribute semantics.
+    pub(crate) fn search_session_items(&self, attrs: &HashMap<String, String>) -> Vec<ItemMeta> {
+        let collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+        let mut items: Vec<_> = collection
+            .items
+            .values()
+            .filter(|item| {
+                attrs.iter().all(|(name, expected)| {
+                    item.metadata
+                        .attributes
+                        .get(name)
+                        .is_some_and(|actual| actual == expected)
+                })
+            })
+            .map(|item| item.metadata.clone())
+            .collect();
+        items.sort_by(|left, right| left.id.cmp(&right.id));
+        items
+    }
+
+    /// Fetch temporary item metadata.
+    pub(crate) fn get_session_item(&self, id: &str) -> crate::Result<ItemMeta> {
+        self.session_collection
+            .lock()
+            .expect("session collection lock poisoned")
+            .items
+            .get(id)
+            .map(|item| item.metadata.clone())
+            .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))
+    }
+
+    /// Fetch temporary item metadata and a zeroizing copy of its secret.
+    pub(crate) fn read_session_item_secret(
+        &self,
+        id: &str,
+    ) -> crate::Result<(ItemMeta, Zeroizing<Vec<u8>>)> {
+        self.session_collection
+            .lock()
+            .expect("session collection lock poisoned")
+            .items
+            .get(id)
+            .map(|item| (item.metadata.clone(), item.secret.clone()))
+            .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))
+    }
+
+    /// Create or replace an exact attribute match in the temporary collection.
+    pub(crate) fn create_or_replace_session_item(
+        &self,
+        label: &str,
+        attributes: HashMap<String, String>,
+        content_type: &str,
+        secret: Zeroizing<Vec<u8>>,
+        replace: bool,
+    ) -> crate::Result<(ItemMeta, bool)> {
+        let mut collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+
+        let existing_id = if replace {
+            collection
+                .items
+                .values()
+                .find(|item| item.metadata.attributes == attributes)
+                .map(|item| item.metadata.id.clone())
+        } else {
+            None
+        };
+
+        let now = now_secs();
+        if let Some(id) = existing_id {
+            let metadata = {
+                let item = collection.items.get_mut(&id).expect("matched item exists");
+                item.metadata.label = label.to_string();
+                item.metadata.content_type = content_type.to_string();
+                item.metadata.modified = now;
+                item.secret = secret;
+                item.metadata.clone()
+            };
+            collection.metadata.modified = now;
+            return Ok((metadata, true));
+        }
+
+        let id = (0..SESSION_ITEM_ALLOCATION_ATTEMPTS)
+            .map(|_| session_item_id())
+            .find(|candidate| !collection.items.contains_key(candidate))
+            .ok_or_else(|| {
+                crate::Error::Config(format!(
+                    "could not allocate temporary item id after {SESSION_ITEM_ALLOCATION_ATTEMPTS} attempts"
+                ))
+            })?;
+        let metadata = ItemMeta {
+            id: id.clone(),
+            collection: SESSION_COLLECTION_ID.to_string(),
+            label: label.to_string(),
+            attributes,
+            content_type: content_type.to_string(),
+            ciphertext_sha256: None,
+            created: now,
+            modified: now,
+        };
+        collection.items.insert(
+            id,
+            SessionItem {
+                metadata: metadata.clone(),
+                secret,
+            },
+        );
+        collection.metadata.modified = now;
+        Ok((metadata, false))
+    }
+
+    /// Update fields of a temporary item, zeroizing any replaced secret.
+    pub(crate) fn update_session_item(
+        &self,
+        id: &str,
+        label: Option<&str>,
+        attributes: Option<HashMap<String, String>>,
+        content_type: Option<&str>,
+        secret: Option<Zeroizing<Vec<u8>>>,
+    ) -> crate::Result<ItemMeta> {
+        let mut collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+        let now = now_secs();
+        let metadata = {
+            let item = collection
+                .items
+                .get_mut(id)
+                .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))?;
+            if let Some(label) = label {
+                item.metadata.label = label.to_string();
+            }
+            if let Some(attributes) = attributes {
+                item.metadata.attributes = attributes;
+            }
+            if let Some(content_type) = content_type {
+                item.metadata.content_type = content_type.to_string();
+            }
+            if let Some(secret) = secret {
+                item.secret = secret;
+            }
+            item.metadata.modified = now;
+            item.metadata.clone()
+        };
+        collection.metadata.modified = now;
+        Ok(metadata)
+    }
+
+    /// Delete a temporary item; dropping it zeroizes the secret bytes.
+    pub(crate) fn delete_session_item(&self, id: &str) -> crate::Result<()> {
+        let mut collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+        if collection.items.remove(id).is_none() {
+            return Err(crate::Error::NotFound(format!("item {id}")));
+        }
+        collection.metadata.modified = now_secs();
+        Ok(())
+    }
+
+    /// Number of temporary secrets currently pinning the daemon to this login session.
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn session_secret_count(&self) -> usize {
+        self.session_collection
+            .lock()
+            .expect("session collection lock poisoned")
+            .items
+            .len()
     }
 
     /// Number of currently open sessions.
@@ -252,13 +510,12 @@ impl ServiceState {
             .map(|entry| entry.cipher.clone())
     }
 
-    /// Decrypt an incoming [`Secret`] with its session cipher, `gpg`-encrypt
-    /// the plaintext for storage and return the at-rest ciphertext.
-    pub fn secret_to_ciphertext(
+    /// Decrypt an incoming [`Secret`] with the transport session cipher.
+    pub fn secret_to_plaintext(
         &self,
         secret: &Secret,
         owner: &str,
-    ) -> Result<Vec<u8>, SecretError> {
+    ) -> Result<Zeroizing<Vec<u8>>, SecretError> {
         let cipher = self
             .session_cipher(&secret.session, owner)
             .ok_or_else(|| SecretError::NoSession(format!("no session {}", secret.session)))?;
@@ -267,8 +524,37 @@ impl ServiceState {
                 fdo::Error::InvalidArgs("plain Secret parameters must be empty".into()).into(),
             );
         }
-        let plaintext = cipher.decrypt(&secret.parameters, &secret.value)?;
+        Ok(cipher.decrypt(&secret.parameters, &secret.value)?)
+    }
+
+    /// Decrypt an incoming [`Secret`], then `gpg`-encrypt it for persistent storage.
+    pub fn secret_to_ciphertext(
+        &self,
+        secret: &Secret,
+        owner: &str,
+    ) -> Result<Vec<u8>, SecretError> {
+        let plaintext = self.secret_to_plaintext(secret, owner)?;
         Ok(self.gpg.encrypt(&plaintext)?)
+    }
+
+    /// Encode plaintext for transport under an owned Secret Service session.
+    pub fn plaintext_to_secret(
+        &self,
+        session: &OwnedObjectPath,
+        plaintext: &[u8],
+        content_type: &str,
+        owner: &str,
+    ) -> Result<Secret, SecretError> {
+        let cipher = self
+            .session_cipher(session, owner)
+            .ok_or_else(|| SecretError::NoSession(format!("no session {session}")))?;
+        let (parameters, value) = cipher.encrypt(plaintext);
+        Ok(Secret {
+            session: session.clone(),
+            parameters,
+            value,
+            content_type: content_type.to_string(),
+        })
     }
 
     /// Decrypt an item's at-rest ciphertext via `gpg-agent` and re-encrypt it
@@ -280,16 +566,11 @@ impl ServiceState {
         content_type: &str,
         owner: &str,
     ) -> Result<Secret, SecretError> {
-        let cipher = self
-            .session_cipher(session, owner)
-            .ok_or_else(|| SecretError::NoSession(format!("no session {session}")))?;
+        // Reject foreign/closed sessions before invoking the private-key agent.
+        if self.session_cipher(session, owner).is_none() {
+            return Err(SecretError::NoSession(format!("no session {session}")));
+        }
         let plaintext = self.gpg.decrypt(ciphertext).await?;
-        let (parameters, value) = cipher.encrypt(&plaintext);
-        Ok(Secret {
-            session: session.clone(),
-            parameters,
-            value,
-            content_type: content_type.to_string(),
-        })
+        self.plaintext_to_secret(session, &plaintext, content_type, owner)
     }
 }

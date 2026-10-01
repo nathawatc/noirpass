@@ -19,6 +19,10 @@ pub const ALGORITHM_DH: &str = "dh-ietf1024-sha256-aes128-cbc-pkcs7";
 /// The plain (no transport encryption) session algorithm identifier.
 pub const ALGORITHM_PLAIN: &str = "plain";
 
+/// Built-in temporary collection id and well-known alias used by libsecret.
+pub const SESSION_COLLECTION_ID: &str = "session";
+pub const SESSION_COLLECTION_ALIAS: &str = "session";
+
 // --- path helpers ---------------------------------------------------------
 
 /// The "no object" path used for prompt-less returns and unset aliases.
@@ -26,8 +30,8 @@ pub(super) fn root_path() -> OwnedObjectPath {
     OwnedObjectPath::try_from("/").expect("/ is a valid object path")
 }
 
-/// D-Bus path of a collection. Collection ids are hex strings (or `default`),
-/// which are always valid path elements.
+/// D-Bus path of a collection. Collection ids are hex strings, `default`, or
+/// the built-in `session` id; all are valid path elements.
 #[must_use]
 pub fn collection_path(collection_id: &str) -> OwnedObjectPath {
     OwnedObjectPath::try_from(format!("{SERVICE_PATH}/collection/{collection_id}"))
@@ -191,6 +195,9 @@ pub(crate) fn object_removed_or_absent(result: zbus::Result<bool>) -> zbus::Resu
 /// Remove the alias object at `/org/freedesktop/secrets/aliases/<name>`,
 /// if it exists.
 pub async fn unregister_alias(server: &ObjectServer, name: &str) -> zbus::Result<()> {
+    if name == SESSION_COLLECTION_ALIAS {
+        return Ok(());
+    }
     if let Ok(path) = alias_path(name) {
         object_removed_or_absent(
             server
@@ -209,6 +216,12 @@ pub async fn register_existing(
     server: &ObjectServer,
     state: &Arc<ServiceState>,
 ) -> zbus::Result<()> {
+    // The libsecret session collection is process-memory-only and always
+    // exists for the lifetime of this daemon. Register it before persistent
+    // objects so the reserved alias can never resolve to legacy store data.
+    register_collection(server, state, SESSION_COLLECTION_ID).await?;
+    register_alias(server, state, SESSION_COLLECTION_ALIAS).await?;
+
     let collections = state
         .store()
         .list_collections()
@@ -228,7 +241,9 @@ pub async fn register_existing(
         .list_aliases()
         .map_err(|e| zbus::Error::FDO(Box::new(e.into())))?;
     for (name, _) in aliases {
-        register_alias(server, state, &name).await?;
+        if name != SESSION_COLLECTION_ALIAS {
+            register_alias(server, state, &name).await?;
+        }
     }
     Ok(())
 }

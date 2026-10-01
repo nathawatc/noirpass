@@ -4,8 +4,9 @@ use std::time::Duration;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::super::{
-    SERVICE_PATH, alias_path, collection_path, item_path, object_removed_or_absent, register_alias,
-    register_collection, register_item, unregister_alias,
+    SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, alias_path, collection_path,
+    item_path, object_removed_or_absent, register_alias, register_collection, register_existing,
+    register_item, unregister_alias,
 };
 use super::{next_stream_item, p2p_pair, test_state};
 use crate::gpg::test_support::TestGnupg;
@@ -29,6 +30,62 @@ async fn get_property(
         .body()
         .deserialize()
         .unwrap()
+}
+
+#[tokio::test]
+async fn startup_registers_builtin_session_collection_and_alias() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let legacy = state
+        .store()
+        .create_collection("legacy-session-alias", Some(SESSION_COLLECTION_ALIAS))
+        .unwrap();
+    let (server_conn, client_conn) = p2p_pair(state.clone()).await;
+    let server = server_conn.object_server();
+
+    register_existing(server, &state).await.unwrap();
+
+    let collection = collection_path(SESSION_COLLECTION_ID);
+    let alias = alias_path(SESSION_COLLECTION_ALIAS).unwrap();
+    assert!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&collection)
+            .await
+            .is_ok()
+    );
+    assert!(
+        server
+            .interface::<_, crate::service::collection::Collection>(&alias)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        String::try_from(
+            get_property(
+                &client_conn,
+                &alias,
+                "org.freedesktop.Secret.Collection",
+                "Label",
+            )
+            .await,
+        )
+        .unwrap(),
+        "Session"
+    );
+    assert!(
+        state
+            .store()
+            .list_collections()
+            .unwrap()
+            .iter()
+            .all(|meta| meta.id != SESSION_COLLECTION_ID)
+    );
+    assert_eq!(
+        state.store().read_alias(SESSION_COLLECTION_ALIAS).unwrap(),
+        Some(legacy.id),
+        "legacy persisted alias may remain on disk but must not shadow the built-in runtime alias"
+    );
 }
 
 #[tokio::test]

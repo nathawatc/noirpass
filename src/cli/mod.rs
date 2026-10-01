@@ -1,8 +1,9 @@
 //! noirpass daemon entry point.
 //!
 //! Connects to the session bus, serves the Secret Service object tree and
-//! exits cleanly when idle (or on SIGTERM/SIGINT). Secrets at rest are
-//! encrypted to the user's `OpenPGP` key; decryption goes through `gpg-agent`.
+//! exits cleanly when idle (or on SIGTERM/SIGINT). Persistent secrets are
+//! encrypted to the user's `OpenPGP` key; the standard session collection is
+//! process-memory-only. Decryption of persistent values goes through `gpg-agent`.
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -47,7 +48,8 @@ struct Cli {
 
     /// Exit after this many seconds without Noirpass application activity (0 = after activity, -1 = never).
     ///
-    /// The daemon only exits when there are also no open sessions.
+    /// The daemon only exits when there are also no open transport sessions
+    /// and no temporary secrets in the standard session collection.
     /// Defaults to `config.toml` `idle_exit`, or 300 when omitted.
     #[arg(
         long,
@@ -208,7 +210,7 @@ async fn reap_vanished_clients(connection: zbus::Connection, state: Arc<ServiceS
     }
 }
 
-/// Wait until SIGTERM/SIGINT or configured idle exit with no open sessions.
+/// Wait until SIGTERM/SIGINT or configured idle exit with no open transport sessions or temporary secrets.
 /// Zero exits promptly after observed Noirpass application activity completes; -1 waits forever.
 async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: i64) {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

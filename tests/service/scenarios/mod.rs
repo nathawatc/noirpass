@@ -23,6 +23,10 @@ pub(super) async fn run_ordered() {
     sessions::s6_get_secrets_bulk().await;
     eprintln!("scenario 6b: cross-client session rejection");
     sessions::s6b_cross_client_session_rejected().await;
+    eprintln!("scenario 6c: temporary session collection");
+    sessions::s6c_temporary_session_collection().await;
+    eprintln!("scenario 6d: temporary collection modification notifications");
+    sessions::s6d_session_collection_notifications().await;
     eprintln!("scenario 7: persistence across restart");
     persistence::s7_persistence_across_restart().await;
     #[cfg(feature = "secret-tool-smoke")]

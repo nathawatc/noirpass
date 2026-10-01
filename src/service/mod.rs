@@ -10,9 +10,10 @@
 //! # Locking model
 //!
 //! noirpass is *always unlocked*: `Item.Locked` and `Collection.Locked` are
-//! always `false`. The real gate on secrets is `gpg-agent`, which enforces the
-//! user's passphrase/pinentry policy on every decryption. `Unlock` reports
-//! requested objects as already unlocked. `Lock` cannot lock any object, so its
+//! always `false`. Persistent secrets are gated by `gpg-agent`, which enforces
+//! the user's passphrase/pinentry policy on decryption. Temporary secrets in
+//! the built-in `session` collection are already resident in daemon memory.
+//! `Unlock` reports requested objects as already unlocked. `Lock` cannot lock any object, so its
 //! `locked` result is empty. No Prompt object is exposed; both methods return
 //! `/` as their prompt path. This is a deliberate, documented deviation from
 //! keyrings that implement their own locking.
@@ -24,9 +25,9 @@ pub mod session;
 mod state;
 
 pub use objects::{
-    ALGORITHM_DH, ALGORITHM_PLAIN, SERVICE_PATH, alias_path, collection_path, item_path,
-    parse_collection_path, parse_item_path, register_alias, register_collection, register_existing,
-    register_item, session_path, unregister_alias,
+    ALGORITHM_DH, ALGORITHM_PLAIN, SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID,
+    alias_path, collection_path, item_path, parse_collection_path, parse_item_path, register_alias,
+    register_collection, register_existing, register_item, session_path, unregister_alias,
 };
 pub use state::ServiceState;
 
@@ -194,6 +195,22 @@ impl Service {
             })?),
         };
 
+        if alias == SESSION_COLLECTION_ALIAS {
+            let path = collection_path(SESSION_COLLECTION_ID);
+            if let Some(label) = label.as_deref() {
+                self.state.set_session_collection_label(label);
+                collection::emit_collection_label_modified(
+                    &self.state,
+                    server,
+                    emitter.connection(),
+                    SESSION_COLLECTION_ID,
+                )
+                .await?;
+                Self::collection_changed(&emitter, path.clone()).await?;
+            }
+            return Ok((path, root_path()));
+        }
+
         if !alias.is_empty()
             && let Some(existing) = self.state.store().read_alias(alias).map_err(fdo_err)?
             && self.state.store().get_collection(&existing).is_ok()
@@ -246,7 +263,7 @@ impl Service {
         attributes: HashMap<String, String>,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
         let _activity = self.state.activity()?;
-        let unlocked = self
+        let mut unlocked: Vec<_> = self
             .state
             .store()
             .search_items(&attributes)
@@ -254,6 +271,12 @@ impl Service {
             .into_iter()
             .map(|meta| item_path(&meta.collection, &meta.id))
             .collect();
+        unlocked.extend(
+            self.state
+                .search_session_items(&attributes)
+                .into_iter()
+                .map(|meta| item_path(&meta.collection, &meta.id)),
+        );
         Ok((unlocked, Vec::new()))
     }
 
@@ -283,8 +306,8 @@ impl Service {
 
     /// Fetch the secrets of multiple items in one round trip.
     ///
-    /// Item paths that do not resolve to a stored item are silently skipped
-    /// (lenient interop choice); a bad session is an error.
+    /// Item paths that do not resolve to a current item are silently skipped
+    /// (lenient interop choice); a bad transport session is an error.
     #[zbus(out_args("secrets"))]
     async fn get_secrets(
         &self,
@@ -303,6 +326,22 @@ impl Service {
             let Some((collection_id, item_id)) = parse_item_path(path.as_str()) else {
                 continue;
             };
+            if collection_id == SESSION_COLLECTION_ID {
+                let (meta, plaintext) = match self.state.read_session_item_secret(&item_id) {
+                    Ok(item) => item,
+                    Err(crate::Error::NotFound(_)) => continue,
+                    Err(err) => return Err(err.into()),
+                };
+                let secret = self.state.plaintext_to_secret(
+                    &session,
+                    &plaintext,
+                    &meta.content_type,
+                    &owner,
+                )?;
+                out.insert(path, secret);
+                continue;
+            }
+
             let (meta, ciphertext) = match self.state.store().read_item_secret(&item_id) {
                 Ok(item) => item,
                 Err(crate::Error::NotFound(_)) => continue,
@@ -324,6 +363,9 @@ impl Service {
     #[zbus(out_args("collection"))]
     fn read_alias(&self, name: &str) -> fdo::Result<OwnedObjectPath> {
         let _activity = self.state.activity()?;
+        if name == SESSION_COLLECTION_ALIAS {
+            return Ok(collection_path(SESSION_COLLECTION_ID));
+        }
         match self.state.store().read_alias(name).map_err(fdo_err)? {
             Some(id) if self.state.store().get_collection(&id).is_ok() => Ok(collection_path(&id)),
             _ => Ok(root_path()),
@@ -346,6 +388,12 @@ impl Service {
     ) -> Result<(), SecretError> {
         let _activity = self.state.activity()?;
         let _lifecycle = self.state.lock_object_lifecycle().await;
+        if name == SESSION_COLLECTION_ALIAS {
+            return Err(fdo::Error::NotSupported(
+                "the session alias is reserved for temporary secrets".into(),
+            )
+            .into());
+        }
         let previous = self.state.store().read_alias(name)?;
         if collection.as_str() == "/" {
             self.state.store().set_alias(name, None)?;
@@ -379,10 +427,13 @@ impl Service {
     fn collections(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
         let _activity = self.state.activity()?;
         let collections = self.state.store().list_collections().map_err(fdo_err)?;
-        Ok(collections
-            .into_iter()
-            .map(|meta| collection_path(&meta.id))
-            .collect())
+        let mut paths = vec![collection_path(SESSION_COLLECTION_ID)];
+        paths.extend(
+            collections
+                .into_iter()
+                .map(|meta| collection_path(&meta.id)),
+        );
+        Ok(paths)
     }
 
     /// A collection was created.
