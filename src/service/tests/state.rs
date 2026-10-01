@@ -297,3 +297,40 @@ async fn cancelled_search_retains_request_capacity_until_worker_completion() {
         .unwrap();
     drop(state.request(&0u8).unwrap());
 }
+
+#[tokio::test]
+async fn property_worker_admission_drains_after_shutdown_and_rejects_foreign_state() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let other_tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let other = test_state(&gnupg, other_tmp.path());
+    let activity = std::sync::Arc::new(state.activity().unwrap());
+    state.begin_shutdown();
+    // Existing property admission remains valid; a new handler still fails.
+    assert!(state.activity().is_err());
+    assert_eq!(
+        state
+            .blocking_admitted(activity.clone(), None, |_| Ok(42))
+            .await
+            .unwrap(),
+        42
+    );
+    assert!(
+        other
+            .blocking_admitted(activity.clone(), None, |_| Ok(()))
+            .await
+            .is_err()
+    );
+    let drained = state.wait_for_active_calls();
+    tokio::pin!(drained);
+    std::future::poll_fn(|context| {
+        assert!(drained.as_mut().poll(context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(activity);
+    tokio::time::timeout(Duration::from_secs(2), drained)
+        .await
+        .unwrap();
+}

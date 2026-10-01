@@ -108,7 +108,8 @@ impl Collection {
             return Ok((path, root_path()));
         }
         Self::item_created(&emitter, path.clone()).await?;
-        emit_collection_items_changed(&self.state, server, connection, &id).await?;
+        emit_collection_items_changed(&self.state, server, connection, &id, lifecycle.clone())
+            .await?;
         emit_collection_modified(&self.state, connection, &id, lifecycle.clone()).await?;
         Ok((path, root_path()))
     }

@@ -96,6 +96,23 @@ impl Collection {
         }
     }
 
+    /// Resolve an alias after worker admission and preserve property error names.
+    fn item_paths(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
+        let id = self.resolve_id()?;
+        let items = if id == SESSION_COLLECTION_ID {
+            self.state.list_session_items()
+        } else {
+            self.state
+                .store()
+                .list_items(&id)
+                .map_err(fdo::Error::from)?
+        };
+        Ok(items
+            .into_iter()
+            .map(|meta| item_path(&meta.collection, &meta.id))
+            .collect())
+    }
+
     /// Emit the changed signal for Label while mutation serialization remains held.
     async fn emit_label_changed(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
         let mut changed = HashMap::new();
@@ -224,21 +241,22 @@ impl Collection {
 
     /// Object paths of the items in this collection.
     #[zbus(property)]
-    fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
-        let _activity = self.state.activity()?;
+    async fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
+        let activity = Arc::new(self.state.activity()?);
         let id = self.resolve_id()?;
-        let items = if id == SESSION_COLLECTION_ID {
-            self.state.list_session_items()
-        } else {
-            self.state
-                .store()
-                .list_items(&id)
-                .map_err(fdo::Error::from)?
-        };
-        Ok(items
-            .into_iter()
-            .map(|meta| item_path(&meta.collection, &meta.id))
-            .collect())
+        if id == SESSION_COLLECTION_ID {
+            return Ok(self
+                .state
+                .list_session_items()
+                .into_iter()
+                .map(|meta| item_path(&meta.collection, &meta.id))
+                .collect());
+        }
+        let object = self.clone();
+        self.state
+            .blocking_admitted(activity.clone(), None, move |_| Ok(object.item_paths()))
+            .await
+            .map_err(|err| fdo::Error::Failed(err.to_string()))?
     }
 
     /// Human-readable label.

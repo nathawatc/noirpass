@@ -5,7 +5,9 @@ use std::sync::{Arc, Weak};
 use tokio::sync::Mutex as AsyncMutex;
 use zbus::fdo;
 
-use super::{ADMITTED_REQUEST, CollectionGuard, LifecycleGuard, MutationGuard, ServiceState};
+use super::{
+    ADMITTED_REQUEST, ActivityGuard, CollectionGuard, LifecycleGuard, MutationGuard, ServiceState,
+};
 use crate::service::{SESSION_COLLECTION_ID, SecretError};
 
 impl ServiceState {
@@ -47,7 +49,23 @@ impl ServiceState {
         lifecycle: Option<Arc<MutationGuard>>,
         operation: impl FnOnce(&Self) -> Result<T, SecretError> + Send + 'static,
     ) -> Result<T, SecretError> {
-        let activity = self.activity()?;
+        self.blocking_admitted(Arc::new(self.activity()?), lifecycle, operation)
+            .await
+    }
+
+    /// Share a property handler's existing admission through queued and started
+    /// work, including shutdown draining, without reserving request capacity.
+    pub(crate) async fn blocking_admitted<T: Send + 'static>(
+        self: &Arc<Self>,
+        activity: Arc<ActivityGuard>,
+        lifecycle: Option<Arc<MutationGuard>>,
+        operation: impl FnOnce(&Self) -> Result<T, SecretError> + Send + 'static,
+    ) -> Result<T, SecretError> {
+        if !Arc::ptr_eq(&activity.state, self) {
+            return Err(
+                fdo::Error::Failed("blocking admission belongs to another service".into()).into(),
+            );
+        }
         let permit = if lifecycle.is_none() {
             Some(
                 self.blocking_slots

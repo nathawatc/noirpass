@@ -107,9 +107,15 @@ impl Item {
         Collection::item_deleted(&emitter, self.path())
             .await
             .map_err(SecretError::ZBus)?;
-        emit_collection_items_changed(&self.state, server, connection, &self.collection_id)
-            .await
-            .map_err(SecretError::from)?;
+        emit_collection_items_changed(
+            &self.state,
+            server,
+            connection,
+            &self.collection_id,
+            lifecycle.clone(),
+        )
+        .await
+        .map_err(SecretError::from)?;
         emit_collection_modified(
             &self.state,
             connection,

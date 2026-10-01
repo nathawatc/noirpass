@@ -630,3 +630,225 @@ async fn startup_registers_items_from_every_persisted_collection() {
     .unwrap();
     assert_eq!(items.len(), 1);
 }
+
+#[tokio::test]
+async fn items_reads_wait_for_workers_while_temporary_reads_remain_available() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let item = state
+        .store()
+        .create_item(
+            "default",
+            "indexed",
+            HashMap::new(),
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    let (server, client) = p2p_pair(state.clone()).await;
+    register_existing(server.object_server(), &state)
+        .await
+        .unwrap();
+    let mut workers = Vec::new();
+    for n in 0..super::super::state::MAX_BLOCKING_WORKERS {
+        workers.push(
+            state
+                .lock_owned_collection_lifecycle(&format!("busy{n}"))
+                .await,
+        );
+    }
+    // Property reads must not reserve request capacity, even while queued.
+    let requests: Vec<_> = (0..super::super::state::MAX_PENDING_REQUESTS)
+        .map(|_| state.request(&0u8).unwrap())
+        .collect();
+    let temporary = tokio::time::timeout(
+        Duration::from_secs(2),
+        get_property(
+            &client,
+            &collection_path(SESSION_COLLECTION_ID),
+            "org.freedesktop.Secret.Collection",
+            "Items",
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        Vec::<OwnedObjectPath>::try_from(temporary)
+            .unwrap()
+            .is_empty()
+    );
+    let persistent_path = collection_path("default");
+    let property = get_property(
+        &client,
+        &persistent_path,
+        "org.freedesktop.Secret.Collection",
+        "Items",
+    );
+    tokio::pin!(property);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut property)
+            .await
+            .is_err()
+    );
+    drop(workers);
+    let value = tokio::time::timeout(Duration::from_secs(2), property)
+        .await
+        .unwrap();
+    assert_eq!(
+        Vec::<OwnedObjectPath>::try_from(value).unwrap(),
+        vec![item_path("default", &item.id)]
+    );
+    drop(requests);
+}
+
+#[tokio::test]
+async fn items_signals_reuse_reserved_workers_and_match_canonical_and_alias_values() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let item = state
+        .store()
+        .create_item(
+            "default",
+            "indexed",
+            HashMap::new(),
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    let (server, client) = p2p_pair(state.clone()).await;
+    register_existing(server.object_server(), &state)
+        .await
+        .unwrap();
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("org.freedesktop.DBus.Properties")
+        .unwrap()
+        .member("PropertiesChanged")
+        .unwrap()
+        .build();
+    let mut signals = zbus::MessageStream::for_match_rule(rule, &client, None)
+        .await
+        .unwrap();
+    let lifecycle = state.lock_owned_collection_lifecycle("default").await;
+    let mut workers = Vec::new();
+    for n in 1..super::super::state::MAX_BLOCKING_WORKERS {
+        workers.push(
+            state
+                .lock_owned_collection_lifecycle(&format!("busy{n}"))
+                .await,
+        );
+    }
+    // All permits are held. A signal must reuse its own mutation reservation;
+    // invoking the generated async Items getter would deadlock here.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        super::super::collection::emit_collection_items_changed(
+            &state,
+            server.object_server(),
+            &server,
+            "default",
+            lifecycle.clone(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut paths = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let signal = tokio::time::timeout(Duration::from_secs(2), next_stream_item(&mut signals))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        paths.insert(signal.header().path().unwrap().as_str().to_string());
+        let (interface, mut changed, invalidated): (
+            String,
+            HashMap<String, OwnedValue>,
+            Vec<String>,
+        ) = signal.body().deserialize().unwrap();
+        assert_eq!(interface, "org.freedesktop.Secret.Collection");
+        assert!(invalidated.is_empty());
+        assert_eq!(changed.len(), 1);
+        assert_eq!(
+            Vec::<OwnedObjectPath>::try_from(changed.remove("Items").unwrap()).unwrap(),
+            vec![item_path("default", &item.id)]
+        );
+    }
+    assert_eq!(
+        paths,
+        std::collections::HashSet::from([
+            collection_path("default").to_string(),
+            alias_path("default").unwrap().to_string()
+        ])
+    );
+    drop(workers);
+    drop(lifecycle);
+}
+
+#[tokio::test]
+async fn queued_alias_items_reads_follow_repointing_and_preserve_removed_alias_error() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let second = state.store().create_collection("second", None).unwrap();
+    let item = state
+        .store()
+        .create_item(
+            &second.id,
+            "second",
+            HashMap::new(),
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    state.store().set_alias("queued", Some("default")).unwrap();
+    let (server, client) = p2p_pair(state.clone()).await;
+    register_existing(server.object_server(), &state)
+        .await
+        .unwrap();
+    let path = alias_path("queued").unwrap();
+    for removed in [false, true] {
+        let mut workers = Vec::new();
+        for n in 0..super::super::state::MAX_BLOCKING_WORKERS {
+            workers.push(
+                state
+                    .lock_owned_collection_lifecycle(&format!("busy{n}"))
+                    .await,
+            );
+        }
+        let property = client.call_method(
+            None::<zbus::names::BusName<'_>>,
+            &path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.freedesktop.Secret.Collection", "Items"),
+        );
+        tokio::pin!(property);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut property)
+                .await
+                .is_err()
+        );
+        state
+            .store()
+            .set_alias("queued", if removed { None } else { Some(&second.id) })
+            .unwrap();
+        drop(workers);
+        let reply = tokio::time::timeout(Duration::from_secs(2), property)
+            .await
+            .unwrap();
+        if removed {
+            assert!(
+                matches!(reply, Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.UnknownObject")
+            );
+        } else {
+            let value: OwnedValue = reply.unwrap().body().deserialize().unwrap();
+            assert_eq!(
+                Vec::<OwnedObjectPath>::try_from(value).unwrap(),
+                vec![item_path(&second.id, &item.id)]
+            );
+        }
+    }
+}
