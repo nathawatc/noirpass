@@ -195,32 +195,23 @@ impl Service {
             })?),
         };
 
-        if alias == SESSION_COLLECTION_ALIAS {
-            let path = collection_path(SESSION_COLLECTION_ID);
-            if let Some(label) = label.as_deref() {
-                self.state.set_session_collection_label(label);
-                collection::emit_collection_label_modified(
-                    &self.state,
-                    server,
-                    emitter.connection(),
-                    SESSION_COLLECTION_ID,
-                )
-                .await?;
-                Self::collection_changed(&emitter, path.clone()).await?;
-            }
-            return Ok((path, root_path()));
-        }
-
         if !alias.is_empty()
-            && let Some(existing) = self.state.store().read_alias(alias).map_err(fdo_err)?
-            && self.state.store().get_collection(&existing).is_ok()
+            && let Some(existing) = self.state.read_alias(alias).map_err(fdo_err)?
+            && (existing == SESSION_COLLECTION_ID
+                || self.state.store().get_collection(&existing).is_ok())
         {
             let path = collection_path(&existing);
             if let Some(label) = label.as_deref() {
-                self.state
-                    .store()
-                    .set_collection_label(&existing, label)
-                    .map_err(fdo_err)?;
+                if existing == SESSION_COLLECTION_ID {
+                    self.state
+                        .set_session_collection_label(label)
+                        .map_err(fdo_err)?;
+                } else {
+                    self.state
+                        .store()
+                        .set_collection_label(&existing, label)
+                        .map_err(fdo_err)?;
+                }
                 collection::emit_collection_label_modified(
                     &self.state,
                     server,
@@ -363,11 +354,13 @@ impl Service {
     #[zbus(out_args("collection"))]
     fn read_alias(&self, name: &str) -> fdo::Result<OwnedObjectPath> {
         let _activity = self.state.activity()?;
-        if name == SESSION_COLLECTION_ALIAS {
-            return Ok(collection_path(SESSION_COLLECTION_ID));
-        }
-        match self.state.store().read_alias(name).map_err(fdo_err)? {
-            Some(id) if self.state.store().get_collection(&id).is_ok() => Ok(collection_path(&id)),
+        match self.state.read_alias(name).map_err(fdo_err)? {
+            Some(id)
+                if id == SESSION_COLLECTION_ID
+                    || self.state.store().get_collection(&id).is_ok() =>
+            {
+                Ok(collection_path(&id))
+            }
             _ => Ok(root_path()),
         }
     }
@@ -394,9 +387,10 @@ impl Service {
             )
             .into());
         }
-        let previous = self.state.store().read_alias(name)?;
+        let previous = self.state.read_alias(name)?;
         if collection.as_str() == "/" {
             self.state.store().set_alias(name, None)?;
+            self.state.remove_session_alias(name);
             unregister_alias(server, name)
                 .await
                 .map_err(SecretError::ZBus)?;
@@ -405,9 +399,14 @@ impl Service {
         let id = parse_collection_path(collection.as_str()).ok_or_else(|| {
             SecretError::NoSuchObject(format!("{collection} is not a collection path"))
         })?;
-        // Verify the collection exists before pointing an alias at it.
-        self.state.store().get_collection(&id)?;
-        self.state.store().set_alias(name, Some(&id))?;
+        if id == SESSION_COLLECTION_ID {
+            self.state.set_session_alias(name)?;
+        } else {
+            // Verify the collection exists before pointing an alias at it.
+            self.state.store().get_collection(&id)?;
+            self.state.store().set_alias(name, Some(&id))?;
+            self.state.remove_session_alias(name);
+        }
         register_alias(server, &self.state, name)
             .await
             .map_err(SecretError::ZBus)?;

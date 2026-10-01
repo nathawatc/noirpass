@@ -140,6 +140,15 @@ async fn exercise_temporary_item(
         .await
         .unwrap_err();
     assert_method_error(&error, NO_SESSION_ERROR);
+    let oversized = WireSecret {
+        value: Zeroizing::new(vec![0; 1024 * 1024 + 1]),
+        ..secret
+    };
+    assert!(
+        item.call::<_, _, ()>("SetSecret", &(&oversized,))
+            .await
+            .is_err()
+    );
     let (after,): (WireSecret,) = item.call("GetSecret", &(session,)).await.unwrap();
     assert_eq!(after.value.as_slice(), b"replacement");
     let (duplicate, _): (OwnedObjectPath, OwnedObjectPath) = collection

@@ -27,6 +27,8 @@ pub(super) async fn run_ordered() {
     sessions::s6c_temporary_session_collection().await;
     eprintln!("scenario 6d: temporary collection modification notifications");
     sessions::s6d_session_collection_notifications().await;
+    eprintln!("scenario 6e: temporary collection alias lifecycle");
+    sessions::s6e_session_alias_lifecycle().await;
     eprintln!("scenario 7: persistence across restart");
     persistence::s7_persistence_across_restart().await;
     #[cfg(feature = "secret-tool-smoke")]

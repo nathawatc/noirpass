@@ -41,13 +41,15 @@ fn collection_object_paths_for_id(
 ) -> fdo::Result<Vec<OwnedObjectPath>> {
     let mut paths = vec![collection_path(id)];
     if id == SESSION_COLLECTION_ID {
-        if let Ok(path) = alias_path(SESSION_COLLECTION_ALIAS) {
-            paths.push(path);
+        for name in state.session_collection_aliases() {
+            if let Ok(path) = alias_path(&name) {
+                paths.push(path);
+            }
         }
         return Ok(paths);
     }
     for (name, target) in state.store().list_aliases().map_err(fdo::Error::from)? {
-        if name != SESSION_COLLECTION_ALIAS
+        if !state.is_session_alias(&name)
             && target == id
             && let Ok(path) = alias_path(&name)
         {
@@ -175,12 +177,8 @@ impl Collection {
     fn resolve_id(&self) -> fdo::Result<String> {
         match &self.target {
             Target::Collection(id) => Ok(id.clone()),
-            Target::Alias(name) if name == SESSION_COLLECTION_ALIAS => {
-                Ok(SESSION_COLLECTION_ID.to_string())
-            }
             Target::Alias(name) => self
                 .state
-                .store()
                 .read_alias(name)
                 .map_err(fdo::Error::from)?
                 .ok_or_else(|| fdo::Error::UnknownObject(format!("alias {name} is not set"))),
@@ -454,7 +452,9 @@ impl Collection {
         let _lifecycle = self.state.lock_object_lifecycle().await;
         let id = self.resolve_id()?;
         if id == SESSION_COLLECTION_ID {
-            self.state.set_session_collection_label(label);
+            self.state
+                .set_session_collection_label(label)
+                .map_err(fdo::Error::from)?;
         } else {
             self.state
                 .store()

@@ -1,6 +1,6 @@
 //! Shared daemon state, session ownership, and secret transport.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -9,7 +9,7 @@ use zbus::fdo;
 use zbus::zvariant::OwnedObjectPath;
 use zeroize::Zeroizing;
 
-use super::{SESSION_COLLECTION_ID, SecretError, session_path};
+use super::{SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError, session_path};
 use crate::crypto::SessionCipher;
 use crate::gpg::Gpg;
 use crate::service::session::Secret;
@@ -21,6 +21,50 @@ pub(super) const SESSION_ALLOCATION_ATTEMPTS: usize = 128;
 
 /// Bound retries for temporary item identifiers for the same reason as session paths.
 const SESSION_ITEM_ALLOCATION_ATTEMPTS: usize = 128;
+
+/// Keep runtime alias names bounded independently of temporary item payloads.
+pub(super) const MAX_SESSION_ALIASES: usize = 256;
+pub(super) const MAX_SESSION_ALIAS_BYTES: usize = 4096;
+
+// Bound retained temporary data, including client-controlled metadata.
+pub(super) const MAX_SESSION_SECRET_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_SESSION_ITEMS: usize = 256;
+pub(super) const MAX_SESSION_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_SESSION_ATTRIBUTES: usize = 64;
+pub(super) const MAX_SESSION_STRING_BYTES: usize = 4096;
+pub(super) const MAX_SESSION_METADATA_BYTES: usize = 64 * 1024;
+
+pub(super) fn session_item_bytes(
+    label: &str,
+    attributes: &HashMap<String, String>,
+    content_type: &str,
+    secret_len: usize,
+) -> crate::Result<usize> {
+    if secret_len > MAX_SESSION_SECRET_BYTES
+        || attributes.len() > MAX_SESSION_ATTRIBUTES
+        || label.len() > MAX_SESSION_STRING_BYTES
+        || content_type.len() > MAX_SESSION_STRING_BYTES
+        || attributes.iter().any(|(key, value)| {
+            key.len() > MAX_SESSION_STRING_BYTES || value.len() > MAX_SESSION_STRING_BYTES
+        })
+    {
+        return Err(crate::Error::Config(
+            "temporary item exceeds size limits".into(),
+        ));
+    }
+    let metadata_bytes = label.len()
+        + content_type.len()
+        + attributes
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum::<usize>();
+    if metadata_bytes > MAX_SESSION_METADATA_BYTES {
+        return Err(crate::Error::Config(
+            "temporary item metadata exceeds size limit".into(),
+        ));
+    }
+    Ok(metadata_bytes + secret_len)
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -53,12 +97,38 @@ struct SessionItem {
     secret: Zeroizing<Vec<u8>>,
 }
 
+impl SessionItem {
+    fn bytes(&self) -> usize {
+        self.secret.len()
+            + self.metadata.label.len()
+            + self.metadata.content_type.len()
+            + self
+                .metadata
+                .attributes
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum::<usize>()
+    }
+}
+
 struct SessionCollectionState {
     metadata: CollectionMeta,
     items: HashMap<String, SessionItem>,
+    aliases: HashSet<String>,
 }
 
 impl SessionCollectionState {
+    fn check_capacity(&self, previous: usize, replacement: usize) -> crate::Result<()> {
+        // ponytail: at most 256 items; scan instead of maintaining a second mutable counter.
+        let retained: usize = self.items.values().map(SessionItem::bytes).sum();
+        if retained - previous + replacement > MAX_SESSION_BYTES {
+            return Err(crate::Error::Config(
+                "temporary collection exceeds memory limit".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn new() -> Self {
         let now = now_secs();
         Self {
@@ -69,6 +139,7 @@ impl SessionCollectionState {
                 modified: now,
             },
             items: HashMap::new(),
+            aliases: HashSet::new(),
         }
     }
 }
@@ -216,6 +287,66 @@ impl ServiceState {
         eligible
     }
 
+    /// Resolve reserved and runtime aliases before persisted aliases.
+    pub(crate) fn read_alias(&self, name: &str) -> crate::Result<Option<String>> {
+        if self.is_session_alias(name) {
+            return Ok(Some(SESSION_COLLECTION_ID.to_string()));
+        }
+        self.store.read_alias(name)
+    }
+
+    pub(crate) fn is_session_alias(&self, name: &str) -> bool {
+        name == SESSION_COLLECTION_ALIAS
+            || self
+                .session_collection
+                .lock()
+                .expect("session collection lock poisoned")
+                .aliases
+                .contains(name)
+    }
+
+    /// All aliases for temporary items, including the reserved built-in alias.
+    pub(crate) fn session_collection_aliases(&self) -> Vec<String> {
+        let collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+        let mut aliases: Vec<_> = collection.aliases.iter().cloned().collect();
+        aliases.push(SESSION_COLLECTION_ALIAS.to_string());
+        aliases.sort();
+        aliases
+    }
+
+    /// Replace any persisted target with a bounded, process-local session target.
+    /// The caller holds object lifecycle serialization through registration and signals.
+    pub(crate) fn set_session_alias(&self, name: &str) -> crate::Result<()> {
+        let mut collection = self
+            .session_collection
+            .lock()
+            .expect("session collection lock poisoned");
+        if name.len() > MAX_SESSION_ALIAS_BYTES
+            || (!collection.aliases.contains(name)
+                && collection.aliases.len() >= MAX_SESSION_ALIASES)
+        {
+            return Err(crate::Error::Config(
+                "temporary collection exceeds alias limits".into(),
+            ));
+        }
+        // Never persist the session target, or leave an old target to reappear after restart.
+        // Validate capacity before the Store mutation, and update memory only after a definite commit.
+        self.store.set_alias(name, None)?;
+        collection.aliases.insert(name.to_string());
+        Ok(())
+    }
+
+    pub(crate) fn remove_session_alias(&self, name: &str) {
+        self.session_collection
+            .lock()
+            .expect("session collection lock poisoned")
+            .aliases
+            .remove(name);
+    }
+
     /// Metadata for the built-in in-memory session collection.
     pub(crate) fn session_collection_meta(&self) -> CollectionMeta {
         self.session_collection
@@ -226,13 +357,19 @@ impl ServiceState {
     }
 
     /// Update the session collection label without persisting it.
-    pub(crate) fn set_session_collection_label(&self, label: &str) {
+    pub(crate) fn set_session_collection_label(&self, label: &str) -> crate::Result<()> {
+        if label.len() > MAX_SESSION_STRING_BYTES {
+            return Err(crate::Error::Config(
+                "temporary collection label exceeds size limit".into(),
+            ));
+        }
         let mut collection = self
             .session_collection
             .lock()
             .expect("session collection lock poisoned");
         collection.metadata.label = label.to_string();
         collection.metadata.modified = now_secs();
+        Ok(())
     }
 
     /// List temporary items in stable id order.
@@ -307,6 +444,7 @@ impl ServiceState {
         secret: Zeroizing<Vec<u8>>,
         replace: bool,
     ) -> crate::Result<(ItemMeta, bool)> {
+        let replacement_bytes = session_item_bytes(label, &attributes, content_type, secret.len())?;
         let mut collection = self
             .session_collection
             .lock()
@@ -321,6 +459,16 @@ impl ServiceState {
         } else {
             None
         };
+
+        let previous_bytes = existing_id
+            .as_ref()
+            .map_or(0, |id| collection.items[id].bytes());
+        collection.check_capacity(previous_bytes, replacement_bytes)?;
+        if existing_id.is_none() && collection.items.len() >= MAX_SESSION_ITEMS {
+            return Err(crate::Error::Config(
+                "temporary collection exceeds item limit".into(),
+            ));
+        }
 
         let now = now_secs();
         if let Some(id) = existing_id {
@@ -378,6 +526,19 @@ impl ServiceState {
             .session_collection
             .lock()
             .expect("session collection lock poisoned");
+        let item = collection
+            .items
+            .get(id)
+            .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))?;
+        let replacement_bytes = session_item_bytes(
+            label.unwrap_or(&item.metadata.label),
+            attributes.as_ref().unwrap_or(&item.metadata.attributes),
+            content_type.unwrap_or(&item.metadata.content_type),
+            secret
+                .as_ref()
+                .map_or(item.secret.len(), |secret| secret.len()),
+        )?;
+        collection.check_capacity(item.bytes(), replacement_bytes)?;
         let now = now_secs();
         let metadata = {
             let item = collection
