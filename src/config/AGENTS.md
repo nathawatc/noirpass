@@ -71,5 +71,13 @@ usability, and store health. Config-layer deinitialization removes only recogniz
 selected store, refuses unsafe symlinks, preserves unknown files, and leaves the CLI's mandatory
 interactive confirmation policy to [`../cli/AGENTS.md`](../cli/AGENTS.md).
 
+Deinitialization pins the selected root before preflight, then opens redb and acquires lifecycle
+ownership relative to that same descriptor. Pin the recipient parent, secrets, and keys directories
+before destructive work. Enumerate and unlink through the same pinned directory; pathname replacement
+must not redirect file deletion. Before removing an emptied child, compare its directory entry with
+the pinned descriptor and preserve replacements when identities differ. Regression tests must replace
+roots and children with both ordinary directories and symlinks and verify replacement state remains
+intact.
+
 OpenPGP certificate parsing and usable-key semantics belong to [`../gpg/AGENTS.md`](../gpg/AGENTS.md);
 this file owns how the primary fingerprint controls lifecycle decisions.

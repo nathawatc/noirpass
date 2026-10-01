@@ -229,6 +229,9 @@ The packaged systemd service sets `LimitCORE=0`; host swap and other memory acce
 
 ## Maintenance
 
+Deinitialization preserves unrelated files. Opened directories remain pinned throughout removal,
+so directory renames cannot redirect file deletion into a replacement store.
+
 Stop daemon before `list`, `delete`, `check`, or `deinit`; maintenance needs exclusive store access:
 
 ```sh
