@@ -281,6 +281,14 @@ impl Store {
     }
 
     pub(crate) fn open_in(dir: &Path, root: &Directory) -> Result<Self> {
+        Self::open_in_with_sync(dir, root, |_| root.sync_all())
+    }
+
+    fn open_in_with_sync(
+        dir: &Path,
+        root: &Directory,
+        sync_root: impl FnOnce(&Database) -> std::io::Result<()>,
+    ) -> Result<Self> {
         use std::os::unix::fs::PermissionsExt;
         root.set_permissions(fs::Permissions::from_mode(0o700))?;
         let secrets_dir = dir.join("secrets");
@@ -298,6 +306,8 @@ impl Store {
             txn.open_table(ALIASES)?;
             txn.commit()?;
         }
+        // redb syncs index contents; persist the index and secrets directory entries too.
+        sync_root(&db)?;
 
         Ok(Self {
             db,

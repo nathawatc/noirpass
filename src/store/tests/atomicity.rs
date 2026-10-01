@@ -5,6 +5,32 @@ use redb::ReadableDatabase;
 use super::*;
 
 #[test]
+fn store_creation_syncs_pinned_root_after_database_commit_and_propagates_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let selected = tmp.path().join("selected");
+    fs::create_dir(&selected).unwrap();
+    let root = Directory::open(&selected).unwrap();
+    let moved = tmp.path().join("moved");
+    fs::rename(&selected, &moved).unwrap();
+    fs::create_dir(&selected).unwrap();
+    let err = Store::open_in_with_sync(&selected, &root, |db| {
+        assert!(moved.join("secrets").is_dir());
+        let txn = db.begin_read().unwrap();
+        txn.open_table(COLLECTIONS).unwrap();
+        txn.open_table(ITEMS).unwrap();
+        txn.open_table(ALIASES).unwrap();
+        assert_eq!(fs::read_dir(&selected).unwrap().count(), 0);
+        Err(io::Error::other("injected root sync failure"))
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("injected root sync failure"));
+    let store = Store::open_in(&selected, &root).unwrap();
+    store.ensure_default().unwrap();
+    assert!(store.check_integrity().unwrap().is_healthy());
+    assert_eq!(fs::read_dir(selected).unwrap().count(), 0);
+}
+
+#[test]
 fn replacement_restores_previous_ciphertext_when_commit_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();

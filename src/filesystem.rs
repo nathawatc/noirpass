@@ -116,15 +116,30 @@ impl Directory {
     }
 
     pub(crate) fn create_child(&self, name: &Path, mode: u32) -> io::Result<Self> {
+        self.create_child_with_sync(name, mode, || self.sync_all())
+    }
+
+    fn create_child_with_sync(
+        &self,
+        name: &Path,
+        mode: u32,
+        sync_parent: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Self> {
         let c_name = entry_name(name)?;
         // SAFETY: the directory fd and NUL-terminated name remain live for the call.
-        if let Err(err) =
-            syscall_result(unsafe { libc::mkdirat(self.0.as_raw_fd(), c_name.as_ptr(), mode) })
-            && err.kind() != io::ErrorKind::AlreadyExists
-        {
-            return Err(err);
+        let created = match syscall_result(unsafe {
+            libc::mkdirat(self.0.as_raw_fd(), c_name.as_ptr(), mode)
+        }) {
+            Ok(()) => true,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(err) => return Err(err),
+        };
+        let child = self.child(name)?;
+        if created {
+            child.sync_all()?;
+            sync_parent()?;
         }
-        self.child(name)
+        Ok(child)
     }
 
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -333,6 +348,25 @@ pub(crate) fn create_directory_all_nofollow(path: &Path, mode: u32) -> io::Resul
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn child_creation_propagates_parent_sync_failure_on_pinned_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        fs::create_dir(&parent).unwrap();
+        let directory = Directory::open(&parent).unwrap();
+        let moved = tmp.path().join("moved");
+        fs::rename(&parent, &moved).unwrap();
+        fs::create_dir(&parent).unwrap();
+        let err = directory
+            .create_child_with_sync(Path::new("child"), 0o700, || {
+                assert!(moved.join("child").is_dir());
+                assert!(!parent.join("child").exists());
+                Err(io::Error::other("injected parent sync failure"))
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("injected parent sync failure"));
+    }
 
     #[test]
     fn directory_mutations_stay_on_pinned_parent() {
