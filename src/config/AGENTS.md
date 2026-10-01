@@ -13,8 +13,8 @@ layer deinitialization state under `src/config/`.
 - Recipient paths must be relative, non-empty, and contain only normal path components. Never allow
   traversal, absolute paths, or symlink following through configuration.
 - Config and recipient certificate writes are atomic and durable. If config persistence fails after
-  a certificate replacement, restore the previous certificate; do not leave a partially refreshed
-  recipient state.
+  a certificate replacement, restore both previous file contents through their original directory
+  descriptors; report any restoration failure. Preserve an absent previous file as absent.
 
 ## Recipient Identity and Lifecycle
 
@@ -63,6 +63,16 @@ Initialization must distinguish state instead of guessing:
 
 The CLI opens/creates the index only after this preflight succeeds. Store transaction and recovery
 invariants belong to [`../store/AGENTS.md`](../store/AGENTS.md).
+
+Initialization claims one root descriptor for redb, lifecycle ownership, configuration, and fresh
+index creation. Keep writer and lifecycle ownership through default-collection creation; release
+writer ownership before lifecycle ownership so waiting fresh initializers revalidate safely.
+Certificate publication and rollback share one pinned keys directory. Before config publication,
+reject a changed keys-directory entry and restore the certificate through its original descriptor.
+
+Startup likewise shares a pinned root across config/certificate preflight, index health validation,
+writer admission, and config/certificate reload. A root pathname replacement must never pair one
+store's ciphertext with another store's recipient or timeout configuration.
 
 ## Status and Deinitialization Boundary
 

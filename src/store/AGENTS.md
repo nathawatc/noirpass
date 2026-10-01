@@ -29,6 +29,9 @@ noirpass/
   inferred paths, or symlink following.
 - Default collection and alias are `default`; generated item/collection IDs are 16 random bytes
   rendered as 32 lowercase hexadecimal characters.
+- Configuration lifecycle operations pass their pinned root into store creation, existing-store
+  opening, and health probes. Open the index and secrets directory beneath that descriptor; the
+  display path is diagnostic only and must not be re-resolved for these operations.
 
 ## Transaction and Filesystem Durability
 

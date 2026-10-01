@@ -229,8 +229,9 @@ The packaged systemd service sets `LimitCORE=0`; host swap and other memory acce
 
 ## Maintenance
 
-Deinitialization preserves unrelated files. Opened directories remain pinned throughout removal,
-so directory renames cannot redirect file deletion into a replacement store.
+Initialization and deinitialization preserve unrelated files. Opened directories remain pinned
+throughout these operations, so directory renames cannot redirect writes or deletions into a
+replacement store. Initialization rejects a changed recipient directory and restores prior state.
 
 Stop daemon before `list`, `delete`, `check`, or `deinit`; maintenance needs exclusive store access:
 

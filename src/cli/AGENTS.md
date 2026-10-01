@@ -34,8 +34,9 @@ Do not add manager workflows or hidden runtime/testing overrides. The daemon alw
   ciphertext. Fresh-store and recipient-lifecycle rules belong to
   [`../config/AGENTS.md`](../config/AGENTS.md).
 - For an existing index, run store health validation before configuration writes. After successful
-  configuration, open the store, ensure the default collection, and report the selected directory
-  and recipient fingerprint.
+  configuration, open the store, ensure the default collection under ownership, and report the
+  selected directory and recipient fingerprint. Delegate the complete operation to the config
+  layer's pinned-root initializer; keep path selection and output in the CLI.
 - `deinit` removes only recognized Noirpass state after both confirmations. It must never invoke
   itself from `init`, change recipient implicitly, or delete unknown files. Store path and symlink
   safety remain enforced by the config/store layers. After pure preflight, it acquires the same
@@ -69,7 +70,8 @@ Startup order is observable security behavior:
 1. Load/validate config and recipient.
 2. Probe the existing index without creating a replacement.
 3. Open the existing store without creating an index, reload/validate config and recipient under
-   redb ownership, then recover the store. Preflight data must not outlive a concurrent refresh.
+   redb ownership, then recover the store. Share one root descriptor throughout preflight and reload;
+   preflight data must not outlive a concurrent refresh or follow a replacement root.
 4. Require `ensure_safe_to_serve` before bootstrapping the default collection.
 5. Bootstrap the default collection.
 6. Verify recipient secret-key access through the GPG-agent boundary.
