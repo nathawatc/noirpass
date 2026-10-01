@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use zbus::zvariant::{LE, OwnedObjectPath, serialized::Context, to_bytes};
 use zeroize::Zeroizing;
 
-use super::super::{MAX_BULK_SECRET_BYTES, SecretError, insert_bulk_secret, secret_entry_bytes};
+use super::super::SecretError;
+use super::super::bulk::{MAX_BULK_SECRET_BYTES, insert_bulk_secret, secret_entry_bytes};
 use crate::service::session::Secret;
 
 #[tokio::test]

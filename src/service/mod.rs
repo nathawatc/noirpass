@@ -18,19 +18,22 @@
 //! `/` as their prompt path. This is a deliberate, documented deviation from
 //! keyrings that implement their own locking.
 
+mod bulk;
 pub mod collection;
+mod error;
 pub mod item;
 mod namespace;
 mod objects;
 pub mod session;
 mod state;
 
+use bulk::MAX_BULK_SECRET_BYTES;
+pub use error::SecretError;
 pub use objects::{
     ALGORITHM_DH, ALGORITHM_PLAIN, SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID,
     alias_path, collection_path, item_path, parse_collection_path, parse_item_path, register_alias,
     register_collection, register_existing, register_item, session_path, unregister_alias,
 };
-use state::MAX_BLOCKING_WORKERS;
 pub use state::ServiceState;
 
 pub(crate) use objects::object_removed_or_absent;
@@ -45,102 +48,6 @@ use zbus::{fdo, interface};
 
 use crate::crypto::{DhHandshake, SessionCipher};
 use crate::service::session::Secret;
-
-const MAX_BULK_SECRET_BYTES: usize = 8 * 1024 * 1024;
-
-// Count each dictionary entry with its trailing eight-byte alignment padding.
-// This slightly overestimates the wire size without copying secret bytes.
-fn secret_entry_bytes(path: &OwnedObjectPath, secret: &Secret) -> Result<usize, SecretError> {
-    let size = zbus::zvariant::serialized_size(
-        zbus::zvariant::serialized::Context::new_dbus(zbus::zvariant::LE, 0),
-        &(path, secret),
-    )
-    .map_err(|err| SecretError::Failed(err.to_string()))?
-    .size();
-    size.checked_add(7)
-        .map(|size| size & !7)
-        .ok_or_else(|| SecretError::LimitsExceeded("bulk secret response is too large".into()))
-}
-
-fn insert_bulk_secret(
-    out: &mut HashMap<OwnedObjectPath, Secret>,
-    retained_bytes: &mut usize,
-    path: OwnedObjectPath,
-    secret: Secret,
-) -> Result<(), SecretError> {
-    let previous = out
-        .get(&path)
-        .map(|secret| secret_entry_bytes(&path, secret))
-        .transpose()?
-        .unwrap_or(0);
-    let next = (*retained_bytes - previous)
-        .checked_add(secret_entry_bytes(&path, &secret)?)
-        .filter(|size| *size <= MAX_BULK_SECRET_BYTES)
-        .ok_or_else(|| {
-            SecretError::LimitsExceeded(
-                "bulk secret response exceeds 8 MiB; request fewer items".into(),
-            )
-        })?;
-    out.insert(path, secret);
-    *retained_bytes = next;
-    Ok(())
-}
-
-// --- errors ----------------------------------------------------------------
-
-/// Secret Service and standard D-Bus method errors.
-#[derive(Debug, zbus::DBusError)]
-#[zbus(prefix = "org.freedesktop")]
-pub enum SecretError {
-    /// Transparent wrapper for errors without a dedicated public variant.
-    #[zbus(error)]
-    ZBus(zbus::Error),
-    /// Invalid client arguments.
-    #[zbus(name = "DBus.Error.InvalidArgs")]
-    InvalidArgs(String),
-    /// The requested operation is unsupported.
-    #[zbus(name = "DBus.Error.NotSupported")]
-    NotSupported(String),
-    /// An internal operation failed.
-    #[zbus(name = "DBus.Error.Failed")]
-    Failed(String),
-    /// The caller lacks the required identity or authorization.
-    #[zbus(name = "DBus.Error.AccessDenied")]
-    AccessDenied(String),
-    /// The daemon's bounded request capacity is exhausted.
-    #[zbus(name = "DBus.Error.LimitsExceeded")]
-    LimitsExceeded(String),
-    /// The session named in a `Secret` does not exist.
-    #[zbus(name = "Secret.Error.NoSession")]
-    NoSession(String),
-    /// The referenced object does not exist.
-    #[zbus(name = "Secret.Error.NoSuchObject")]
-    NoSuchObject(String),
-}
-
-impl From<fdo::Error> for SecretError {
-    fn from(err: fdo::Error) -> Self {
-        match err {
-            fdo::Error::InvalidArgs(message) => Self::InvalidArgs(message),
-            fdo::Error::NotSupported(message) => Self::NotSupported(message),
-            fdo::Error::Failed(message) => Self::Failed(message),
-            fdo::Error::AccessDenied(message) => Self::AccessDenied(message),
-            fdo::Error::LimitsExceeded(message) => Self::LimitsExceeded(message),
-            other => Self::ZBus(zbus::Error::FDO(Box::new(other))),
-        }
-    }
-}
-
-impl From<crate::Error> for SecretError {
-    fn from(err: crate::Error) -> Self {
-        match err {
-            crate::Error::NotFound(msg) => Self::NoSuchObject(msg),
-            other => fdo::Error::Failed(other.to_string()).into(),
-        }
-    }
-}
-
-// --- the Service interface ---------------------------------------------------
 
 /// The `org.freedesktop.Secret.Service` D-Bus object.
 #[derive(Clone)]
@@ -348,44 +255,7 @@ impl Service {
             .clone()
             .run(async {
                 let owner = message_sender(&header)?;
-                if self.state.session_cipher(&session, &owner).is_none() {
-                    return Err(SecretError::NoSession(format!("no session {session}")));
-                }
-
-                let mut out = HashMap::new();
-                // Dictionary array length plus padding before its first entry.
-                let mut retained_bytes = 8;
-                // Four in-flight items per request; the shared worker pool also bounds all callers.
-                // Drain each batch in input order so repeated paths retain their last result.
-                for batch in items.chunks(MAX_BLOCKING_WORKERS) {
-                    let mut tasks = tokio::task::JoinSet::new();
-                    for (index, path) in batch.iter().cloned().enumerate() {
-                        let state = self.state.clone();
-                        let session = session.clone();
-                        let owner = owner.clone();
-                        let request = activity.clone();
-                        tasks.spawn(request.run(async move {
-                            let result = state
-                                .secret_for_item_path(&path, &session, &owner)
-                                .await
-                                .map(|secret| secret.map(|secret| (path, secret)));
-                            (index, result)
-                        }));
-                    }
-                    let mut results = Vec::with_capacity(batch.len());
-                    while let Some(result) = tasks.join_next().await {
-                        results.push(result.map_err(|_| {
-                            fdo::Error::Failed("secret retrieval task failed".into())
-                        })?);
-                    }
-                    results.sort_by_key(|(index, _)| *index);
-                    for (_, result) in results {
-                        if let Some((path, secret)) = result? {
-                            insert_bulk_secret(&mut out, &mut retained_bytes, path, secret)?;
-                        }
-                    }
-                }
-                Ok(out)
+                bulk::get_secrets(&self.state, &activity, &items, &session, &owner).await
             })
             .await
     }
