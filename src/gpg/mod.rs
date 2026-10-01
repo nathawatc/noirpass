@@ -84,6 +84,11 @@ impl Gpg {
         crypto::encrypt(&self.cert, &self.fingerprint, plaintext)
     }
 
+    /// Run agent decryption inside the caller's bounded blocking worker.
+    pub(crate) fn decrypt_blocking(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        agent::decrypt_blocking(self.homedir.as_deref(), &self.cert, ciphertext)
+    }
+
     /// Decrypt `ciphertext` produced by `encrypt` via the
     /// running `gpg-agent`.
     ///

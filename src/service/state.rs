@@ -22,6 +22,9 @@ use crate::store::{CollectionMeta, ItemMeta, Store};
 /// Exhausting this with random 128-bit IDs requires 128 consecutive collisions.
 pub(super) const SESSION_ALLOCATION_ATTEMPTS: usize = 128;
 
+/// Share a fixed worker budget across encryption, storage, and agent decryption.
+pub(super) const MAX_BLOCKING_WORKERS: usize = 4;
+
 /// Bound retries for temporary item identifiers for the same reason as session paths.
 const SESSION_ITEM_ALLOCATION_ATTEMPTS: usize = 128;
 
@@ -202,7 +205,7 @@ impl ServiceState {
             }),
             activity_complete: Notify::new(),
             object_lifecycle: Arc::new(AsyncMutex::new(())),
-            blocking_slots: Arc::new(Semaphore::new(4)),
+            blocking_slots: Arc::new(Semaphore::new(MAX_BLOCKING_WORKERS)),
         })
     }
 
@@ -784,7 +787,7 @@ impl ServiceState {
     /// Decrypt an item's at-rest ciphertext via `gpg-agent` and re-encrypt it
     /// for transport under `session`'s cipher.
     pub async fn ciphertext_to_secret(
-        &self,
+        self: &Arc<Self>,
         session: &OwnedObjectPath,
         ciphertext: &[u8],
         content_type: &str,
@@ -794,7 +797,23 @@ impl ServiceState {
         if self.session_cipher(session, owner).is_none() {
             return Err(SecretError::NoSession(format!("no session {session}")));
         }
-        let plaintext = self.gpg.decrypt(ciphertext).await?;
+        let ciphertext = ciphertext.to_vec();
+        let session_for_worker = session.clone();
+        let owner_for_worker = owner.to_string();
+        let plaintext = self
+            .blocking(None, move |state| {
+                // Capacity admission can wait; recheck before private-key access.
+                if state
+                    .session_cipher(&session_for_worker, &owner_for_worker)
+                    .is_none()
+                {
+                    return Err(SecretError::NoSession(format!(
+                        "no session {session_for_worker}"
+                    )));
+                }
+                Ok(state.gpg.decrypt_blocking(&ciphertext)?)
+            })
+            .await?;
         self.plaintext_to_secret(session, &plaintext, content_type, owner)
     }
 }

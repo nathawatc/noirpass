@@ -8,8 +8,8 @@ use zeroize::Zeroizing;
 
 use super::super::SecretError;
 use super::super::state::{
-    MAX_SESSION_ALIAS_BYTES, MAX_SESSION_ALIASES, MAX_SESSION_ATTRIBUTES, MAX_SESSION_BYTES,
-    MAX_SESSION_ITEMS, MAX_SESSION_METADATA_BYTES, MAX_SESSION_SECRET_BYTES,
+    MAX_BLOCKING_WORKERS, MAX_SESSION_ALIAS_BYTES, MAX_SESSION_ALIASES, MAX_SESSION_ATTRIBUTES,
+    MAX_SESSION_BYTES, MAX_SESSION_ITEMS, MAX_SESSION_METADATA_BYTES, MAX_SESSION_SECRET_BYTES,
     MAX_SESSION_STRING_BYTES, SESSION_ALLOCATION_ATTEMPTS, session_item_bytes,
 };
 use super::super::{DhHandshake, SessionCipher, session_path};
@@ -549,13 +549,13 @@ fn session_registration_stops_after_bounded_collisions() {
 }
 
 #[tokio::test]
-async fn blocking_work_is_bounded_and_does_not_hold_lifecycle_lock() {
+async fn blocking_work_bounds_decryption_and_rechecks_queued_session() {
     let gnupg = TestGnupg::new();
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(&gnupg, tmp.path());
     let mut tasks = Vec::new();
     let mut releases = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..MAX_BLOCKING_WORKERS {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let worker_state = state.clone();
@@ -573,16 +573,22 @@ async fn blocking_work_is_bounded_and_does_not_hold_lifecycle_lock() {
         releases.push(release_tx);
     }
     let worker_state = state.clone();
+    let session = state
+        .register_session(SessionCipher::Plain, ":1.7".into())
+        .unwrap();
+    let worker_session = session.clone();
     let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+    let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
     let fifth = tokio::spawn(async move {
-        worker_state
-            .blocking(None, move |_| {
-                started_tx.send(()).unwrap();
-                Ok(())
-            })
-            .await
-            .unwrap();
+        queued_tx.send(()).unwrap();
+        let result = worker_state
+            .ciphertext_to_secret(&worker_session, b"invalid ciphertext", "", ":1.7")
+            .await;
+        // Garbage ciphertext would fail as OpenPGP if the closed session reached the agent.
+        assert!(matches!(result, Err(SecretError::NoSession(_))));
+        started_tx.send(()).unwrap();
     });
+    queued_rx.await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut started_rx)
             .await
@@ -607,6 +613,7 @@ async fn blocking_work_is_bounded_and_does_not_hold_lifecycle_lock() {
             .await
             .unwrap()
             .unwrap();
+    assert!(state.remove_session(&session, ":1.7"));
     for release in releases {
         release.send(()).unwrap();
     }
