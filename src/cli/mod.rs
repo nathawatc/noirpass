@@ -15,11 +15,9 @@ use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 use zbus::export::futures_core::Stream;
 
-use noirpass::config::{Config, load_recipient};
 use noirpass::gpg::Gpg;
 use noirpass::service::session::Session;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
-use noirpass::store::Store;
 
 const SERVICE_NAME: &str = "org.freedesktop.secrets";
 
@@ -34,6 +32,7 @@ mod deinit;
 mod delete;
 mod init;
 mod list;
+mod startup;
 mod status;
 
 /// Minimal on-demand GPG-backed freedesktop Secret Service.
@@ -130,10 +129,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(store = %store_dir.display(), "opening store");
 
-    let idle_exit = cli.idle_exit.unwrap_or(Config::load(&store_dir)?.idle_exit);
-    let recipient = load_recipient(&store_dir)?;
-    Store::probe_health(&store_dir)?;
-    let store = Store::open(&store_dir)?;
+    let (store, recipient, idle_exit) = startup::open_store(&store_dir, cli.idle_exit)?;
     store.recover_interrupted_operations()?;
     store.ensure_safe_to_serve()?;
     store.ensure_default()?;

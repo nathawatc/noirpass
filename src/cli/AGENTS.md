@@ -68,7 +68,8 @@ Startup order is observable security behavior:
 
 1. Load/validate config and recipient.
 2. Probe the existing index without creating a replacement.
-3. Open/recover the store.
+3. Open the existing store without creating an index, reload/validate config and recipient under
+   redb ownership, then recover the store. Preflight data must not outlive a concurrent refresh.
 4. Require `ensure_safe_to_serve` before bootstrapping the default collection.
 5. Bootstrap the default collection.
 6. Verify recipient secret-key access through the GPG-agent boundary.
