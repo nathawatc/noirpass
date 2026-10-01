@@ -32,22 +32,61 @@ fn deinit_refuses_busy_index_when_secrets_directory_is_missing() {
 }
 
 #[test]
-fn incomplete_index_ownership_does_not_initialize_or_rewrite_data() {
+fn index_ownership_does_not_initialize_or_rewrite_data() {
     let (certificate, _) = generated_recipient();
-    for bytes in [b"".as_slice(), b"corrupt index".as_slice()] {
-        let tmp = tempfile::tempdir().unwrap();
-        init_from_bytes(tmp.path(), &certificate).unwrap();
-        fs::write(tmp.path().join(INDEX_FILE), bytes).unwrap();
-        deinit_with_hooks(
-            tmp.path(),
-            || {},
-            || {
-                assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), bytes);
-            },
-        )
-        .unwrap();
-        assert!(!tmp.path().join(INDEX_FILE).exists());
-        assert!(!tmp.path().join(CONFIG_FILE).exists());
+    for has_secrets in [false, true] {
+        for bytes in [b"".as_slice(), b"corrupt index".as_slice()] {
+            let tmp = tempfile::tempdir().unwrap();
+            init_from_bytes(tmp.path(), &certificate).unwrap();
+            fs::write(tmp.path().join(INDEX_FILE), bytes).unwrap();
+            if has_secrets {
+                fs::create_dir(tmp.path().join(SECRETS_DIR)).unwrap();
+                fs::write(tmp.path().join(SECRETS_DIR).join("keep.txt"), b"unknown").unwrap();
+                fs::write(
+                    tmp.path()
+                        .join(SECRETS_DIR)
+                        .join("0123456789abcdef0123456789abcdef.gpg"),
+                    b"owned",
+                )
+                .unwrap();
+            }
+            deinit_with_hooks(
+                tmp.path(),
+                || {},
+                || {
+                    assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), bytes);
+                    let root = crate::filesystem::Directory::open(tmp.path()).unwrap();
+                    let index = redb::backends::FileBackend::new(
+                        root.open_regular(std::path::Path::new(INDEX_FILE), libc::O_RDWR, 0)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert!(
+                        !redb::StorageBackend::try_lock_range(
+                            &index,
+                            std::ops::Bound::Unbounded,
+                            std::ops::Bound::Unbounded,
+                        )
+                        .unwrap()
+                    );
+                },
+            )
+            .unwrap();
+            assert!(!tmp.path().join(INDEX_FILE).exists());
+            assert!(!tmp.path().join(CONFIG_FILE).exists());
+            if has_secrets {
+                assert_eq!(
+                    fs::read(tmp.path().join(SECRETS_DIR).join("keep.txt")).unwrap(),
+                    b"unknown"
+                );
+                assert!(
+                    !tmp.path()
+                        .join(SECRETS_DIR)
+                        .join("0123456789abcdef0123456789abcdef.gpg")
+                        .exists()
+                );
+            }
+        }
     }
 }
 

@@ -35,8 +35,8 @@ recipient identity = primary OpenPGP fingerprint
 - Keep config/certificate contents unchanged on all rejected lifecycle paths, including corrupt
   config, missing metadata, different-primary input, and failed writes.
 - `init` and `deinit` acquire shared lifecycle exclusivity before config, certificate, recognized
-  temporary-file, or destructive store mutation. For complete existing stores, they first acquire
-  Store/redb ownership so a busy-store rejection cannot create `.noirpass-lifecycle.lock`; they
+  temporary-file, or destructive store mutation. For existing indexes, they first acquire
+  redb ownership so a busy-store rejection cannot create `.noirpass-lifecycle.lock`; they
   then acquire lifecycle ownership and revalidate state. Fresh/incomplete init acquires lifecycle
   ownership first, then revalidates before creating Store state. The guard holds a kernel fd lock on
   persistent `.noirpass-lifecycle.lock`; file existence is not ownership, and process exit releases
@@ -81,18 +81,18 @@ usability, and store health. Config-layer deinitialization removes only recogniz
 selected store, refuses unsafe symlinks, preserves unknown files, and leaves the CLI's mandatory
 interactive confirmation policy to [`../cli/AGENTS.md`](../cli/AGENTS.md).
 
-Deinitialization pins the selected root before preflight, then opens redb and acquires lifecycle
-ownership relative to that same descriptor. Pin the recipient parent, secrets, and keys directories
-before destructive work. Enumerate and unlink through the same pinned directory; pathname replacement
+Deinitialization pins the selected root before preflight, then claims redb's full-file backend lock
+and acquires lifecycle ownership relative to that same descriptor. Pin the recipient parent, secrets,
+and keys directories before destructive work. Enumerate and unlink through the same pinned directory; pathname replacement
 must not redirect file deletion. Before removing an emptied child, compare its directory entry with
 the pinned descriptor and preserve replacements when identities differ. Regression tests must replace
 roots and children with both ordinary directories and symlinks and verify replacement state remains
 intact.
 
 Every existing index requires ownership before lifecycle-file creation, including when `secrets/`
-is missing. For incomplete stores, acquire redb's full-file backend lock without parsing or writing
-the index. A live daemon may retain a renamed secrets directory; pathname absence is not evidence
-that its database is offline.
+is missing. Acquire ownership without parsing, initializing, recovering, or writing the index so
+explicit destructive cleanup also works for corrupt databases. A live daemon may retain a renamed
+secrets directory; pathname absence is not evidence that its database is offline.
 
 OpenPGP certificate parsing and usable-key semantics belong to [`../gpg/AGENTS.md`](../gpg/AGENTS.md);
 this file owns how the primary fingerprint controls lifecycle decisions.

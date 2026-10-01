@@ -12,7 +12,6 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
-use crate::store::Store;
 use redb::{StorageBackend, backends::FileBackend};
 
 fn is_lower_hex(bytes: &[u8]) -> bool {
@@ -204,25 +203,14 @@ fn preflight_deinit(root: &Directory, recipient_rel: &Path) -> Result<()> {
     Ok(())
 }
 
-enum DeinitStoreGuard {
-    Complete { _store: Store },
-    Incomplete { _index: FileBackend },
-}
-
-fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<DeinitStoreGuard>> {
+fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<FileBackend>> {
     let has_index = checked_owned_file(root, Path::new(INDEX_FILE), "the metadata database")?;
-    let has_secrets = optional_directory(root, Path::new(SECRETS_DIR))?.is_some();
     if !has_index {
         return Ok(None);
     }
-    if has_secrets {
-        return Ok(Some(DeinitStoreGuard::Complete {
-            _store: Store::open_existing_in(data_dir, root)?,
-        }));
-    }
-    // A daemon retains its pinned secrets directory after a rename. Missing pathname
-    // state therefore cannot establish that the index is offline. Claim redb's lock
-    // directly without parsing, initializing, or rewriting the incomplete index.
+    // Claim redb ownership without parsing, initializing, or recovering the index:
+    // explicit destructive cleanup must also work for corrupt databases. A daemon
+    // may retain a renamed secrets directory, so every existing index needs a lock.
     let index = FileBackend::new(root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR, 0)?)?;
     if !index
         .try_lock_range(Bound::Unbounded, Bound::Unbounded)
@@ -233,7 +221,7 @@ fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<DeinitSt
             data_dir.join(INDEX_FILE).display()
         )));
     }
-    Ok(Some(DeinitStoreGuard::Incomplete { _index: index }))
+    Ok(Some(index))
 }
 
 /// Remove Noirpass-owned state without following symlinks or touching unknown files.
