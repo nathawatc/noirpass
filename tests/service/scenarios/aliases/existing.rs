@@ -38,7 +38,16 @@ pub(in super::super) async fn s13_existing_alias_collection() {
         initial_path
     );
 
-    let collection = zbus::Proxy::new(&conn, SERVICE_NAME, initial_path.clone(), COLLECTION_IFACE)
+    // Assert current server state; the independent signal stream can run ahead of proxy caching.
+    let collection = zbus::proxy::Builder::<zbus::Proxy<'_>>::new(&conn)
+        .destination(SERVICE_NAME)
+        .unwrap()
+        .path(initial_path.clone())
+        .unwrap()
+        .interface(COLLECTION_IFACE)
+        .unwrap()
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
         .await
         .unwrap();
     let collection_properties_proxy =
