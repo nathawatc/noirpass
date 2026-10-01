@@ -239,6 +239,7 @@ impl ServiceState {
     }
 
     /// Serialize namespace changes against collection mutations and publication.
+    #[cfg(test)]
     pub(crate) async fn lock_object_lifecycle(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
         self.object_lifecycle.write().await
     }

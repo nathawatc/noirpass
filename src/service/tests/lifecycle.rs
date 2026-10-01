@@ -50,6 +50,15 @@ async fn temporary_mutations_remain_available_while_persistent_workers_are_busy(
             .unwrap();
         releases.push(release_tx);
     }
+    // A queued namespace write must wait for worker capacity before freezing temporary mutations.
+    let namespace = super::super::Service::new(state.clone());
+    super::support::admit_then_cancel(namespace.set_alias(
+        "queued_namespace",
+        super::super::objects::root_path(),
+        server.object_server(),
+        &server,
+    ))
+    .await;
     let session = state
         .register_session(SessionCipher::Plain, ":1.7".into())
         .unwrap();
@@ -99,6 +108,9 @@ async fn temporary_mutations_remain_available_while_persistent_workers_are_busy(
     for task in tasks {
         task.await.unwrap();
     }
+    tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
+        .await
+        .unwrap();
     let _: zbus::zvariant::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
     assert!(state.list_session_items().is_empty());
 }

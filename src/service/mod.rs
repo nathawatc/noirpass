@@ -20,6 +20,7 @@
 
 pub mod collection;
 pub mod item;
+mod namespace;
 mod objects;
 pub mod session;
 mod state;
@@ -98,6 +99,7 @@ impl From<crate::Error> for SecretError {
 // --- the Service interface ---------------------------------------------------
 
 /// The `org.freedesktop.Secret.Service` D-Bus object.
+#[derive(Clone)]
 pub struct Service {
     state: Arc<ServiceState>,
 }
@@ -196,63 +198,19 @@ impl Service {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
-
-        let label = match properties.get("org.freedesktop.Secret.Collection.Label") {
-            None => None,
-            Some(value) => Some(String::try_from(value.clone()).map_err(|_| {
-                fdo::Error::InvalidArgs(
-                    "org.freedesktop.Secret.Collection.Label must be a string".into(),
-                )
-            })?),
-        };
-
-        if !alias.is_empty()
-            && let Some(existing) = self.state.read_alias(alias).map_err(fdo_err)?
-            && (existing == SESSION_COLLECTION_ID
-                || self.state.store().get_collection(&existing).is_ok())
-        {
-            let path = collection_path(&existing);
-            if let Some(label) = label.as_deref() {
-                if existing == SESSION_COLLECTION_ID {
-                    self.state
-                        .set_session_collection_label(label)
-                        .map_err(fdo_err)?;
-                } else {
-                    self.state
-                        .store()
-                        .set_collection_label(&existing, label)
-                        .map_err(fdo_err)?;
-                }
-                collection::emit_collection_label_modified(
-                    &self.state,
-                    server,
-                    emitter.connection(),
-                    &existing,
-                )
-                .await?;
-                Self::collection_changed(&emitter, path.clone()).await?;
-            }
-            return Ok((path, root_path()));
-        }
-
-        let alias_opt = (!alias.is_empty()).then_some(alias);
-        let meta = self
-            .state
-            .store()
-            .create_collection(label.as_deref().unwrap_or(""), alias_opt)
-            .map_err(fdo_err)?;
-
-        let path = register_collection(server, &self.state, &meta.id).await?;
-        if let Some(alias) = alias_opt {
-            register_alias(server, &self.state, alias).await?;
-        }
-        Self::collection_created(&emitter, path.clone()).await?;
-        // Invalidate client-side property caches (zbus proxies cache
-        // `Collections` and only refresh on PropertiesChanged).
-        self.collections_changed(&emitter).await?;
-        Ok((path, root_path()))
+        let activity = self.state.activity()?;
+        let object = self.clone();
+        let alias = alias.to_string();
+        let server = server.clone();
+        let emitter = emitter.into_owned();
+        tokio::spawn(async move {
+            let _activity = activity;
+            object
+                .create_collection_inner(properties, &alias, &server, &emitter)
+                .await
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("collection creation failed".into()))?
     }
 
     /// Search all collections for items whose attributes are a superset of
@@ -389,46 +347,19 @@ impl Service {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
-        if name == SESSION_COLLECTION_ALIAS {
-            return Err(fdo::Error::NotSupported(
-                "the session alias is reserved for temporary secrets".into(),
-            )
-            .into());
-        }
-        let previous = self.state.read_alias(name)?;
-        if collection.as_str() == "/" {
-            self.state.store().set_alias(name, None)?;
-            self.state.remove_session_alias(name);
-            unregister_alias(server, name)
+        let activity = self.state.activity()?;
+        let object = self.clone();
+        let name = name.to_string();
+        let server = server.clone();
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            let _activity = activity;
+            object
+                .set_alias_inner(&name, collection, &server, &connection)
                 .await
-                .map_err(SecretError::ZBus)?;
-            return Ok(());
-        }
-        let id = parse_collection_path(collection.as_str()).ok_or_else(|| {
-            SecretError::NoSuchObject(format!("{collection} is not a collection path"))
-        })?;
-        if id == SESSION_COLLECTION_ID {
-            self.state.set_session_alias(name)?;
-        } else {
-            // Verify the collection exists before pointing an alias at it.
-            self.state.store().get_collection(&id)?;
-            self.state.store().set_alias(name, Some(&id))?;
-            self.state.remove_session_alias(name);
-        }
-        register_alias(server, &self.state, name)
-            .await
-            .map_err(SecretError::ZBus)?;
-        if previous
-            .as_deref()
-            .is_some_and(|previous| previous != id.as_str())
-        {
-            collection::emit_alias_target_invalidated(connection, name)
-                .await
-                .map_err(SecretError::from)?;
-        }
-        Ok(())
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("alias mutation failed".into()))?
     }
 
     /// Object paths of all collections.
