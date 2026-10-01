@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::{self, Read};
+use std::ops::Bound;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,7 @@ use super::{
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
 use crate::store::Store;
+use redb::{StorageBackend, backends::FileBackend};
 
 fn is_lower_hex(bytes: &[u8]) -> bool {
     bytes
@@ -202,14 +204,36 @@ fn preflight_deinit(root: &Directory, recipient_rel: &Path) -> Result<()> {
     Ok(())
 }
 
-fn open_complete_store(data_dir: &Path, root: &Directory) -> Result<Option<Store>> {
+enum DeinitStoreGuard {
+    Complete { _store: Store },
+    Incomplete { _index: FileBackend },
+}
+
+fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<DeinitStoreGuard>> {
     let has_index = checked_owned_file(root, Path::new(INDEX_FILE), "the metadata database")?;
     let has_secrets = optional_directory(root, Path::new(SECRETS_DIR))?.is_some();
-    if has_index && has_secrets {
-        Ok(Some(Store::open_existing_in(data_dir, root)?))
-    } else {
-        Ok(None)
+    if !has_index {
+        return Ok(None);
     }
+    if has_secrets {
+        return Ok(Some(DeinitStoreGuard::Complete {
+            _store: Store::open_existing_in(data_dir, root)?,
+        }));
+    }
+    // A daemon retains its pinned secrets directory after a rename. Missing pathname
+    // state therefore cannot establish that the index is offline. Claim redb's lock
+    // directly without parsing, initializing, or rewriting the incomplete index.
+    let index = FileBackend::new(root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR, 0)?)?;
+    if !index
+        .try_lock_range(Bound::Unbounded, Bound::Unbounded)
+        .map_err(|err| Error::Config(format!("cannot acquire index ownership: {err}")))?
+    {
+        return Err(Error::Config(format!(
+            "store is in use by another noirpass process: {}; stop the daemon before running maintenance commands",
+            data_dir.join(INDEX_FILE).display()
+        )));
+    }
+    Ok(Some(DeinitStoreGuard::Incomplete { _index: index }))
 }
 
 /// Remove Noirpass-owned state without following symlinks or touching unknown files.
@@ -234,7 +258,7 @@ pub(super) fn deinit_with_hooks(
         |config| config.recipient_cert.clone(),
     );
     preflight_deinit(&root, &recipient_rel)?;
-    let preopened_store = open_complete_store(data_dir, &root)?;
+    let preopened_store = open_store_guard(data_dir, &root)?;
     let _lifecycle_lock = super::LifecycleLock::acquire_in(&root)?;
 
     let config = load_deinit_config(&root)?;
@@ -245,7 +269,7 @@ pub(super) fn deinit_with_hooks(
     preflight_deinit(&root, &recipient_rel)?;
     let _store_guard = match preopened_store {
         Some(store) => Some(store),
-        None => open_complete_store(data_dir, &root)?,
+        None => open_store_guard(data_dir, &root)?,
     };
     let secrets = optional_directory(&root, Path::new(SECRETS_DIR))?;
     let keys = optional_directory(&root, Path::new(KEYS_DIR))?;

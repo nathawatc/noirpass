@@ -7,6 +7,51 @@ use std::fs;
 use std::os::unix::fs::symlink;
 
 #[test]
+fn deinit_refuses_busy_index_when_secrets_directory_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (certificate, _) = generated_recipient();
+    init_from_bytes(tmp.path(), &certificate).unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    fs::rename(
+        tmp.path().join(SECRETS_DIR),
+        tmp.path().join("saved-secrets"),
+    )
+    .unwrap();
+    let config = fs::read(tmp.path().join(CONFIG_FILE)).unwrap();
+    let index = fs::read(tmp.path().join(INDEX_FILE)).unwrap();
+
+    let err = crate::config::deinit(tmp.path()).unwrap_err();
+    assert!(err.to_string().contains("store is in use"));
+    assert_eq!(fs::read(tmp.path().join(CONFIG_FILE)).unwrap(), config);
+    assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), index);
+    assert!(!tmp.path().join(".noirpass-lifecycle.lock").exists());
+    drop(store);
+    crate::config::deinit(tmp.path()).unwrap();
+    assert!(!tmp.path().join(INDEX_FILE).exists());
+    assert!(tmp.path().join("saved-secrets").is_dir());
+}
+
+#[test]
+fn incomplete_index_ownership_does_not_initialize_or_rewrite_data() {
+    let (certificate, _) = generated_recipient();
+    for bytes in [b"".as_slice(), b"corrupt index".as_slice()] {
+        let tmp = tempfile::tempdir().unwrap();
+        init_from_bytes(tmp.path(), &certificate).unwrap();
+        fs::write(tmp.path().join(INDEX_FILE), bytes).unwrap();
+        deinit_with_hooks(
+            tmp.path(),
+            || {},
+            || {
+                assert_eq!(fs::read(tmp.path().join(INDEX_FILE)).unwrap(), bytes);
+            },
+        )
+        .unwrap();
+        assert!(!tmp.path().join(INDEX_FILE).exists());
+        assert!(!tmp.path().join(CONFIG_FILE).exists());
+    }
+}
+
+#[test]
 fn emptied_child_replacement_is_preserved() {
     let tmp = tempfile::tempdir().unwrap();
     let root = crate::filesystem::Directory::open(tmp.path()).unwrap();

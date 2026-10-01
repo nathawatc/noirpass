@@ -48,7 +48,8 @@ hkdf = "0.13.0"
 libc = "0.2.189"
 num-bigint-dig = { version = "0.9.1", features = ["zeroize"] }
 rand = "0.10.2"
-redb = "4.1.0"
+# Range-lock API protects incomplete indexes without parsing or initializing them.
+redb = "4.3.0"
 sequoia-gpg-agent = "0.6.2"
 sequoia-openpgp = { version = "2.4.1", default-features = false, features = ["crypto-openssl"] }
 serde = { version = "1.0.229", features = ["derive"] }
