@@ -9,7 +9,7 @@ use super::super::Store;
 
 impl Store {
     pub(in crate::store) fn sync_secrets_dir(&self) -> Result<()> {
-        self.secrets_directory.sync_all()?;
+        self.sync_secrets_directory()?;
         Ok(())
     }
 

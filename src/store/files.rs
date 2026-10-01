@@ -11,7 +11,37 @@ use crate::error::{Error, Result};
 
 use super::Store;
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FileOperation {
+    Rename,
+    Remove,
+    Sync,
+}
+
 impl Store {
+    /// Fail selected calls on this store only; never affect concurrent fixtures.
+    #[cfg(test)]
+    fn inject_file_failure(&self, operation: FileOperation) -> io::Result<()> {
+        let mut failures = self.file_failures.lock().unwrap();
+        if let Some((next, remaining)) = failures.front_mut()
+            && *next == operation
+        {
+            *remaining -= 1;
+            if *remaining == 0 {
+                failures.pop_front();
+                return Err(io::Error::other(format!("injected {operation:?} failure")));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn sync_secrets_directory(&self) -> io::Result<()> {
+        #[cfg(test)]
+        self.inject_file_failure(FileOperation::Sync)?;
+        self.secrets_directory.sync_all()
+    }
+
     fn secret_entry<'a>(&self, path: &'a Path) -> io::Result<&'a Path> {
         if path.parent() != Some(self.secrets_dir.as_path()) {
             return Err(io::Error::new(
@@ -64,10 +94,14 @@ impl Store {
     }
 
     pub(super) fn remove_secret_file(&self, path: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        self.inject_file_failure(FileOperation::Remove)?;
         self.secrets_directory.remove(self.secret_entry(path)?)
     }
 
     pub(super) fn rename_secret_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        self.inject_file_failure(FileOperation::Rename)?;
         self.secrets_directory
             .rename(self.secret_entry(from)?, self.secret_entry(to)?)
     }

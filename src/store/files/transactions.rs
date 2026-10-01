@@ -86,7 +86,7 @@ impl Store {
         if let Err(sync_err) = self.sync_secrets_dir() {
             let rollback = self
                 .rename_secret_file(&backup, path)
-                .and_then(|()| self.secrets_directory.sync_all());
+                .and_then(|()| self.sync_secrets_directory());
             return match rollback {
                 Ok(()) => Err(sync_err),
                 Err(rollback_err) => self.poison_error(Error::Config(format!(
@@ -109,7 +109,7 @@ impl Store {
             Err(PersistError::Definite(err)) => {
                 let rollback = self
                     .rename_secret_file(&backup, path)
-                    .and_then(|()| self.secrets_directory.sync_all());
+                    .and_then(|()| self.sync_secrets_directory());
                 match rollback {
                     Ok(()) => Err(err),
                     Err(rollback_err) => self.poison_error(Error::Config(format!(
@@ -143,7 +143,7 @@ impl Store {
                 if let Err(sync_err) = self.sync_secrets_dir() {
                     let restore = self
                         .rename_secret_file(&quarantine, path)
-                        .and_then(|()| self.secrets_directory.sync_all());
+                        .and_then(|()| self.sync_secrets_directory());
                     return match restore {
                         Ok(()) => Err(sync_err),
                         Err(restore_err) => self.poison_error(Error::Config(format!(
@@ -181,7 +181,7 @@ impl Store {
             }
             Ok(value) => Ok(value),
             Err(PersistError::Definite(err)) if quarantined => match self.rename_secret_file(&quarantine, path)
-                .and_then(|()| self.secrets_directory.sync_all())
+                .and_then(|()| self.sync_secrets_directory())
             {
                 Ok(()) => Err(err),
                 Err(restore_err) => self.poison_error(Error::Config(format!(

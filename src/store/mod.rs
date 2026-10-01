@@ -58,6 +58,8 @@ pub struct Store {
     poisoned: AtomicBool,
     poison_changed: tokio::sync::Notify,
     transaction_gate: RwLock<()>,
+    #[cfg(test)]
+    file_failures: std::sync::Mutex<std::collections::VecDeque<(files::FileOperation, usize)>>,
 }
 
 enum PersistError {
@@ -316,6 +318,8 @@ impl Store {
             poisoned: AtomicBool::new(false),
             poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
+            #[cfg(test)]
+            file_failures: std::sync::Mutex::default(),
         })
     }
 
@@ -365,6 +369,8 @@ impl Store {
             poisoned: AtomicBool::new(false),
             poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
+            #[cfg(test)]
+            file_failures: std::sync::Mutex::default(),
         })
     }
 
