@@ -321,6 +321,46 @@ impl Collection {
     }
 }
 
+impl Collection {
+    async fn set_label_inner(
+        &self,
+        label: &str,
+        server: &ObjectServer,
+        connection: &zbus::Connection,
+    ) -> fdo::Result<()> {
+        let initial_id = self.resolve_id()?;
+        let lifecycle = self
+            .state
+            .lock_owned_collection_lifecycle(&initial_id)
+            .await;
+        let id = self.resolve_id()?;
+        if id != initial_id {
+            return Err(fdo::Error::Failed("collection alias changed; retry".into()));
+        }
+        if id == SESSION_COLLECTION_ID {
+            self.state
+                .set_session_collection_label(label)
+                .map_err(fdo::Error::from)?;
+        } else {
+            let collection_id = id.clone();
+            let label = label.to_string();
+            self.state
+                .blocking(Some(lifecycle.clone()), move |state| {
+                    Ok(state
+                        .store()
+                        .set_collection_label(&collection_id, &label)
+                        .map_err(fdo::Error::from))
+                })
+                .await
+                .map_err(|err| fdo::Error::Failed(err.to_string()))??;
+        }
+        emit_collection_label_modified(&self.state, server, connection, &id).await?;
+        let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;
+        Service::collection_changed(&emitter, collection_path(&id)).await?;
+        Ok(())
+    }
+}
+
 #[interface(name = "org.freedesktop.Secret.Collection")]
 impl Collection {
     /// Search this collection for items whose attributes are a superset of
@@ -508,27 +548,17 @@ impl Collection {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
-        let _activity = self.state.activity()?;
-        let initial_id = self.resolve_id()?;
-        let _lifecycle = self.state.lock_collection_lifecycle(&initial_id).await;
-        let id = self.resolve_id()?;
-        if id != initial_id {
-            return Err(fdo::Error::Failed("collection alias changed; retry".into()));
-        }
-        if id == SESSION_COLLECTION_ID {
-            self.state
-                .set_session_collection_label(label)
-                .map_err(fdo::Error::from)?;
-        } else {
-            self.state
-                .store()
-                .set_collection_label(&id, label)
-                .map_err(fdo::Error::from)?;
-        }
-        emit_collection_label_modified(&self.state, server, connection, &id).await?;
-        let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;
-        Service::collection_changed(&emitter, collection_path(&id)).await?;
-        Ok(())
+        let activity = self.state.activity()?;
+        let object = self.clone();
+        let label = label.to_string();
+        let server = server.clone();
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            let _activity = activity;
+            object.set_label_inner(&label, &server, &connection).await
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("collection metadata mutation failed".into()))?
     }
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).

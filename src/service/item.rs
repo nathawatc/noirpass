@@ -143,6 +143,109 @@ impl Item {
     }
 }
 
+impl Item {
+    #[cfg(test)]
+    pub(crate) async fn set_label_for_test(
+        &self,
+        label: &str,
+        connection: &zbus::Connection,
+    ) -> fdo::Result<()> {
+        self.set_label(label, connection).await
+    }
+
+    async fn delete_inner(
+        &self,
+        server: &ObjectServer,
+        connection: &zbus::Connection,
+    ) -> Result<OwnedObjectPath, SecretError> {
+        let lifecycle = self
+            .state
+            .lock_owned_collection_lifecycle(&self.collection_id)
+            .await;
+        if self.collection_id == SESSION_COLLECTION_ID {
+            self.state.delete_session_item(&self.id)?;
+        } else {
+            let id = self.id.clone();
+            self.state
+                .blocking(Some(lifecycle.clone()), move |state| {
+                    Ok(state.store().delete_item(&id)?)
+                })
+                .await?;
+        }
+
+        object_removed_or_absent(server.remove::<Self, _>(&self.path()).await)
+            .map_err(SecretError::ZBus)?;
+
+        // ItemDeleted is a Collection signal, emitted from the collection path.
+        let emitter = SignalEmitter::new(connection, collection_path(&self.collection_id))
+            .map_err(SecretError::ZBus)?;
+        Collection::item_deleted(&emitter, self.path())
+            .await
+            .map_err(SecretError::ZBus)?;
+        // Refresh client-side caches of the collection's `Items` property.
+        emit_collection_items_changed(&self.state, server, connection, &self.collection_id)
+            .await
+            .map_err(SecretError::from)?;
+        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
+
+        Ok(no_prompt())
+    }
+
+    /// Complete metadata persistence and signals even after caller cancellation.
+    async fn update_metadata(
+        &self,
+        label: Option<String>,
+        attributes: Option<HashMap<String, String>>,
+        connection: &zbus::Connection,
+    ) -> fdo::Result<()> {
+        let activity = self.state.activity()?;
+        let object = self.clone();
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            let _activity = activity;
+            let lifecycle = object
+                .state
+                .lock_owned_collection_lifecycle(&object.collection_id)
+                .await;
+            let relabel = label.is_some();
+            if object.collection_id == SESSION_COLLECTION_ID {
+                object
+                    .state
+                    .update_session_item(&object.id, label.as_deref(), attributes, None, None)
+                    .map_err(fdo::Error::from)?;
+            } else {
+                let id = object.id.clone();
+                object
+                    .state
+                    .blocking(Some(lifecycle.clone()), move |state| {
+                        Ok(state
+                            .store()
+                            .update_item(&id, label.as_deref(), attributes, None, None)
+                            .map_err(fdo::Error::from))
+                    })
+                    .await
+                    .map_err(|err| fdo::Error::Failed(err.to_string()))??;
+            }
+            let path = object.path();
+            let item_emitter = SignalEmitter::new(&connection, path.clone())?;
+            let collection_emitter =
+                SignalEmitter::new(&connection, collection_path(&object.collection_id))?;
+            if relabel {
+                object.emit_label_changed(&item_emitter).await?;
+            } else {
+                object.emit_attributes_changed(&item_emitter).await?;
+            }
+            object.modified_changed(&item_emitter).await?;
+            Collection::item_changed(&collection_emitter, path).await?;
+            emit_session_collection_modified(&object.state, &connection, &object.collection_id)
+                .await?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("item metadata mutation failed".into()))?
+    }
+}
+
 #[interface(name = "org.freedesktop.Secret.Item")]
 impl Item {
     /// Retrieve the secret, decrypted via `gpg-agent` and encoded for the
@@ -208,33 +311,16 @@ impl Item {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self
-            .state
-            .lock_collection_lifecycle(&self.collection_id)
-            .await;
-        if self.collection_id == SESSION_COLLECTION_ID {
-            self.state.delete_session_item(&self.id)?;
-        } else {
-            self.state.store().delete_item(&self.id)?;
-        }
-
-        object_removed_or_absent(server.remove::<Self, _>(&self.path()).await)
-            .map_err(SecretError::ZBus)?;
-
-        // ItemDeleted is a Collection signal, emitted from the collection path.
-        let emitter = SignalEmitter::new(connection, collection_path(&self.collection_id))
-            .map_err(SecretError::ZBus)?;
-        Collection::item_deleted(&emitter, self.path())
-            .await
-            .map_err(SecretError::ZBus)?;
-        // Refresh client-side caches of the collection's `Items` property.
-        emit_collection_items_changed(&self.state, server, connection, &self.collection_id)
-            .await
-            .map_err(SecretError::from)?;
-        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
-
-        Ok(no_prompt())
+        let activity = self.state.activity()?;
+        let object = self.clone();
+        let server = server.clone();
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            let _activity = activity;
+            object.delete_inner(&server, &connection).await
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("item deletion failed".into()))?
     }
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).
@@ -268,31 +354,8 @@ impl Item {
         attributes: HashMap<String, String>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self
-            .state
-            .lock_collection_lifecycle(&self.collection_id)
-            .await;
-        if self.collection_id == SESSION_COLLECTION_ID {
-            self.state
-                .update_session_item(&self.id, None, Some(attributes), None, None)
-                .map_err(fdo::Error::from)?;
-        } else {
-            self.state
-                .store()
-                .update_item(&self.id, None, Some(attributes), None, None)
-                .map_err(fdo::Error::from)?;
-        }
-
-        let item_path = self.path();
-        let item_emitter = SignalEmitter::new(connection, item_path.clone())?;
-        let collection_emitter =
-            SignalEmitter::new(connection, collection_path(&self.collection_id))?;
-        self.emit_attributes_changed(&item_emitter).await?;
-        self.modified_changed(&item_emitter).await?;
-        Collection::item_changed(&collection_emitter, item_path).await?;
-        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
-        Ok(())
+        self.update_metadata(None, Some(attributes), connection)
+            .await
     }
 
     /// Human-readable label.
@@ -319,31 +382,8 @@ impl Item {
         label: &str,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self
-            .state
-            .lock_collection_lifecycle(&self.collection_id)
-            .await;
-        if self.collection_id == SESSION_COLLECTION_ID {
-            self.state
-                .update_session_item(&self.id, Some(label), None, None, None)
-                .map_err(fdo::Error::from)?;
-        } else {
-            self.state
-                .store()
-                .update_item(&self.id, Some(label), None, None, None)
-                .map_err(fdo::Error::from)?;
-        }
-
-        let item_path = self.path();
-        let item_emitter = SignalEmitter::new(connection, item_path.clone())?;
-        let collection_emitter =
-            SignalEmitter::new(connection, collection_path(&self.collection_id))?;
-        self.emit_label_changed(&item_emitter).await?;
-        self.modified_changed(&item_emitter).await?;
-        Collection::item_changed(&collection_emitter, item_path).await?;
-        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
-        Ok(())
+        self.update_metadata(Some(label.to_string()), None, connection)
+            .await
     }
 
     /// Creation time, seconds since the Unix epoch.
