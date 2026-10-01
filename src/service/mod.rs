@@ -229,8 +229,7 @@ impl Service {
         let state = self.state.clone();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(async move {
-            let _activity = activity;
+        tokio::spawn(activity.run(async move {
             let path =
                 register_session_object_with(&server, &state, cipher, owner.clone(), rand::random)
                     .await?;
@@ -244,7 +243,7 @@ impl Service {
                 validate_session_owner(&server, &state, &path, &owner, presence).await?;
             }
             Ok((output, path))
-        })
+        }))
         .await
         .map_err(|_| fdo::Error::Failed("session registration failed".into()))?
     }
@@ -266,12 +265,11 @@ impl Service {
         let alias = alias.to_string();
         let server = server.clone();
         let emitter = emitter.into_owned();
-        tokio::spawn(async move {
-            let _activity = activity;
+        tokio::spawn(activity.run(async move {
             object
                 .create_collection_inner(properties, &alias, &server, &emitter)
                 .await
-        })
+        }))
         .await
         .map_err(|_| fdo::Error::Failed("collection creation failed".into()))?
     }
@@ -287,23 +285,27 @@ impl Service {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
-        let _activity = self.state.request(&attributes)?;
-        let query = attributes.clone();
-        let mut unlocked: Vec<_> = self
-            .state
-            .blocking(None, move |state| Ok(state.store().search_items(&query)?))
-            .await
-            .map_err(|err| fdo::Error::Failed(err.to_string()))?
-            .into_iter()
-            .map(|meta| item_path(&meta.collection, &meta.id))
-            .collect();
-        unlocked.extend(
-            self.state
-                .search_session_items(&attributes)
+        let activity = self.state.request(&attributes)?;
+        let state = self.state.clone();
+        tokio::spawn(activity.run(async move {
+            let query = attributes.clone();
+            let mut unlocked: Vec<_> = state
+                .blocking(None, move |state| Ok(state.store().search_items(&query)?))
+                .await
+                .map_err(|err| fdo::Error::Failed(err.to_string()))?
                 .into_iter()
-                .map(|meta| item_path(&meta.collection, &meta.id)),
-        );
-        Ok((unlocked, Vec::new()))
+                .map(|meta| item_path(&meta.collection, &meta.id))
+                .collect();
+            unlocked.extend(
+                state
+                    .search_session_items(&attributes)
+                    .into_iter()
+                    .map(|meta| item_path(&meta.collection, &meta.id)),
+            );
+            Ok((unlocked, Vec::new()))
+        }))
+        .await
+        .map_err(|_| fdo::Error::Failed("item search failed".into()))?
     }
 
     /// Unlock objects. Everything is already unlocked, so all inputs are
@@ -341,46 +343,51 @@ impl Service {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, Secret>, SecretError> {
-        let _activity = self.state.request(&(&items, &session))?;
-        let owner = message_sender(&header)?;
-        if self.state.session_cipher(&session, &owner).is_none() {
-            return Err(SecretError::NoSession(format!("no session {session}")));
-        }
-
-        let mut out = HashMap::new();
-        // Dictionary array length plus padding before its first entry.
-        let mut retained_bytes = 8;
-        // Four in-flight items per request; the shared worker pool also bounds all callers.
-        // Drain each batch in input order so repeated paths retain their last result.
-        for batch in items.chunks(MAX_BLOCKING_WORKERS) {
-            let mut tasks = tokio::task::JoinSet::new();
-            for (index, path) in batch.iter().cloned().enumerate() {
-                let state = self.state.clone();
-                let session = session.clone();
-                let owner = owner.clone();
-                tasks.spawn(async move {
-                    let result = state
-                        .secret_for_item_path(&path, &session, &owner)
-                        .await
-                        .map(|secret| secret.map(|secret| (path, secret)));
-                    (index, result)
-                });
-            }
-            let mut results = Vec::with_capacity(batch.len());
-            while let Some(result) = tasks.join_next().await {
-                results.push(
-                    result
-                        .map_err(|_| fdo::Error::Failed("secret retrieval task failed".into()))?,
-                );
-            }
-            results.sort_by_key(|(index, _)| *index);
-            for (_, result) in results {
-                if let Some((path, secret)) = result? {
-                    insert_bulk_secret(&mut out, &mut retained_bytes, path, secret)?;
+        let activity = self.state.request(&(&items, &session))?;
+        activity
+            .clone()
+            .run(async {
+                let owner = message_sender(&header)?;
+                if self.state.session_cipher(&session, &owner).is_none() {
+                    return Err(SecretError::NoSession(format!("no session {session}")));
                 }
-            }
-        }
-        Ok(out)
+
+                let mut out = HashMap::new();
+                // Dictionary array length plus padding before its first entry.
+                let mut retained_bytes = 8;
+                // Four in-flight items per request; the shared worker pool also bounds all callers.
+                // Drain each batch in input order so repeated paths retain their last result.
+                for batch in items.chunks(MAX_BLOCKING_WORKERS) {
+                    let mut tasks = tokio::task::JoinSet::new();
+                    for (index, path) in batch.iter().cloned().enumerate() {
+                        let state = self.state.clone();
+                        let session = session.clone();
+                        let owner = owner.clone();
+                        let request = activity.clone();
+                        tasks.spawn(request.run(async move {
+                            let result = state
+                                .secret_for_item_path(&path, &session, &owner)
+                                .await
+                                .map(|secret| secret.map(|secret| (path, secret)));
+                            (index, result)
+                        }));
+                    }
+                    let mut results = Vec::with_capacity(batch.len());
+                    while let Some(result) = tasks.join_next().await {
+                        results.push(result.map_err(|_| {
+                            fdo::Error::Failed("secret retrieval task failed".into())
+                        })?);
+                    }
+                    results.sort_by_key(|(index, _)| *index);
+                    for (_, result) in results {
+                        if let Some((path, secret)) = result? {
+                            insert_bulk_secret(&mut out, &mut retained_bytes, path, secret)?;
+                        }
+                    }
+                }
+                Ok(out)
+            })
+            .await
     }
 
     /// Resolve an alias to a collection path. Unknown aliases return `/`.
@@ -417,12 +424,11 @@ impl Service {
         let name = name.to_string();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(async move {
-            let _activity = activity;
+        tokio::spawn(activity.run(async move {
             object
                 .set_alias_inner(&name, collection, &server, &connection)
                 .await
-        })
+        }))
         .await
         .map_err(|_| fdo::Error::Failed("alias mutation failed".into()))?
     }

@@ -4,6 +4,8 @@
 //! persistence and publication. Namespace changes take the exclusive guard, preserving alias
 //! targets and collection deletion ordering without serializing unrelated item mutations.
 //! Persistent mutations reserve blocking capacity first; temporary mutations need no worker slot.
+//! Owned tasks carry request admission through shutdown draining so internal workers and signal
+//! property reads can finish while new application handlers remain rejected.
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::{Arc, Mutex, Weak};
@@ -170,9 +172,20 @@ pub(crate) struct ActivityGuard {
 
 /// Retain request capacity through an admitted handler or owned mutation task.
 pub(crate) struct RequestGuard {
-    _activity: ActivityGuard,
+    activity: ActivityGuard,
     _slot: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
+}
+
+tokio::task_local! {
+    // Only an admitted request may continue internal work during shutdown.
+    static ADMITTED_REQUEST: Arc<RequestGuard>;
+}
+
+impl RequestGuard {
+    pub(crate) async fn run<F: std::future::Future>(self: Arc<Self>, future: F) -> F::Output {
+        ADMITTED_REQUEST.scope(self, future).await
+    }
 }
 
 impl Drop for ActivityGuard {
@@ -246,7 +259,7 @@ impl ServiceState {
     }
 
     /// Admit work without building an unbounded queue of client-owned arguments.
-    pub(crate) fn request<T>(self: &Arc<Self>, input: &T) -> fdo::Result<RequestGuard>
+    pub(crate) fn request<T>(self: &Arc<Self>, input: &T) -> fdo::Result<Arc<RequestGuard>>
     where
         T: ?Sized + serde::Serialize + zbus::zvariant::DynamicType,
     {
@@ -270,11 +283,11 @@ impl ServiceState {
             .clone()
             .try_acquire_many_owned(bytes)
             .map_err(|_| limit())?;
-        Ok(RequestGuard {
-            _activity: activity,
+        Ok(Arc::new(RequestGuard {
+            activity,
             _slot: slot,
             _bytes: bytes,
-        })
+        }))
     }
 
     /// The metadata/secret store.
@@ -339,9 +352,10 @@ impl ServiceState {
         } else {
             None // MutationGuard already reserved capacity before acquiring the lifecycle lock.
         };
+        let request = ADMITTED_REQUEST.try_with(Arc::clone).ok();
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
-            let (_activity, _permit, _lifecycle) = (activity, permit, lifecycle);
+            let (_activity, _permit, _lifecycle, _request) = (activity, permit, lifecycle, request);
             operation(&state)
         })
         .await
@@ -386,7 +400,10 @@ impl ServiceState {
     /// Track one D-Bus method until its handler returns.
     pub(crate) fn activity(self: &Arc<Self>) -> fdo::Result<ActivityGuard> {
         let mut activity = self.activity.lock().expect("activity lock poisoned");
-        if activity.shutting_down {
+        let admitted = ADMITTED_REQUEST
+            .try_with(|request| Arc::ptr_eq(&request.activity.state, self))
+            .unwrap_or(false);
+        if activity.shutting_down && !admitted {
             return Err(fdo::Error::Failed("service is shutting down".into()));
         }
         activity.active_calls += 1;

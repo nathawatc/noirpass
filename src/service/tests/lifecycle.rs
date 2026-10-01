@@ -121,65 +121,77 @@ async fn cancelled_metadata_waiter_finishes_update_and_signals() {
     use std::future::Future;
 
     let gnupg = TestGnupg::new();
-    let tmp = tempfile::tempdir().unwrap();
-    let state = test_state(&gnupg, tmp.path());
-    let id = crate::store::DEFAULT_COLLECTION_ID;
-    let meta = state
-        .store()
-        .create_item(id, "old", HashMap::new(), "text/plain", b"opaque")
+    for shutting_down in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let id = crate::store::DEFAULT_COLLECTION_ID;
+        let meta = state
+            .store()
+            .create_item(id, "old", HashMap::new(), "text/plain", b"opaque")
+            .unwrap();
+        let (server, client) = p2p_pair(state.clone()).await;
+        super::super::register_existing(server.object_server(), &state)
+            .await
+            .unwrap();
+        let object = Item::new(state.clone(), id.into(), meta.id.clone());
+        // P2P signals have no bus-assigned sender; match the interface/path directly.
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.freedesktop.Secret.Collection")
+            .unwrap()
+            .member("ItemChanged")
+            .unwrap()
+            .path(collection_path(id))
+            .unwrap()
+            .build();
+        let mut signals = zbus::MessageStream::for_match_rule(rule, &client, None)
+            .await
+            .unwrap();
+        let lifecycle = state.lock_collection_lifecycle(id).await;
+        {
+            let update = object.set_label_for_test("new", &server);
+            tokio::pin!(update);
+            std::future::poll_fn(|context| {
+                assert!(update.as_mut().poll(context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        assert_eq!(state.store().get_item(&meta.id).unwrap().label, "old");
+        if shutting_down {
+            state.begin_shutdown();
+            assert!(state.activity().is_err());
+        }
+        drop(lifecycle);
+        tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
+            .await
+            .unwrap();
+        let signal = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::next_stream_item(&mut signals),
+        )
+        .await
+        .unwrap()
+        .unwrap()
         .unwrap();
-    let (server, client) = p2p_pair(state.clone()).await;
-    super::super::register_existing(server.object_server(), &state)
+        let (changed_path,): (zbus::zvariant::OwnedObjectPath,) =
+            signal.body().deserialize().unwrap();
+        assert_eq!(changed_path, item_path(id, &meta.id));
+        let proxy = zbus::Proxy::new(
+            &client,
+            ":1.0",
+            item_path(id, &meta.id),
+            "org.freedesktop.Secret.Item",
+        )
         .await
         .unwrap();
-    let object = Item::new(state.clone(), id.into(), meta.id.clone());
-    // P2P signals have no bus-assigned sender; match the interface/path directly.
-    let rule = zbus::MatchRule::builder()
-        .msg_type(zbus::message::Type::Signal)
-        .interface("org.freedesktop.Secret.Collection")
-        .unwrap()
-        .member("ItemChanged")
-        .unwrap()
-        .path(collection_path(id))
-        .unwrap()
-        .build();
-    let mut signals = zbus::MessageStream::for_match_rule(rule, &client, None)
-        .await
-        .unwrap();
-    let lifecycle = state.lock_collection_lifecycle(id).await;
-    {
-        let update = object.set_label_for_test("new", &server);
-        tokio::pin!(update);
-        std::future::poll_fn(|context| {
-            assert!(update.as_mut().poll(context).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
+        assert_eq!(state.store().get_item(&meta.id).unwrap().label, "new");
+        if shutting_down {
+            assert!(proxy.get_property::<String>("Label").await.is_err());
+        } else {
+            assert_eq!(proxy.get_property::<String>("Label").await.unwrap(), "new");
+        }
     }
-    assert_eq!(state.store().get_item(&meta.id).unwrap().label, "old");
-    drop(lifecycle);
-    tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
-        .await
-        .unwrap();
-    let signal = tokio::time::timeout(
-        Duration::from_secs(2),
-        super::next_stream_item(&mut signals),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .unwrap();
-    let (changed_path,): (zbus::zvariant::OwnedObjectPath,) = signal.body().deserialize().unwrap();
-    assert_eq!(changed_path, item_path(id, &meta.id));
-    let proxy = zbus::Proxy::new(
-        &client,
-        ":1.0",
-        item_path(id, &meta.id),
-        "org.freedesktop.Secret.Item",
-    )
-    .await
-    .unwrap();
-    assert_eq!(proxy.get_property::<String>("Label").await.unwrap(), "new");
 }
 
 #[tokio::test]

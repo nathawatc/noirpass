@@ -207,8 +207,7 @@ impl Item {
         let label = label.map(str::to_owned);
         let object = self.clone();
         let connection = connection.clone();
-        tokio::spawn(async move {
-            let _activity = activity;
+        tokio::spawn(activity.run(async move {
             let lifecycle = object
                 .state
                 .lock_owned_collection_lifecycle(&object.collection_id)
@@ -246,7 +245,7 @@ impl Item {
             emit_session_collection_modified(&object.state, &connection, &object.collection_id)
                 .await?;
             Ok(())
-        })
+        }))
         .await
         .map_err(|_| fdo::Error::Failed("item metadata mutation failed".into()))?
     }
@@ -262,18 +261,26 @@ impl Item {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(Secret,), SecretError> {
-        let _activity = self.state.request(&session)?;
-        let owner = message_sender(&header)?;
-        let secret = if self.collection_id == SESSION_COLLECTION_ID {
-            let (meta, plaintext) = self.state.read_session_item_secret(&self.id)?;
-            self.state
-                .plaintext_to_secret(&session, &plaintext, &meta.content_type, &owner)?
-        } else {
-            self.state
-                .persistent_secret(&self.collection_id, &self.id, &session, &owner, None)
-                .await?
-        };
-        Ok((secret,))
+        let activity = self.state.request(&session)?;
+        activity
+            .run(async {
+                let owner = message_sender(&header)?;
+                let secret = if self.collection_id == SESSION_COLLECTION_ID {
+                    let (meta, plaintext) = self.state.read_session_item_secret(&self.id)?;
+                    self.state.plaintext_to_secret(
+                        &session,
+                        &plaintext,
+                        &meta.content_type,
+                        &owner,
+                    )?
+                } else {
+                    self.state
+                        .persistent_secret(&self.collection_id, &self.id, &session, &owner, None)
+                        .await?
+                };
+                Ok((secret,))
+            })
+            .await
     }
 
     /// Replace the secret value (and content type) of this item.
@@ -292,10 +299,9 @@ impl Item {
         let object = self.clone();
         let connection = connection.clone();
         // Once admitted, finish commit, object publication, and signals even if the caller leaves.
-        tokio::spawn(async move {
-            let _activity = activity;
-            object.set_secret_inner(secret, &owner, &connection).await
-        })
+        tokio::spawn(
+            activity.run(async move { object.set_secret_inner(secret, &owner, &connection).await }),
+        )
         .await
         .map_err(|_| fdo::Error::Failed("secret mutation failed".into()))?
     }
@@ -311,12 +317,9 @@ impl Item {
         let object = self.clone();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(async move {
-            let _activity = activity;
-            object.delete_inner(&server, &connection).await
-        })
-        .await
-        .map_err(|_| fdo::Error::Failed("item deletion failed".into()))?
+        tokio::spawn(activity.run(async move { object.delete_inner(&server, &connection).await }))
+            .await
+            .map_err(|_| fdo::Error::Failed("item deletion failed".into()))?
     }
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).

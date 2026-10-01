@@ -726,8 +726,10 @@ async fn cancelled_blocking_waiter_retains_mutation_lock_and_activity() {
         };
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let payload = "x".repeat(MAX_PENDING_REQUEST_BYTES as usize - 5);
+        let request = state.request(payload.as_str()).unwrap();
         let worker_state = state.clone();
-        let waiter = tokio::spawn(async move {
+        let waiter = tokio::spawn(request.run(async move {
             worker_state
                 .blocking(Some(lifecycle), move |_| {
                     started_tx.send(()).unwrap();
@@ -735,7 +737,7 @@ async fn cancelled_blocking_waiter_retains_mutation_lock_and_activity() {
                     Ok(())
                 })
                 .await
-        });
+        }));
         started_rx.await.unwrap();
         waiter.abort();
         assert!(waiter.await.unwrap_err().is_cancelled());
@@ -744,6 +746,10 @@ async fn cancelled_blocking_waiter_retains_mutation_lock_and_activity() {
                 .await
                 .is_err()
         );
+        assert!(matches!(
+            state.request(&0u8),
+            Err(zbus::fdo::Error::LimitsExceeded(_))
+        ));
         state.begin_shutdown();
         assert!(
             tokio::time::timeout(Duration::from_millis(50), state.wait_for_active_calls())
@@ -756,4 +762,37 @@ async fn cancelled_blocking_waiter_retains_mutation_lock_and_activity() {
             .unwrap();
         drop(state.lock_object_lifecycle().await);
     }
+}
+
+#[tokio::test]
+async fn cancelled_search_retains_request_capacity_until_worker_completion() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let mut workers = Vec::new();
+    for i in 0..MAX_BLOCKING_WORKERS {
+        workers.push(
+            state
+                .lock_owned_collection_lifecycle(&format!("busy{i}"))
+                .await,
+        );
+    }
+    let requests: Vec<_> = (0..MAX_PENDING_REQUESTS - 1)
+        .map(|_| state.request(&0u8).unwrap())
+        .collect();
+    let object = super::super::Service::new(state.clone());
+    super::support::admit_then_cancel(
+        object.search_items(HashMap::from([("attribute".into(), "value".into())])),
+    )
+    .await;
+    assert!(matches!(
+        state.request(&0u8),
+        Err(zbus::fdo::Error::LimitsExceeded(_))
+    ));
+    drop(workers);
+    drop(requests);
+    tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
+        .await
+        .unwrap();
+    drop(state.request(&0u8).unwrap());
 }

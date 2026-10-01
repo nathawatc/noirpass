@@ -450,22 +450,28 @@ impl Collection {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
-        let _activity = self.state.request(&attributes)?;
-        let id = self.resolve_id()?;
-        let items = if id == SESSION_COLLECTION_ID {
-            self.state.search_session_items(&attributes)
-        } else {
-            self.state
-                .blocking(None, move |state| {
-                    Ok(state.store().search_collection_items(&id, &attributes)?)
-                })
-                .await
-                .map_err(|err| fdo::Error::Failed(err.to_string()))?
-        };
-        Ok(items
-            .into_iter()
-            .map(|meta| item_path(&meta.collection, &meta.id))
-            .collect())
+        let activity = self.state.request(&attributes)?;
+        let object = self.clone();
+        tokio::spawn(activity.run(async move {
+            let id = object.resolve_id()?;
+            let items = if id == SESSION_COLLECTION_ID {
+                object.state.search_session_items(&attributes)
+            } else {
+                object
+                    .state
+                    .blocking(None, move |state| {
+                        Ok(state.store().search_collection_items(&id, &attributes)?)
+                    })
+                    .await
+                    .map_err(|err| fdo::Error::Failed(err.to_string()))?
+            };
+            Ok(items
+                .into_iter()
+                .map(|meta| item_path(&meta.collection, &meta.id))
+                .collect())
+        }))
+        .await
+        .map_err(|_| fdo::Error::Failed("collection search failed".into()))?
     }
 
     /// Create (or replace) an item in this collection.
@@ -493,12 +499,11 @@ impl Collection {
         let server = server.clone();
         let connection = connection.clone();
         // Once admitted, finish commit, object publication, and signals even if the caller leaves.
-        tokio::spawn(async move {
-            let _activity = activity;
+        tokio::spawn(activity.run(async move {
             object
                 .create_item_inner(properties, secret, replace, &server, &connection, &owner)
                 .await
-        })
+        }))
         .await
         .map_err(|_| fdo::Error::Failed("secret mutation failed".into()))?
     }
@@ -518,12 +523,9 @@ impl Collection {
         let object = self.clone();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(async move {
-            let _activity = activity;
-            object.delete_inner(&server, &connection).await
-        })
-        .await
-        .map_err(|_| fdo::Error::Failed("collection deletion failed".into()))?
+        tokio::spawn(activity.run(async move { object.delete_inner(&server, &connection).await }))
+            .await
+            .map_err(|_| fdo::Error::Failed("collection deletion failed".into()))?
     }
 
     /// Object paths of the items in this collection.
@@ -575,10 +577,9 @@ impl Collection {
         let label = label.to_string();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(async move {
-            let _activity = activity;
-            object.set_label_inner(&label, &server, &connection).await
-        })
+        tokio::spawn(
+            activity.run(async move { object.set_label_inner(&label, &server, &connection).await }),
+        )
         .await
         .map_err(|_| fdo::Error::Failed("collection metadata mutation failed".into()))?
     }
