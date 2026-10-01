@@ -73,14 +73,15 @@ Startup order is observable security behavior:
 5. Bootstrap the default collection.
 6. Verify recipient secret-key access through the GPG-agent boundary.
 7. Build/register the complete Secret Service object tree.
-8. Claim `org.freedesktop.secrets` only after registration completes.
+8. Complete the client `NameOwnerChanged` subscription; failure aborts startup.
+9. Claim `org.freedesktop.secrets` only after registration and subscription complete.
 
-The daemon must honor D-Bus/systemd activation assumptions in `systemd/`; do not claim the well-known
-name before persisted collections, items, and aliases are registered. SIGINT and SIGTERM release the
-name and terminate gracefully. Idle shutdown is allowed only when configured inactivity has elapsed,
-there are no sessions, and no Noirpass application handler is active; new application calls fail once
-shutdown admission closes. Service-layer synchronization details belong to
-[`../service/AGENTS.md`](../service/AGENTS.md).
+The daemon must honor D-Bus/systemd activation assumptions in `systemd/`; do not claim the
+well-known name before persisted collections, items, and aliases are registered. SIGINT and SIGTERM
+release the name and terminate gracefully. Idle shutdown is allowed only when configured inactivity
+has elapsed, there are no sessions or temporary items, and no Noirpass application handler is
+active; new application calls fail once shutdown admission closes. Service-layer synchronization
+details belong to [`../service/AGENTS.md`](../service/AGENTS.md).
 
 ## Boundaries
 

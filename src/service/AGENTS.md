@@ -26,7 +26,10 @@ Serve the Secret Service tree at:
   another reusable identity. Foreign sessions fail closed for secret access, item creation/update,
   secret retrieval, and close operations.
 - Subscribe to `NameOwnerChanged` and remove all sessions owned by vanished unique senders; clients
-  often do not call `Session.Close`.
+  often do not call `Session.Close`. Complete the subscription before publishing the well-known
+  service name. Session registration runs as an owned task; after object registration, check
+  `NameHasOwner` on message-bus connections to catch disconnects processed before map insertion.
+  A false result or failed presence query removes both the session map entry and D-Bus object.
 - Service, Collection, Item, Session, and alias objects must expose only state authorized by their
   owning store/session boundary. Alias-backed collections resolve their persisted target per call;
   valid alias paths are registered and invalid-path aliases remain usable through alias methods but

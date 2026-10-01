@@ -208,6 +208,8 @@ the user chooses the session-only password option.
 
 Temporary items keep the daemon alive past `idle_exit`. Deleting the item, stopping Noirpass, or
 ending the graphical login session clears the secret.
+Temporary items are independent of a client's transport session; disconnecting the client does not
+delete them.
 
 Temporary item operations can continue while persistent secret workers are busy. Collection
 creation/deletion and alias changes still serialize with active mutations.
