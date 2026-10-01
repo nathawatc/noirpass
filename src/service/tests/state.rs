@@ -8,13 +8,52 @@ use zeroize::Zeroizing;
 
 use super::super::SecretError;
 use super::super::state::{
-    MAX_BLOCKING_WORKERS, MAX_SESSION_ALIAS_BYTES, MAX_SESSION_ALIASES, MAX_SESSION_ATTRIBUTES,
-    MAX_SESSION_BYTES, MAX_SESSION_ITEMS, MAX_SESSION_METADATA_BYTES, MAX_SESSION_SECRET_BYTES,
-    MAX_SESSION_STRING_BYTES, MAX_TRANSPORT_SESSIONS, MAX_TRANSPORT_SESSIONS_PER_OWNER,
-    SESSION_ALLOCATION_ATTEMPTS, session_item_bytes,
+    MAX_BLOCKING_WORKERS, MAX_PENDING_REQUEST_BYTES, MAX_PENDING_REQUESTS, MAX_SESSION_ALIAS_BYTES,
+    MAX_SESSION_ALIASES, MAX_SESSION_ATTRIBUTES, MAX_SESSION_BYTES, MAX_SESSION_ITEMS,
+    MAX_SESSION_METADATA_BYTES, MAX_SESSION_SECRET_BYTES, MAX_SESSION_STRING_BYTES,
+    MAX_TRANSPORT_SESSIONS, MAX_TRANSPORT_SESSIONS_PER_OWNER, SESSION_ALLOCATION_ATTEMPTS,
+    session_item_bytes,
 };
 use super::super::{DhHandshake, SessionCipher, session_path};
 use super::test_state;
+
+#[test]
+fn request_count_and_payload_limits_release_capacity() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let mut requests: Vec<_> = (0..MAX_PENDING_REQUESTS)
+        .map(|_| state.request(&0u8).unwrap())
+        .collect();
+    assert!(matches!(
+        state.request(&0u8),
+        Err(zbus::fdo::Error::LimitsExceeded(_))
+    ));
+    // Internal activity must remain available for workers and publication.
+    drop(state.activity().unwrap());
+    drop(requests.pop());
+    drop(state.request(&0u8).unwrap());
+    drop(requests);
+
+    // D-Bus strings encode a four-byte length and one trailing NUL.
+    let payload = "x".repeat(MAX_PENDING_REQUEST_BYTES as usize - 5);
+    let request = state.request(payload.as_str()).unwrap();
+    assert!(matches!(
+        state.request(""),
+        Err(zbus::fdo::Error::LimitsExceeded(_))
+    ));
+    drop(request);
+    let oversized = "x".repeat(MAX_PENDING_REQUEST_BYTES as usize);
+    for _ in 0..=MAX_PENDING_REQUESTS {
+        assert!(matches!(
+            state.request(oversized.as_str()),
+            Err(zbus::fdo::Error::LimitsExceeded(_))
+        ));
+    }
+    // Failed byte admission releases its request slot and activity guard.
+    drop(state.request("").unwrap());
+    assert!(state.try_begin_idle_shutdown(0));
+}
 
 #[test]
 fn transport_session_limits_release_capacity_on_close_and_disconnect() {

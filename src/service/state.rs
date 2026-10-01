@@ -34,6 +34,10 @@ pub(super) const MAX_TRANSPORT_SESSIONS_PER_OWNER: usize = 64;
 /// Share a fixed worker budget across encryption, storage, and agent decryption.
 pub(super) const MAX_BLOCKING_WORKERS: usize = 4;
 
+/// Bound application work retained while waiting for workers or lifecycle guards.
+pub(super) const MAX_PENDING_REQUESTS: usize = 64;
+pub(super) const MAX_PENDING_REQUEST_BYTES: u32 = 32 * 1024 * 1024;
+
 /// Bound retries for temporary item identifiers for the same reason as session paths.
 const SESSION_ITEM_ALLOCATION_ATTEMPTS: usize = 128;
 
@@ -164,6 +168,13 @@ pub(crate) struct ActivityGuard {
     state: Arc<ServiceState>,
 }
 
+/// Retain request capacity through an admitted handler or owned mutation task.
+pub(crate) struct RequestGuard {
+    _activity: ActivityGuard,
+    _slot: OwnedSemaphorePermit,
+    _bytes: OwnedSemaphorePermit,
+}
+
 impl Drop for ActivityGuard {
     fn drop(&mut self) {
         let notify = {
@@ -206,6 +217,8 @@ pub struct ServiceState {
     object_lifecycle: Arc<AsyncRwLock<()>>,
     collection_lifecycle: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     blocking_slots: Arc<Semaphore>,
+    request_slots: Arc<Semaphore>,
+    request_bytes: Arc<Semaphore>,
 }
 
 impl ServiceState {
@@ -227,6 +240,40 @@ impl ServiceState {
             object_lifecycle: Arc::new(AsyncRwLock::new(())),
             collection_lifecycle: Mutex::new(HashMap::new()),
             blocking_slots: Arc::new(Semaphore::new(MAX_BLOCKING_WORKERS)),
+            request_slots: Arc::new(Semaphore::new(MAX_PENDING_REQUESTS)),
+            request_bytes: Arc::new(Semaphore::new(MAX_PENDING_REQUEST_BYTES as usize)),
+        })
+    }
+
+    /// Admit work without building an unbounded queue of client-owned arguments.
+    pub(crate) fn request<T>(self: &Arc<Self>, input: &T) -> fdo::Result<RequestGuard>
+    where
+        T: ?Sized + serde::Serialize + zbus::zvariant::DynamicType,
+    {
+        let activity = self.activity()?;
+        let limit = || fdo::Error::LimitsExceeded("request capacity exhausted; retry later".into());
+        let slot = self
+            .request_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| limit())?;
+        // Size calculation writes to a null sink; it creates no plaintext copy.
+        let bytes = zbus::zvariant::serialized_size(
+            zbus::zvariant::serialized::Context::new_dbus(zbus::zvariant::LE, 0),
+            input,
+        )
+        .map_err(|err| fdo::Error::InvalidArgs(err.to_string()))?
+        .size();
+        let bytes = u32::try_from(bytes).map_err(|_| limit())?;
+        let bytes = self
+            .request_bytes
+            .clone()
+            .try_acquire_many_owned(bytes)
+            .map_err(|_| limit())?;
+        Ok(RequestGuard {
+            _activity: activity,
+            _slot: slot,
+            _bytes: bytes,
         })
     }
 

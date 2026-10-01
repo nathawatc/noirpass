@@ -450,7 +450,7 @@ impl Collection {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
-        let _activity = self.state.activity()?;
+        let _activity = self.state.request(&attributes)?;
         let id = self.resolve_id()?;
         let items = if id == SESSION_COLLECTION_ID {
             self.state.search_session_items(&attributes)
@@ -487,7 +487,7 @@ impl Collection {
         #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(&(&properties, &secret, replace))?;
         let owner = message_sender(&header)?;
         let object = self.clone();
         let server = server.clone();
@@ -514,7 +514,7 @@ impl Collection {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(&0u8)?;
         let object = self.clone();
         let server = server.clone();
         let connection = connection.clone();
@@ -570,7 +570,7 @@ impl Collection {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(label)?;
         let object = self.clone();
         let label = label.to_string();
         let server = server.clone();

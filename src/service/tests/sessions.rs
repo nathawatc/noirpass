@@ -10,6 +10,51 @@ use super::{p2p_pair, test_state};
 use crate::gpg::test_support::TestGnupg;
 
 #[tokio::test]
+async fn saturated_request_admission_preserves_method_errors_and_property_reads() {
+    use super::super::state::MAX_PENDING_REQUESTS;
+
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let (_server, client) = p2p_pair(state.clone()).await;
+    let requests: Vec<_> = (0..MAX_PENDING_REQUESTS)
+        .map(|_| state.request(&0u8).unwrap())
+        .collect();
+    let proxy = zbus::Proxy::new(
+        &client,
+        "org.freedesktop.secrets",
+        SERVICE_PATH,
+        "org.freedesktop.Secret.Service",
+    )
+    .await
+    .unwrap();
+    for method in ["OpenSession", "GetSecrets"] {
+        let error = if method == "OpenSession" {
+            proxy
+                .call_method(method, &("plain", Value::from("")))
+                .await
+                .unwrap_err()
+        } else {
+            proxy
+                .call_method(method, &(Vec::<OwnedObjectPath>::new(), session_path(1)))
+                .await
+                .unwrap_err()
+        };
+        assert!(matches!(error, zbus::Error::MethodError(ref name, _, _)
+            if name.as_str() == "org.freedesktop.DBus.Error.LimitsExceeded"));
+    }
+    let collections: Vec<OwnedObjectPath> = proxy.get_property("Collections").await.unwrap();
+    assert!(!collections.is_empty());
+    drop(requests);
+    let error = proxy
+        .call_method("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, zbus::Error::MethodError(ref name, _, _)
+        if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"));
+}
+
+#[tokio::test]
 async fn vanished_owner_before_registration_and_presence_failure_leave_no_session() {
     let gnupg = TestGnupg::new();
     let tmp = tempfile::tempdir().unwrap();

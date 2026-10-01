@@ -67,6 +67,9 @@ pub enum SecretError {
     /// The caller lacks the required identity or authorization.
     #[zbus(name = "DBus.Error.AccessDenied")]
     AccessDenied(String),
+    /// The daemon's bounded request capacity is exhausted.
+    #[zbus(name = "DBus.Error.LimitsExceeded")]
+    LimitsExceeded(String),
     /// The session named in a `Secret` does not exist.
     #[zbus(name = "Secret.Error.NoSession")]
     NoSession(String),
@@ -82,6 +85,7 @@ impl From<fdo::Error> for SecretError {
             fdo::Error::NotSupported(message) => Self::NotSupported(message),
             fdo::Error::Failed(message) => Self::Failed(message),
             fdo::Error::AccessDenied(message) => Self::AccessDenied(message),
+            fdo::Error::LimitsExceeded(message) => Self::LimitsExceeded(message),
             other => Self::ZBus(zbus::Error::FDO(Box::new(other))),
         }
     }
@@ -137,7 +141,7 @@ impl Service {
         #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(&(algorithm, &input))?;
         let (output, cipher) = match algorithm {
             ALGORITHM_PLAIN => {
                 let input = String::try_from(input).map_err(|_| {
@@ -217,7 +221,7 @@ impl Service {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(&(&properties, alias))?;
         let object = self.clone();
         let alias = alias.to_string();
         let server = server.clone();
@@ -243,7 +247,7 @@ impl Service {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
-        let _activity = self.state.activity()?;
+        let _activity = self.state.request(&attributes)?;
         let query = attributes.clone();
         let mut unlocked: Vec<_> = self
             .state
@@ -297,7 +301,7 @@ impl Service {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, Secret>, SecretError> {
-        let _activity = self.state.activity()?;
+        let _activity = self.state.request(&(&items, &session))?;
         let owner = message_sender(&header)?;
         if self.state.session_cipher(&session, &owner).is_none() {
             return Err(SecretError::NoSession(format!("no session {session}")));
@@ -366,7 +370,7 @@ impl Service {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(&(name, &collection))?;
         let object = self.clone();
         let name = name.to_string();
         let server = server.clone();

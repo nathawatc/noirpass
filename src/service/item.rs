@@ -194,11 +194,17 @@ impl Item {
     /// Complete metadata persistence and signals even after caller cancellation.
     async fn update_metadata(
         &self,
-        label: Option<String>,
+        label: Option<&str>,
         attributes: Option<HashMap<String, String>>,
         connection: &zbus::Connection,
     ) -> fdo::Result<()> {
-        let activity = self.state.activity()?;
+        let activity = match &label {
+            Some(label) => self.state.request(label)?,
+            None => self.state.request(&attributes.as_ref().ok_or_else(|| {
+                fdo::Error::InvalidArgs("metadata update requires label or attributes".into())
+            })?)?,
+        };
+        let label = label.map(str::to_owned);
         let object = self.clone();
         let connection = connection.clone();
         tokio::spawn(async move {
@@ -256,7 +262,7 @@ impl Item {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(Secret,), SecretError> {
-        let _activity = self.state.activity()?;
+        let _activity = self.state.request(&session)?;
         let owner = message_sender(&header)?;
         let secret = if self.collection_id == SESSION_COLLECTION_ID {
             let (meta, plaintext) = self.state.read_session_item_secret(&self.id)?;
@@ -291,7 +297,7 @@ impl Item {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(&secret)?;
         let owner = message_sender(&header)?;
         let object = self.clone();
         let connection = connection.clone();
@@ -311,7 +317,7 @@ impl Item {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
-        let activity = self.state.activity()?;
+        let activity = self.state.request(&0u8)?;
         let object = self.clone();
         let server = server.clone();
         let connection = connection.clone();
@@ -382,8 +388,7 @@ impl Item {
         label: &str,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
-        self.update_metadata(Some(label.to_string()), None, connection)
-            .await
+        self.update_metadata(Some(label), None, connection).await
     }
 
     /// Creation time, seconds since the Unix epoch.
