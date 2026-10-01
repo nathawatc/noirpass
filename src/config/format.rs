@@ -1,6 +1,5 @@
 //! Persisted configuration format and atomic file writes.
 
-use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -8,8 +7,8 @@ use toml_edit::{DocumentMut, value};
 
 use crate::error::{Error, Result};
 use crate::filesystem::{
-    create_regular_nofollow, ensure_dir_0700, open_directory_nofollow, read_regular_file_nofollow,
-    validate_existing_regular_or_absent, validate_no_symlink_components,
+    Directory, ensure_dir_0700, read_regular_file_nofollow, validate_existing_regular_or_absent,
+    validate_no_symlink_components,
 };
 
 use super::{CONFIG_FILE, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT, RECIPIENT_REL};
@@ -98,17 +97,24 @@ pub(super) fn recipient_cert_path_from_config(data_dir: &Path, path: &Path) -> R
 
 pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     validate_no_symlink_components(path)?;
-    validate_existing_regular_or_absent(path)?;
     let parent = path.parent().ok_or_else(|| {
         Error::Config(format!(
             "cannot determine parent directory for {}",
             path.display()
         ))
     })?;
-    let _parent_directory = open_directory_nofollow(parent)?;
+    let name = path.file_name().ok_or_else(|| {
+        Error::Config(format!("cannot determine file name for {}", path.display()))
+    })?;
+    atomic_write_in(&Directory::open(parent)?, Path::new(name), bytes, mode)
+}
+
+// Keep creation, cleanup, publication, and durability on the same opened directory.
+fn atomic_write_in(directory: &Directory, name: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    validate_regular_in(directory, name)?;
     for _ in 0..16 {
-        let tmp = parent.join(format!(".noirpass-tmp-{:016x}", rand::random::<u64>()));
-        match create_regular_nofollow(&tmp, mode) {
+        let tmp = PathBuf::from(format!(".noirpass-tmp-{:016x}", rand::random::<u64>()));
+        match directory.open_regular(&tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode) {
             Ok(mut file) => {
                 let write_result = (|| -> io::Result<()> {
                     file.write_all(bytes)?;
@@ -116,14 +122,14 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
                     Ok(())
                 })();
                 if let Err(err) = write_result {
-                    let _ = fs::remove_file(&tmp);
+                    let _ = directory.remove(&tmp);
                     return Err(Error::Io(err));
                 }
-                if let Err(err) = fs::rename(&tmp, path) {
-                    let _ = fs::remove_file(&tmp);
+                if let Err(err) = directory.rename(&tmp, name) {
+                    let _ = directory.remove(&tmp);
                     return Err(Error::Io(err));
                 }
-                open_directory_nofollow(parent)?.sync_all()?;
+                directory.sync_all()?;
                 return Ok(());
             }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
@@ -132,8 +138,24 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     }
     Err(Error::Config(format!(
         "failed to create temporary file for {}",
-        path.display()
+        name.display()
     )))
+}
+
+fn validate_regular_in(directory: &Directory, name: &Path) -> io::Result<()> {
+    match directory.metadata(name) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains symlink",
+        )),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -145,12 +167,23 @@ pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 pub(super) fn restore_recipient_cert(path: &Path, previous: Option<&[u8]>) -> Result<()> {
-    validate_existing_regular_or_absent(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::Config("recipient path has no parent".into()))?;
+    let name = Path::new(
+        path.file_name()
+            .ok_or_else(|| Error::Config("recipient path has no name".into()))?,
+    );
+    let directory = Directory::open(parent)?;
+    validate_regular_in(&directory, name)?;
     if let Some(bytes) = previous {
-        atomic_write(path, bytes, 0o600)
+        atomic_write_in(&directory, name, bytes, 0o600)
     } else {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
+        match directory.remove(name) {
+            Ok(()) => {
+                directory.sync_all()?;
+                Ok(())
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(Error::Io(err)),
         }
@@ -199,4 +232,33 @@ pub(super) fn parse_config(text: &str) -> Result<Config> {
         recipient_cert,
         idle_exit,
     })
+}
+
+#[cfg(test)]
+mod atomic_tests {
+    use super::*;
+    use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn atomic_publication_stays_in_opened_parent_after_path_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let moved = tmp.path().join("moved");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(parent.join("config.toml"), b"old").unwrap();
+        fs::write(outside.join("config.toml"), b"untouched").unwrap();
+        let directory = Directory::open(&parent).unwrap();
+        fs::rename(&parent, &moved).unwrap();
+        symlink(&outside, &parent).unwrap();
+
+        atomic_write_in(&directory, Path::new("config.toml"), b"new", 0o600).unwrap();
+
+        assert_eq!(fs::read(moved.join("config.toml")).unwrap(), b"new");
+        assert_eq!(fs::read(outside.join("config.toml")).unwrap(), b"untouched");
+        assert_eq!(fs::read_dir(&moved).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        assert!(atomic_write(&parent.join("config.toml"), b"rejected", 0o600).is_err());
+    }
 }

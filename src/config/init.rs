@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::filesystem::{
-    ensure_dir_0700, open_regular_rw_nofollow, path_entry_exists,
+    Directory, ensure_dir_0700, open_regular_rw_nofollow, path_entry_exists,
     validate_existing_directory_or_absent, validate_existing_regular_or_absent,
     validate_no_symlink_components,
 };
@@ -41,11 +41,12 @@ fn has_encrypted_secret_files(data_dir: &Path) -> Result<bool> {
         Err(err) => return Err(Error::Io(err)),
     }
 
-    for entry in fs::read_dir(&secrets_dir)? {
+    let directory = Directory::open(&secrets_dir)?;
+    for entry in directory.read_dir()? {
         let entry = entry?;
-        let path = entry.path();
+        let path = secrets_dir.join(entry.file_name());
         if path.extension().is_some_and(|extension| extension == "gpg") {
-            let metadata = fs::symlink_metadata(&path)?;
+            let metadata = directory.metadata(Path::new(&entry.file_name()))?;
             if metadata.file_type().is_symlink() {
                 return Err(Error::Config(format!(
                     "cannot initialize with symlinked possible ciphertext: {}",

@@ -10,7 +10,7 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::filesystem::{
-    open_directory_nofollow, read_regular_file_nofollow, validate_no_symlink_components,
+    Directory, open_directory_nofollow, read_regular_file_nofollow, validate_no_symlink_components,
 };
 use crate::store::Store;
 
@@ -120,7 +120,24 @@ fn checked_owned_file(
 
 fn remove_owned_file(data_dir: &Path, relative: &Path, description: &str) -> Result<()> {
     if let Some(path) = checked_owned_file(data_dir, relative, description)? {
-        fs::remove_file(path)?;
+        let parent = Directory::open(
+            path.parent()
+                .ok_or_else(|| Error::Config("owned path has no parent".into()))?,
+        )?;
+        let name = Path::new(
+            path.file_name()
+                .ok_or_else(|| Error::Config("owned path has no name".into()))?,
+        );
+        // Validate again through the descriptor used for removal; parent pathname changes
+        // can no longer redirect unlink into another directory.
+        let metadata = parent.metadata(name)?;
+        if !metadata.is_file() {
+            return Err(Error::Config(
+                "owned path is not a regular file; refusing symlink".into(),
+            ));
+        }
+        parent.remove(name)?;
+        parent.sync_all()?;
     }
     Ok(())
 }
@@ -136,7 +153,7 @@ fn remove_empty_directory(data_dir: &Path, relative: &Path, description: &str) -
             "cannot deinitialize {description} at {}; expected a directory",
             path.display()
         ))),
-        Ok(_) => match fs::remove_dir(&path) {
+        Ok(_) => match Directory::open(data_dir)?.remove_directory(relative) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
@@ -152,7 +169,7 @@ fn remove_known_secret_files(data_dir: &Path) -> Result<()> {
     if !existing_directory(&secrets, "the secrets directory")? {
         return Ok(());
     }
-    for entry in fs::read_dir(&secrets)? {
+    for entry in Directory::open(&secrets)?.read_dir()? {
         let entry = entry?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -177,7 +194,7 @@ fn remove_config_temporary_files_in(
     if !existing_directory(directory, "a configuration temporary-file directory")? {
         return Ok(());
     }
-    for entry in fs::read_dir(directory)? {
+    for entry in Directory::open(directory)?.read_dir()? {
         let entry = entry?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -220,7 +237,7 @@ fn preflight_known_secret_files(data_dir: &Path) -> Result<()> {
     if !existing_directory(&secrets, "the secrets directory")? {
         return Ok(());
     }
-    for entry in fs::read_dir(&secrets)? {
+    for entry in Directory::open(&secrets)?.read_dir()? {
         let entry = entry?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;

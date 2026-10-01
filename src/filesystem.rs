@@ -88,6 +88,30 @@ impl Directory {
         syscall_result(unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) })
     }
 
+    pub(crate) fn remove_directory(&self, name: &Path) -> io::Result<()> {
+        let name = entry_name(name)?;
+        // SAFETY: the directory fd and NUL-terminated name remain live for the call.
+        syscall_result(unsafe {
+            libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+        })
+    }
+
+    pub(crate) fn set_permissions(&self, permissions: Permissions) -> io::Result<()> {
+        self.0.set_permissions(permissions)
+    }
+
+    fn create_child(&self, name: &Path, mode: u32) -> io::Result<Self> {
+        let c_name = entry_name(name)?;
+        // SAFETY: the directory fd and NUL-terminated name remain live for the call.
+        if let Err(err) =
+            syscall_result(unsafe { libc::mkdirat(self.0.as_raw_fd(), c_name.as_ptr(), mode) })
+            && err.kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(err);
+        }
+        self.child(name)
+    }
+
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let from = entry_name(from)?;
         let to = entry_name(to)?;
@@ -201,17 +225,6 @@ pub(crate) fn open_regular_rw_nofollow(path: &Path) -> io::Result<File> {
     regular_file(open_path(path, libc::O_RDWR, 0)?, path)
 }
 
-pub(crate) fn open_regular_rw_create_nofollow(path: &Path, mode: u32) -> io::Result<File> {
-    regular_file(open_path(path, libc::O_RDWR | libc::O_CREAT, mode)?, path)
-}
-
-pub(crate) fn create_regular_nofollow(path: &Path, mode: u32) -> io::Result<File> {
-    regular_file(
-        open_path(path, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)?,
-        path,
-    )
-}
-
 pub(crate) fn open_directory_nofollow(path: &Path) -> io::Result<File> {
     open_path(path, libc::O_RDONLY | libc::O_DIRECTORY, 0)
 }
@@ -288,19 +301,75 @@ pub(crate) fn path_entry_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Create each component relative to its opened parent, without symlink traversal.
+pub(crate) fn create_directory_all_nofollow(path: &Path, mode: u32) -> io::Result<Directory> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory path escapes its root",
+        ));
+    }
+    let mut directory = Directory::open(if path.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    })?;
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => directory = directory.create_child(Path::new(name), mode)?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "directory path escapes its root",
+                ));
+            }
+        }
+    }
+    Ok(directory)
+}
+
 /// Create `path` if absent and force its permissions to `0700` through a safe directory handle.
 pub(crate) fn ensure_dir_0700(path: &Path) -> io::Result<()> {
-    validate_no_symlink_components(path)?;
-    fs::create_dir_all(path)?;
-    let directory = open_directory_nofollow(path)?;
-    directory.set_permissions(Permissions::from_mode(0o700))?;
-    Ok(())
+    create_directory_all_nofollow(path, 0o700)?.set_permissions(Permissions::from_mode(0o700))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn directory_mutations_stay_on_pinned_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let moved = tmp.path().join("moved");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(parent.join("value"), b"owned").unwrap();
+        fs::write(outside.join("value"), b"untouched").unwrap();
+        let directory = Directory::open(&parent).unwrap();
+        fs::rename(&parent, &moved).unwrap();
+        symlink(&outside, &parent).unwrap();
+
+        let child = directory.create_child(Path::new("child"), 0o700).unwrap();
+        assert_eq!(
+            child.0.metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        directory.remove(Path::new("value")).unwrap();
+        directory.remove_directory(Path::new("child")).unwrap();
+        directory.sync_all().unwrap();
+
+        assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
+        assert_eq!(fs::read(outside.join("value")).unwrap(), b"untouched");
+        assert!(!outside.join("child").exists());
+        assert!(directory.remove_directory(Path::new("../outside")).is_err());
+    }
 
     #[test]
     fn kernel_resolution_rejects_symlinks_escape_and_nonregular_files() {
@@ -312,7 +381,8 @@ mod tests {
         fs::write(outside.join("value"), b"untouched").unwrap();
         symlink(&outside, owned.join("link")).unwrap();
         assert!(open_regular_read_nofollow(&owned.join("link/value")).is_err());
-        assert!(create_regular_nofollow(&owned.join("link/new"), 0o600).is_err());
+        assert!(ensure_dir_0700(&owned.join("link/new")).is_err());
+        assert!(create_directory_all_nofollow(&owned.join("../outside/new"), 0o700).is_err());
         let directory = Directory::open(&owned).unwrap();
         assert!(
             directory

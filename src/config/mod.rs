@@ -3,15 +3,13 @@
 use std::fs::{self, File, Permissions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use sequoia_openpgp::Cert;
 
 use crate::error::{Error, Result};
-use crate::filesystem::{
-    open_directory_nofollow, open_regular_rw_create_nofollow, validate_no_symlink_components,
-};
+use crate::filesystem::{Directory, create_directory_all_nofollow, validate_no_symlink_components};
 
 const CONFIG_FILE: &str = "config.toml";
 const INDEX_FILE: &str = "index.redb";
@@ -26,19 +24,12 @@ const INIT_HINT: &str = "run noirpass init --recipient ...";
 const DIFFERENT_RECIPIENT_ERROR: &str = "Noirpass is initialized with a different recipient.\n\nChanging recipient requires deleting the existing Noirpass store first.\n\nRun:\n    noirpass deinit\n\nThen run init again with the new recipient.";
 const LIFECYCLE_LOCK_FILE: &str = ".noirpass-lifecycle.lock";
 
-fn open_lifecycle_directory(data_dir: &Path) -> Result<File> {
+fn open_lifecycle_directory(data_dir: &Path) -> Result<Directory> {
     validate_no_symlink_components(data_dir)?;
     match fs::symlink_metadata(data_dir) {
-        Ok(_) => Ok(open_directory_nofollow(data_dir)?),
+        Ok(_) => Ok(Directory::open(data_dir)?),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.recursive(true).mode(0o700);
-            match builder.create(data_dir) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(err) => return Err(err.into()),
-            }
-            Ok(open_directory_nofollow(data_dir)?)
+            Ok(create_directory_all_nofollow(data_dir, 0o700)?)
         }
         Err(err) => Err(err.into()),
     }
@@ -62,8 +53,11 @@ impl LifecycleLock {
     /// process when necessary.
     pub fn acquire(data_dir: &Path) -> Result<Self> {
         let directory = open_lifecycle_directory(data_dir)?;
-        let path = data_dir.join(LIFECYCLE_LOCK_FILE);
-        let file = open_regular_rw_create_nofollow(&path, 0o600)?;
+        let file = directory.open_regular(
+            Path::new(LIFECYCLE_LOCK_FILE),
+            libc::O_RDWR | libc::O_CREAT,
+            0o600,
+        )?;
 
         loop {
             // SAFETY: `file` is an open regular file and its descriptor remains
