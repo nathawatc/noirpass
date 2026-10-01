@@ -423,8 +423,15 @@ impl Store {
     /// second empty store. The redb writer lock also prevents offline mutation
     /// while the daemon is using the same index.
     pub fn open_existing(dir: &Path) -> Result<Self> {
-        let (secrets_dir, index_path) = existing_store_paths(dir)?;
+        existing_store_paths(dir)?;
         let root = Directory::open(dir)?;
+        Self::open_existing_in(dir, &root)
+    }
+
+    /// Share a pinned root with configuration lifecycle operations.
+    pub(crate) fn open_existing_in(dir: &Path, root: &Directory) -> Result<Self> {
+        let secrets_dir = dir.join("secrets");
+        let index_path = dir.join("index.redb");
         let secrets_directory = root.child(Path::new("secrets"))?;
         let index = root.open_regular(Path::new("index.redb"), libc::O_RDWR, 0)?;
         if index.metadata()?.len() == 0 {

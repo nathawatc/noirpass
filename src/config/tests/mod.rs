@@ -1,3 +1,4 @@
+mod deinit;
 mod format;
 mod init;
 mod lifecycle;

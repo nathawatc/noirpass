@@ -225,10 +225,6 @@ pub(crate) fn open_regular_rw_nofollow(path: &Path) -> io::Result<File> {
     regular_file(open_path(path, libc::O_RDWR, 0)?, path)
 }
 
-pub(crate) fn open_directory_nofollow(path: &Path) -> io::Result<File> {
-    open_path(path, libc::O_RDONLY | libc::O_DIRECTORY, 0)
-}
-
 /// Read one regular file through a no-follow descriptor.
 pub(crate) fn read_regular_file_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = open_regular_read_nofollow(path)?;

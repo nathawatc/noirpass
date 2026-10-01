@@ -53,6 +53,10 @@ impl LifecycleLock {
     /// process when necessary.
     pub fn acquire(data_dir: &Path) -> Result<Self> {
         let directory = open_lifecycle_directory(data_dir)?;
+        Self::acquire_in(&directory)
+    }
+
+    pub(crate) fn acquire_in(directory: &Directory) -> Result<Self> {
         let file = directory.open_regular(
             Path::new(LIFECYCLE_LOCK_FILE),
             libc::O_RDWR | libc::O_CREAT,
