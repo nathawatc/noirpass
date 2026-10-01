@@ -7,7 +7,6 @@ use std::path::Path;
 use sequoia_gpg_agent as gpg_agent;
 use sequoia_openpgp as openpgp;
 
-use gpg_agent::gnupg;
 use gpg_agent::{Agent, KeyPair};
 use openpgp::KeyID;
 use openpgp::cert::Cert;
@@ -29,13 +28,9 @@ pub(super) async fn ensure_recipient_secret_available(
     homedir: Option<&Path>,
     cert: &Cert,
 ) -> Result<()> {
-    let ctx = match homedir {
-        Some(h) => gnupg::Context::with_homedir(h),
-        None => gnupg::Context::new(),
-    }
-    .map_err(pgp_err)?;
+    let socket = super::socket::agent_socket(homedir)?;
 
-    let mut agent = Agent::connect(&ctx).await.map_err(pgp_err)?;
+    let mut agent = Agent::connect_to_agent(&socket).await.map_err(pgp_err)?;
     let policy = StandardPolicy::new();
     let mut checked = 0usize;
     for ka in cert
@@ -72,14 +67,10 @@ pub(super) fn decrypt_blocking(
     cert: &Cert,
     ciphertext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let ctx = match homedir {
-        Some(h) => gnupg::Context::with_homedir(h),
-        None => gnupg::Context::new(),
-    }
-    .map_err(pgp_err)?;
+    let socket = super::socket::agent_socket(homedir)?;
 
     let policy = StandardPolicy::new();
-    let helper = AgentHelper::new(&ctx, &policy, cert)?;
+    let helper = AgentHelper::new(&socket, &policy, cert)?;
 
     let mut decryptor = DecryptorBuilder::from_bytes(ciphertext)
         .map_err(pgp_err)?
@@ -98,14 +89,14 @@ struct AgentHelper {
 
 impl AgentHelper {
     /// Build agent-backed keypairs for the certificate's encryption subkeys.
-    fn new(ctx: &gnupg::Context, policy: &StandardPolicy, cert: &Cert) -> Result<Self> {
+    fn new(socket: &Path, policy: &StandardPolicy, cert: &Cert) -> Result<Self> {
         let mut keys = HashMap::new();
         for ka in cert
             .keys()
             .with_policy(policy, None)
             .key_flags(encryption_key_flags())
         {
-            let pair = KeyPair::new_for_gnupg_context(ctx, ka.key()).map_err(pgp_err)?;
+            let pair = KeyPair::new_for_socket(socket, ka.key()).map_err(pgp_err)?;
             keys.insert(ka.key().keyid(), pair);
         }
         if keys.is_empty() {

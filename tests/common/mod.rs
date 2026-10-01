@@ -136,19 +136,21 @@ pub fn init_noirpass_store_from_stdin(store: &Path, recipient: &[u8]) {
     assert!(status.success(), "noirpass init --recipient - failed");
 }
 
-/// Create a fake `gpg` executable that records unexpected production spawns.
+/// Trap forbidden `GnuPG` and shell subprocesses in daemon-only PATH.
 pub fn fake_gpg_dir() -> (tempfile::TempDir, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("gpg.log");
-    let script = format!(
-        "#!/bin/sh\necho gpg-spawn >> '{}'\nexit 99\n",
-        log.display()
-    );
-    let gpg = dir.path().join("gpg");
-    std::fs::write(&gpg, script).unwrap();
-    std::fs::set_permissions(&gpg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for name in ["gpg", "gpg2", "gpgconf", "sh", "bash"] {
+        let script = format!(
+            "#!/bin/sh\necho {name}-spawn >> '{}'\nexit 99\n",
+            log.display()
+        );
+        let executable = dir.path().join(name);
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     (dir, log)
 }
 

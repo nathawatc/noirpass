@@ -11,6 +11,7 @@
 mod agent;
 mod cert;
 mod crypto;
+mod socket;
 
 #[cfg(test)]
 pub(crate) mod test_support;

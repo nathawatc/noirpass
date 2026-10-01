@@ -104,3 +104,34 @@ async fn encrypt_decrypt_roundtrip_via_agent_with_transport_only_subkey() {
 
     assert_eq!(&recovered[..], &plaintext[..]);
 }
+
+#[tokio::test]
+async fn agent_socket_matches_gnupg_and_does_not_restart_stopped_agent() {
+    let gnupg = TestGnupg::new();
+    let output = std::process::Command::new("gpgconf")
+        .arg("--homedir")
+        .arg(gnupg.path())
+        .args(["--list-dirs", "agent-socket"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // Fixture paths contain no percent-encoded characters.
+    let expected = String::from_utf8(output.stdout).unwrap();
+    let socket = super::socket::agent_socket(Some(gnupg.path())).unwrap();
+    assert_eq!(socket, std::path::Path::new(expected.trim()));
+    let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+    gpg.ensure_recipient_secret_available().await.unwrap();
+    let status = std::process::Command::new("gpgconf")
+        .arg("--homedir")
+        .arg(gnupg.path())
+        .args(["--kill", "gpg-agent"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(gpg.ensure_recipient_secret_available().await.is_err());
+    assert!(
+        !socket.exists(),
+        "Noirpass must not launch a replacement agent"
+    );
+}
