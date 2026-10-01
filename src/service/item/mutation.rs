@@ -8,7 +8,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use super::{Item, root_path};
 use crate::service::collection::{
-    Collection, emit_collection_items_changed, emit_session_collection_modified,
+    Collection, emit_collection_items_changed, emit_collection_modified,
 };
 use crate::service::session::Secret;
 use crate::service::{
@@ -67,7 +67,13 @@ impl Item {
         Collection::item_changed(&collection_emitter, item_path)
             .await
             .map_err(SecretError::ZBus)?;
-        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
+        emit_collection_modified(
+            &self.state,
+            connection,
+            &self.collection_id,
+            lifecycle.clone(),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -104,7 +110,13 @@ impl Item {
         emit_collection_items_changed(&self.state, server, connection, &self.collection_id)
             .await
             .map_err(SecretError::from)?;
-        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
+        emit_collection_modified(
+            &self.state,
+            connection,
+            &self.collection_id,
+            lifecycle.clone(),
+        )
+        .await?;
 
         Ok(root_path())
     }
@@ -160,8 +172,13 @@ impl Item {
             }
             object.modified_changed(&item_emitter).await?;
             Collection::item_changed(&collection_emitter, path).await?;
-            emit_session_collection_modified(&object.state, &connection, &object.collection_id)
-                .await?;
+            emit_collection_modified(
+                &object.state,
+                &connection,
+                &object.collection_id,
+                lifecycle.clone(),
+            )
+            .await?;
             Ok(())
         }))
         .await

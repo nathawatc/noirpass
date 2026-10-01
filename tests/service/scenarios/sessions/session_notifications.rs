@@ -46,30 +46,37 @@ async fn mutate_item(
     }
 }
 
-/// Every temporary item mutation must update cached collection timestamps on both served paths.
+pub(in super::super) async fn s6d_session_collection_notifications() {
+    collection_notifications("/org/freedesktop/secrets/collection/session", "session").await;
+    let conn = zbus::Connection::session().await.unwrap();
+    let service = service_proxy(&conn).await;
+    let properties: HashMap<String, OwnedValue> = HashMap::new();
+    let (path, _): (OwnedObjectPath, OwnedObjectPath) = service
+        .call("CreateCollection", &(&properties, "modified_test"))
+        .await
+        .unwrap();
+    collection_notifications(path.as_str(), "modified_test").await;
+}
+
+/// Every item mutation must update cached collection timestamps on both served paths.
 #[allow(
     clippy::too_many_lines,
-    reason = "one private-bus scenario covers notifications for every temporary item mutation"
+    reason = "one private-bus scenario covers notifications for every item mutation"
 )]
-pub(in super::super) async fn s6d_session_collection_notifications() {
+async fn collection_notifications(collection_path: &str, alias_name: &str) {
     let conn = zbus::Connection::session().await.unwrap();
     let service = service_proxy(&conn).await;
     let (_, session): (OwnedValue, OwnedObjectPath) = service
         .call("OpenSession", &("plain", Value::from("")))
         .await
         .unwrap();
-    let canonical = zbus::Proxy::new(
-        &conn,
-        SERVICE_NAME,
-        "/org/freedesktop/secrets/collection/session",
-        COLLECTION_IFACE,
-    )
-    .await
-    .unwrap();
+    let canonical = zbus::Proxy::new(&conn, SERVICE_NAME, collection_path, COLLECTION_IFACE)
+        .await
+        .unwrap();
     let alias = zbus::Proxy::new(
         &conn,
         SERVICE_NAME,
-        "/org/freedesktop/secrets/aliases/session",
+        noirpass::service::alias_path(alias_name).unwrap(),
         COLLECTION_IFACE,
     )
     .await
@@ -119,7 +126,8 @@ pub(in super::super) async fn s6d_session_collection_notifications() {
         let item = zbus::Proxy::new(&conn, SERVICE_NAME, path.clone(), ITEM_IFACE)
             .await
             .unwrap();
-        let next_path = mutate_item(&canonical, &item, &secret, step).await;
+        let collection = if step == 1 { &alias } else { &canonical };
+        let next_path = mutate_item(collection, &item, &secret, step).await;
         if step == 1 {
             assert_eq!(next_path, path, "replacement must keep item path");
         }

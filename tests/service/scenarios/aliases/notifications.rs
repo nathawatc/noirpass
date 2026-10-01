@@ -261,6 +261,9 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
             Vec::<OwnedObjectPath>::try_from(value).unwrap(),
             vec![first_path.clone()]
         );
+        let (name, value) = next_property_change(changes.as_mut(), COLLECTION_IFACE).await;
+        assert_eq!(name, "Modified");
+        assert!(u64::try_from(value).unwrap() > 0);
         assert_no_signal(changes.as_mut(), "duplicate create Items").await;
     }
 
@@ -295,6 +298,9 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
         let mut actual = Vec::<OwnedObjectPath>::try_from(value).unwrap();
         actual.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         assert_eq!(actual, expected_items);
+        let (name, value) = next_property_change(changes.as_mut(), COLLECTION_IFACE).await;
+        assert_eq!(name, "Modified");
+        assert!(u64::try_from(value).unwrap() > 0);
         assert_no_signal(changes.as_mut(), "duplicate alias-create Items").await;
     }
 
@@ -329,6 +335,9 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
             Vec::<OwnedObjectPath>::try_from(value).unwrap(),
             vec![second_path.clone()]
         );
+        let (name, value) = next_property_change(changes.as_mut(), COLLECTION_IFACE).await;
+        assert_eq!(name, "Modified");
+        assert!(u64::try_from(value).unwrap() > 0);
         assert_no_signal(changes.as_mut(), "duplicate delete Items").await;
     }
 
@@ -383,6 +392,11 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
             "Modified"
         );
         super::super::super::helpers::next_item_changed(item_changed.as_mut(), &second_path).await;
+        for changes in [&mut canonical_items_changed, &mut alias_items_changed] {
+            let (name, value) = next_property_change(changes.as_mut(), COLLECTION_IFACE).await;
+            assert_eq!(name, "Modified");
+            assert!(u64::try_from(value).unwrap() > 0);
+        }
         assert_no_signal(canonical_items_changed.as_mut(), "Items for replacement").await;
         assert_no_signal(alias_items_changed.as_mut(), "alias Items for replacement").await;
         let items: Vec<OwnedObjectPath> = canonical.get_property("Items").await.unwrap();

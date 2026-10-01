@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use zbus::fdo;
 use zbus::names::InterfaceName;
@@ -9,6 +10,7 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, Value};
 
 use super::{COLLECTION_INTERFACE, Collection};
+use crate::service::state::MutationGuard;
 use crate::service::{
     SERVICE_PATH, SESSION_COLLECTION_ID, Service, ServiceState, alias_path, collection_path,
 };
@@ -71,17 +73,31 @@ pub(crate) async fn emit_collection_items_changed(
     Ok(())
 }
 
-/// Notify clients when an item mutation modifies the temporary collection.
-pub(crate) async fn emit_session_collection_modified(
-    state: &ServiceState,
+/// Notify clients when an item mutation modifies its parent collection.
+pub(crate) async fn emit_collection_modified(
+    state: &Arc<ServiceState>,
     connection: &zbus::Connection,
     id: &str,
+    lifecycle: Arc<MutationGuard>,
 ) -> fdo::Result<()> {
-    if id != SESSION_COLLECTION_ID {
-        return Ok(());
-    }
-    let modified = state.session_collection_meta().modified;
-    for path in collection_object_paths_for_id(state, id)? {
+    let (modified, paths) = if id == SESSION_COLLECTION_ID {
+        (
+            state.session_collection_meta().modified,
+            collection_object_paths_for_id(state, id)?,
+        )
+    } else {
+        let id = id.to_owned();
+        state
+            .blocking(Some(lifecycle), move |state| {
+                Ok((
+                    state.store().get_collection(&id)?.modified,
+                    collection_object_paths_for_id(state, &id)?,
+                ))
+            })
+            .await
+            .map_err(|err| fdo::Error::Failed(err.to_string()))?
+    };
+    for path in paths {
         let emitter = SignalEmitter::new(connection, path)?;
         fdo::Properties::properties_changed(
             &emitter,

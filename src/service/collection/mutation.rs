@@ -8,7 +8,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{
     Collection, emit_collection_items_changed, emit_collection_label_modified,
-    emit_session_collection_modified, root_path,
+    emit_collection_modified, root_path,
 };
 use crate::service::item::Item;
 use crate::service::session::Secret;
@@ -104,12 +104,12 @@ impl Collection {
             item.emit_label_changed(&item_emitter).await?;
             item.modified_changed(&item_emitter).await?;
             Self::item_changed(&emitter, path.clone()).await?;
-            emit_session_collection_modified(&self.state, connection, &id).await?;
+            emit_collection_modified(&self.state, connection, &id, lifecycle.clone()).await?;
             return Ok((path, root_path()));
         }
         Self::item_created(&emitter, path.clone()).await?;
         emit_collection_items_changed(&self.state, server, connection, &id).await?;
-        emit_session_collection_modified(&self.state, connection, &id).await?;
+        emit_collection_modified(&self.state, connection, &id, lifecycle.clone()).await?;
         Ok((path, root_path()))
     }
 }

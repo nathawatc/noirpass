@@ -127,6 +127,44 @@ impl Store {
         Ok(())
     }
 
+    fn touch_item_collection(
+        txn: &redb::WriteTransaction,
+        collection: &str,
+        modified: u64,
+    ) -> Result<()> {
+        let mut collections = txn.open_table(COLLECTIONS)?;
+        let metadata = collections
+            .get(collection)?
+            .and_then(|value| serde_json::from_slice::<CollectionMeta>(value.value()).ok());
+        // Integrity repair may remove items with missing or corrupt parents.
+        // Update only an existing, valid parent; preserve invalid metadata for repair.
+        if let Some(mut metadata) = metadata
+            && metadata.id == collection
+            && is_valid_collection_id(collection)
+        {
+            metadata.modified = modified;
+            let bytes = serde_json::to_vec(&metadata)?;
+            collections.insert(collection, bytes.as_slice())?;
+        }
+        Ok(())
+    }
+
+    fn remove_item_metadata_locked(txn: &redb::WriteTransaction, id: &str) -> Result<()> {
+        let collection = {
+            let mut items = txn.open_table(ITEMS)?;
+            let value = items
+                .remove(id)?
+                .ok_or_else(|| Error::NotFound(format!("item {id}")))?;
+            decode_item(id, value.value())
+                .ok()
+                .map(|meta| meta.collection)
+        };
+        if let Some(collection) = collection {
+            Self::touch_item_collection(txn, &collection, now_secs())?;
+        }
+        Ok(())
+    }
+
     fn find_item_by_attrs_exact_locked(
         txn: &redb::WriteTransaction,
         collection: &str,
@@ -172,6 +210,7 @@ impl Store {
                     .insert(meta.id.as_str(), bytes.as_slice())
                     .map_err(definite)?;
             }
+            Self::touch_item_collection(&txn, collection, meta.modified).map_err(definite)?;
             txn.commit()
                 .map_err(|err| PersistError::Indeterminate(err.into()))
         })();
@@ -282,6 +321,7 @@ impl Store {
                 let mut items = txn.open_table(ITEMS).map_err(definite)?;
                 items.insert(id, bytes.as_slice()).map_err(definite)?;
             }
+            Self::touch_item_collection(&txn, &meta.collection, meta.modified).map_err(definite)?;
             txn.commit()
                 .map_err(|err| PersistError::Indeterminate(err.into()))
         };
@@ -316,14 +356,7 @@ impl Store {
             }
         }
         let commit = || -> std::result::Result<(), PersistError> {
-            {
-                let mut items = txn
-                    .open_table(ITEMS)
-                    .map_err(|err| PersistError::Definite(err.into()))?;
-                items
-                    .remove(id)
-                    .map_err(|err| PersistError::Definite(err.into()))?;
-            }
+            Self::remove_item_metadata_locked(&txn, id).map_err(definite)?;
             txn.commit()
                 .map_err(|err| PersistError::Indeterminate(err.into()))
         };
@@ -336,12 +369,7 @@ impl Store {
     /// filesystem paths.
     pub fn delete_item_metadata(&self, table_key: &str) -> Result<()> {
         let (_mutation_guard, txn) = self.begin_write_checked()?;
-        {
-            let mut items = txn.open_table(ITEMS)?;
-            if items.remove(table_key)?.is_none() {
-                return Err(Error::NotFound(format!("item {table_key}")));
-            }
-        }
+        Self::remove_item_metadata_locked(&txn, table_key)?;
         self.finish_metadata_commit(txn.commit())?;
         Ok(())
     }

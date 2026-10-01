@@ -15,7 +15,7 @@ mod signals;
 
 pub(crate) use signals::{
     emit_alias_target_invalidated, emit_collection_items_changed, emit_collection_label_modified,
-    emit_session_collection_modified,
+    emit_collection_modified,
 };
 
 use std::borrow::Cow;
