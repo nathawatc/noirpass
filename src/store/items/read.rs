@@ -29,18 +29,7 @@ impl Store {
 
     /// List every item in `collection`, in id order.
     pub fn list_items(&self, collection: &str) -> Result<Vec<ItemMeta>> {
-        self.ensure_not_poisoned()?;
-        let txn = self.db.begin_read()?;
-        let items = txn.open_table(ITEMS)?;
-        let mut out = Vec::new();
-        for entry in items.iter()? {
-            let (key, value) = entry?;
-            let metadata = decode_item(key.value(), value.value())?;
-            if metadata.collection == collection {
-                out.push(metadata);
-            }
-        }
-        Ok(out)
+        self.search_items_matching(Some(collection), &HashMap::new())
     }
 
     /// Find an item in `collection` whose attribute set is *exactly* `attrs`.
@@ -66,8 +55,9 @@ impl Store {
     /// Search all items for those whose attributes are a superset of `attrs`.
     ///
     /// An item matches when every `(k, v)` in `attrs` is present with the same
-    /// value; an empty query therefore matches every item. This is a full
-    /// table scan, which is acceptable for the expected data sizes.
+    /// value; an empty query therefore matches every item. Collection and
+    /// attribute indexes are derived in memory from validated metadata. The
+    /// first query after a write rebuilds them; nothing changes on disk.
     pub fn search_items(&self, attrs: &HashMap<String, String>) -> Result<Vec<ItemMeta>> {
         self.search_items_matching(None, attrs)
     }
@@ -86,27 +76,128 @@ impl Store {
         collection: Option<&str>,
         attrs: &HashMap<String, String>,
     ) -> Result<Vec<ItemMeta>> {
-        // ponytail: existing item keys are global; retain validated full scans until profiling justifies an index.
-        self.ensure_not_poisoned()?;
+        let _read_guard = self.read_guard_checked_after_initial_check(|| {})?;
         let txn = self.db.begin_read()?;
         let items = txn.open_table(ITEMS)?;
-        let mut out = Vec::new();
-        for entry in items.iter()? {
-            let (key, value) = entry?;
-            let metadata = decode_item(key.value(), value.value())?;
-            if collection.is_some_and(|id| metadata.collection != id) {
-                continue;
+        let matches = |metadata: &ItemMeta| {
+            collection.is_none_or(|id| metadata.collection == id)
+                && attrs
+                    .iter()
+                    .all(|(name, expected)| metadata.attributes.get(name) == Some(expected))
+        };
+        if self
+            .item_index
+            .read()
+            .map_err(|_| Error::Config("item lookup index is poisoned".into()))?
+            .is_none()
+        {
+            let mut cache = self
+                .item_index
+                .write()
+                .map_err(|_| Error::Config("item lookup index is poisoned".into()))?;
+            if cache.is_none() {
+                let mut index = ItemIndex::default();
+                let mut out = Vec::new();
+                // Validate every authoritative key/record before publishing an
+                // index, even when the requested collection or attribute is absent.
+                for entry in items.iter()? {
+                    let (key, value) = entry?;
+                    let metadata = decode_item(key.value(), value.value())?;
+                    index.insert(&metadata);
+                    if matches(&metadata) {
+                        out.push(metadata);
+                    }
+                }
+                *cache = Some(index);
+                return Ok(out);
             }
-            let matches = attrs.iter().all(|(name, expected)| {
-                metadata
-                    .attributes
-                    .get(name)
-                    .is_some_and(|actual| actual == expected)
-            });
-            if matches {
+        }
+        let cache = self
+            .item_index
+            .read()
+            .map_err(|_| Error::Config("item lookup index is poisoned".into()))?;
+        let index = cache
+            .as_ref()
+            .expect("shared transaction gate prevents invalidation");
+        let Some(candidates) = index
+            .candidates(collection, attrs)
+            .filter(|candidates| candidates.len() < index.ids.len())
+        else {
+            // A query covering every candidate gains nothing from individual
+            // B-tree lookups. Keep sequential traversal for broad queries.
+            let mut out = Vec::new();
+            for entry in items.iter()? {
+                let (key, value) = entry?;
+                let metadata = decode_item(key.value(), value.value())?;
+                if matches(&metadata) {
+                    out.push(metadata);
+                }
+            }
+            return Ok(out);
+        };
+        let mut out = Vec::new();
+        for &position in candidates {
+            let id = &index.ids[position];
+            let value = items.get(id.as_str())?.ok_or_else(|| {
+                Error::Config(format!("item lookup index references missing item {id}"))
+            })?;
+            let metadata = decode_item(id, value.value())?;
+            if matches(&metadata) {
                 out.push(metadata);
             }
         }
         Ok(out)
+    }
+}
+
+/// Derived candidate lists contain positions in the authoritative table's id
+/// order. Only ids, collection names and attribute pairs are retained; labels,
+/// ciphertext and secret values never enter this index. The Store transaction
+/// gate protects its lifetime, and writer admission invalidates it centrally.
+#[derive(Debug, Default)]
+pub(in crate::store) struct ItemIndex {
+    ids: Vec<String>,
+    collections: HashMap<String, Vec<usize>>,
+    attributes: HashMap<String, HashMap<String, Vec<usize>>>,
+}
+
+impl ItemIndex {
+    fn insert(&mut self, metadata: &ItemMeta) {
+        let position = self.ids.len();
+        self.ids.push(metadata.id.clone());
+        self.collections
+            .entry(metadata.collection.clone())
+            .or_default()
+            .push(position);
+        for (name, value) in &metadata.attributes {
+            self.attributes
+                .entry(name.clone())
+                .or_default()
+                .entry(value.clone())
+                .or_default()
+                .push(position);
+        }
+    }
+
+    /// Start from the smallest candidate list, then verify all filters against
+    /// current redb metadata. Missing keys/values yield an empty candidate list.
+    fn candidates(
+        &self,
+        collection: Option<&str>,
+        attrs: &HashMap<String, String>,
+    ) -> Option<&[usize]> {
+        let mut smallest =
+            collection.map(|id| self.collections.get(id).map_or(&[][..], Vec::as_slice));
+        for (name, value) in attrs {
+            let candidates = self
+                .attributes
+                .get(name)
+                .and_then(|values| values.get(value))
+                .map_or(&[][..], Vec::as_slice);
+            if smallest.is_none_or(|current| candidates.len() < current.len()) {
+                smallest = Some(candidates);
+            }
+        }
+        smallest
     }
 }

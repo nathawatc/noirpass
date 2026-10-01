@@ -4,6 +4,9 @@ use super::*;
 use crate::store::files::FileOperation::{self, Remove, Rename, Sync};
 
 fn inject(store: &Store, failures: &[(FileOperation, usize)]) {
+    // Warm the derived index before each failure so rollback and poisoning also
+    // exercise queries following an already indexed snapshot.
+    store.search_items(&HashMap::new()).unwrap();
     *store.file_failures.lock().unwrap() = failures.iter().copied().collect();
 }
 

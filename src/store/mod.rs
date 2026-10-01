@@ -58,6 +58,7 @@ pub struct Store {
     poisoned: AtomicBool,
     poison_changed: tokio::sync::Notify,
     transaction_gate: RwLock<()>,
+    item_index: RwLock<Option<items::ItemIndex>>,
     #[cfg(test)]
     file_failures: std::sync::Mutex<std::collections::VecDeque<(files::FileOperation, usize)>>,
 }
@@ -213,6 +214,14 @@ impl Store {
             .write()
             .map_err(|_| Error::Config("store transaction gate is poisoned".into()))?;
         self.ensure_not_poisoned()?;
+        // ponytail: rebuild after writer admission; maintain indexes incrementally only if mixed-workload profiling justifies it.
+        // Discard derived lookup state before any mutation, including repair,
+        // recovery and rejected writes. Readers hold the shared gate throughout
+        // index construction and lookup, so no stale index can cross a writer.
+        *self
+            .item_index
+            .write()
+            .map_err(|_| Error::Config("item lookup index is poisoned".into()))? = None;
         Ok(guard)
     }
 
@@ -318,6 +327,7 @@ impl Store {
             poisoned: AtomicBool::new(false),
             poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
+            item_index: RwLock::new(None),
             #[cfg(test)]
             file_failures: std::sync::Mutex::default(),
         })
@@ -369,6 +379,7 @@ impl Store {
             poisoned: AtomicBool::new(false),
             poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
+            item_index: RwLock::new(None),
             #[cfg(test)]
             file_failures: std::sync::Mutex::default(),
         })

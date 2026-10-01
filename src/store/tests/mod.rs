@@ -10,6 +10,7 @@ use super::*;
 mod atomicity;
 mod collections;
 mod filesystem_failures;
+mod index;
 mod integrity;
 mod items;
 mod recovery;

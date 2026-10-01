@@ -2,6 +2,8 @@
 
 mod read;
 
+pub(super) use read::ItemIndex;
+
 use std::collections::HashMap;
 use std::path::Path;
 
