@@ -83,6 +83,10 @@ cancellation. Never wrap an untracked nested `spawn_blocking`
 operation inside this boundary. Recheck session ownership after queue admission and before agent
 decryption, then again when encoding the result. Bulk retrieval admits at most four item tasks per
 request and preserves input order when merging repeated paths.
+Persistent retrieval keeps the filesystem read, agent decryption, and transport encoding inside
+one worker reservation. Waiting tasks retain identifiers only; never queue already-read ciphertext
+between separate read and decrypt workers. Reject a persistent bulk item's plaintext exceeding the
+response limit before allocating its transport value; individual `GetSecret` remains available.
 Bound retained bulk responses to 8 MiB of encoded dictionary entries, including the array header
 and conservative alignment padding. Measure without copying plaintext, refund the previous entry
 when a repeated path is replaced, and reject excess with `org.freedesktop.DBus.Error.LimitsExceeded`.

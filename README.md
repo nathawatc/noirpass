@@ -220,6 +220,7 @@ persistent writes. Excess operations receive `org.freedesktop.DBus.Error.LimitsE
 retried after earlier work completes. Property reads and closing sessions remain available.
 Bulk `GetSecrets` replies are limited to 8 MiB of encoded secret data and item framing. Larger requests receive
 `org.freedesktop.DBus.Error.LimitsExceeded`; clients can retrieve fewer items per call.
+An individual persistent item too large for a bulk reply can still be retrieved with `GetSecret`.
 
 Temporary item operations can continue while persistent secret workers are busy. Collection
 creation/deletion and alias changes still serialize with active mutations.
