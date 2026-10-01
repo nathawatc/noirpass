@@ -2,9 +2,10 @@
 
 Minimal on-demand GPG-backed freedesktop Secret Service
 
-Noirpass is a minimal persistent freedesktop Secret Service backend. It stores Secret Service
-metadata in redb and OpenPGP-encrypted secret values on disk, using `gpg-agent` for private-key
-operations.
+Noirpass is a minimal freedesktop Secret Service backend. Persistent secrets use redb metadata and
+OpenPGP-encrypted values on disk, with `gpg-agent` for private-key operations. The standard
+`session` collection is temporary: its secret values stay only in daemon memory and disappear when
+the daemon/login session ends.
 
 Applications interact with Noirpass through the standard Secret Service D-Bus API. The Noirpass CLI
 is limited to initialization, inspection, deletion, integrity maintenance, and deinitialization.
@@ -189,8 +190,26 @@ unit grants write access under `%h/.local/share` only. If `XDG_DATA_HOME`, `NOIR
 
 ### Configuration
 
-By default, the daemon exits after five inactive minutes with no client session. See
+By default, the daemon exits after five inactive minutes when there is no open transport session and
+no temporary secret in the `session` collection. A temporary secret keeps the daemon alive so
+“remember for this session” clients do not lose it to the idle timer. See
 [Configuration Guide](docs/CONFIG.md) for config location, idle-exit behavior, and overrides.
+
+### Temporary Session Secrets
+
+Noirpass exposes the standard Secret Service `session` alias at
+`/org/freedesktop/secrets/collection/session`. Items created there stay only in daemon memory. This
+is the collection used by libsecret clients for “remember for this session”; GVfs-backed mount
+flows, including encrypted-volume mounts opened from file managers such as Thunar, can use it when
+the user chooses the session-only password option.
+
+Temporary items keep the daemon alive past `idle_exit`. Deleting the item, stopping Noirpass, or
+ending the graphical login session clears the secret.
+
+Temporary storage accepts at most 256 items and 16 MiB of combined secret and metadata payload.
+Each secret is limited to 1 MiB; each item accepts at most 64 attributes, 4 KiB per metadata string,
+and 64 KiB of total metadata. Updates exceeding a limit leave the existing item unchanged.
+The packaged systemd service sets `LimitCORE=0`; host swap and other memory access policies still apply.
 
 ## Maintenance
 
@@ -213,7 +232,10 @@ associated ciphertext.
 > [!NOTE]
 > Security Expectations
 >
-> - Secret values are OpenPGP-encrypted on disk.
+> - Persistent secret values are OpenPGP-encrypted on disk.
+> - Secrets stored in the standard `session` collection are not written to the Noirpass store; they
+>   remain as zeroizing process memory and disappear when Noirpass stops. Process memory can still
+>   be exposed by mechanisms such as core dumps or swap unless the host blocks them.
 > - Entry names and search fields are not encrypted. Avoid sensitive information in labels and
 >   attributes.
 > - Access depends on GnuPG key, `gpg-agent`, pinentry, and passphrase policy.

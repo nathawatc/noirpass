@@ -26,7 +26,8 @@ fields are managed by Noirpass; edit only documented runtime settings.
 idle_exit = 300
 ```
 
-`idle_exit` controls how daemon exits when no sessions remain:
+`idle_exit` controls how the daemon exits when no transport session is open and the temporary
+`session` collection is empty:
 
 |            Value | Behavior                                                           |
 | ---------------: | ------------------------------------------------------------------ |
@@ -38,15 +39,17 @@ Default is `300`. Existing configuration without `idle_exit` uses same default. 
 `noirpass init` preserves current deserialized value. Command-line `--idle-exit <VALUE>` overrides
 configuration for one invocation.
 
-With `idle_exit = 0`, exit occurs after first completed Noirpass application method or property
-handler, once no handler is active and no session is open. Calls managed directly by zbus, including
-`org.freedesktop.DBus.Peer.Ping` and `org.freedesktop.DBus.Introspectable.Introspect`, do not count
-as Noirpass application activity.
+With `idle_exit = 0`, exit occurs after the first completed Noirpass application method or property
+handler, once no handler is active, no transport session is open, and no temporary secret remains. A
+temporary secret deliberately pins the daemon so Secret Service clients that request “remember for
+this session” keep that secret until they delete it or the daemon/login session ends. Calls managed
+directly by zbus, including `org.freedesktop.DBus.Peer.Ping` and
+`org.freedesktop.DBus.Introspectable.Introspect`, do not count as Noirpass application activity.
 
 Examples:
 
 ```toml
-# Exit after first Noirpass handler finishes and no session remains.
+# Exit after first Noirpass handler finishes with no transport session or temporary secret.
 idle_exit = 0
 ```
 
