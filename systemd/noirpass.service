@@ -11,6 +11,7 @@ ExecStart=/usr/bin/noirpass
 Restart=on-failure
 
 # Hardening
+LimitCORE=0
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
