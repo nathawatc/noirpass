@@ -16,7 +16,8 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
 
     let mut paths = Vec::new();
     let mut expected = HashMap::new();
-    for idx in 1..=3u8 {
+    // More than one worker batch, under both transport algorithms.
+    for idx in 1..=7u8 {
         let a = vec![
             ("case".to_string(), "s6".to_string()),
             ("idx".to_string(), idx.to_string()),
@@ -45,11 +46,12 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
         .call("OpenSession", &("plain", Value::from("")))
         .await
         .unwrap();
+    let requested = bulk_paths(&paths);
     let secrets: HashMap<OwnedObjectPath, WireSecret> = proxy
-        .call("GetSecrets", &(&paths, &plain_session))
+        .call("GetSecrets", &(&requested, &plain_session))
         .await
         .unwrap();
-    assert_eq!(secrets.len(), 3);
+    assert_eq!(secrets.len(), expected.len());
     for (path, secret) in &secrets {
         assert!(secret.parameters.is_empty());
         assert_eq!(secret.value.as_slice(), expected[path].as_slice());
@@ -84,10 +86,10 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
     let server_pub = Vec::<u8>::try_from(server_pub).unwrap();
     let cipher = client.derive(&server_pub).unwrap();
     let secrets: HashMap<OwnedObjectPath, WireSecret> = proxy
-        .call("GetSecrets", &(&paths, &dh_session))
+        .call("GetSecrets", &(&requested, &dh_session))
         .await
         .unwrap();
-    assert_eq!(secrets.len(), 3);
+    assert_eq!(secrets.len(), expected.len());
     for (path, secret) in &secrets {
         let plaintext = cipher
             .decrypt(&secret.parameters, secret.value.as_slice())
@@ -114,6 +116,19 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
     assert_method_error(&err, UNKNOWN_OBJECT_ERROR);
 
     delete_items(paths).await;
+}
+
+fn bulk_paths(paths: &[OwnedObjectPath]) -> Vec<OwnedObjectPath> {
+    let mut requested = paths.to_vec();
+    requested.push(paths[0].clone());
+    requested.push(OwnedObjectPath::try_from("/org/freedesktop/secrets").unwrap());
+    requested.push(
+        OwnedObjectPath::try_from(
+            "/org/freedesktop/secrets/collection/default/00000000000000000000000000000000",
+        )
+        .unwrap(),
+    );
+    requested
 }
 
 async fn delete_items(paths: Vec<OwnedObjectPath>) {

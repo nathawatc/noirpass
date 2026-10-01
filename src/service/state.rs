@@ -816,4 +816,45 @@ impl ServiceState {
             .await?;
         self.plaintext_to_secret(session, &plaintext, content_type, owner)
     }
+
+    /// Resolve one bulk-request path; missing and mismatched items are skipped.
+    pub(crate) async fn secret_for_item_path(
+        self: &Arc<Self>,
+        path: &OwnedObjectPath,
+        session: &OwnedObjectPath,
+        owner: &str,
+    ) -> Result<Option<Secret>, SecretError> {
+        if self.session_cipher(session, owner).is_none() {
+            return Err(SecretError::NoSession(format!("no session {session}")));
+        }
+        let Some((collection_id, item_id)) = super::parse_item_path(path.as_str()) else {
+            return Ok(None);
+        };
+        if collection_id == SESSION_COLLECTION_ID {
+            let (meta, plaintext) = match self.read_session_item_secret(&item_id) {
+                Ok(item) => item,
+                Err(crate::Error::NotFound(_)) => return Ok(None),
+                Err(err) => return Err(err.into()),
+            };
+            return self
+                .plaintext_to_secret(session, &plaintext, &meta.content_type, owner)
+                .map(Some);
+        }
+        let (meta, ciphertext) = match self
+            .blocking(None, move |state| {
+                Ok(state.store().read_item_secret(&item_id)?)
+            })
+            .await
+        {
+            Ok(item) => item,
+            Err(SecretError::NoSuchObject(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        if meta.collection != collection_id {
+            return Ok(None);
+        }
+        self.ciphertext_to_secret(session, &ciphertext, &meta.content_type, owner)
+            .await
+            .map(Some)
+    }
 }

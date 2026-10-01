@@ -29,6 +29,7 @@ pub use objects::{
     alias_path, collection_path, item_path, parse_collection_path, parse_item_path, register_alias,
     register_collection, register_existing, register_item, session_path, unregister_alias,
 };
+use state::MAX_BLOCKING_WORKERS;
 pub use state::ServiceState;
 
 pub(crate) use objects::object_removed_or_absent;
@@ -326,45 +327,35 @@ impl Service {
         }
 
         let mut out = HashMap::new();
-        for path in items {
-            let Some((collection_id, item_id)) = parse_item_path(path.as_str()) else {
-                continue;
-            };
-            if collection_id == SESSION_COLLECTION_ID {
-                let (meta, plaintext) = match self.state.read_session_item_secret(&item_id) {
-                    Ok(item) => item,
-                    Err(crate::Error::NotFound(_)) => continue,
-                    Err(err) => return Err(err.into()),
-                };
-                let secret = self.state.plaintext_to_secret(
-                    &session,
-                    &plaintext,
-                    &meta.content_type,
-                    &owner,
-                )?;
-                out.insert(path, secret);
-                continue;
+        // Four in-flight items per request; the shared worker pool also bounds all callers.
+        // Drain each batch in input order so repeated paths retain their last result.
+        for batch in items.chunks(MAX_BLOCKING_WORKERS) {
+            let mut tasks = tokio::task::JoinSet::new();
+            for (index, path) in batch.iter().cloned().enumerate() {
+                let state = self.state.clone();
+                let session = session.clone();
+                let owner = owner.clone();
+                tasks.spawn(async move {
+                    let result = state
+                        .secret_for_item_path(&path, &session, &owner)
+                        .await
+                        .map(|secret| secret.map(|secret| (path, secret)));
+                    (index, result)
+                });
             }
-
-            let (meta, ciphertext) = match self
-                .state
-                .blocking(None, move |state| {
-                    Ok(state.store().read_item_secret(&item_id)?)
-                })
-                .await
-            {
-                Ok(item) => item,
-                Err(SecretError::NoSuchObject(_)) => continue,
-                Err(err) => return Err(err),
-            };
-            if meta.collection != collection_id {
-                continue;
+            let mut results = Vec::with_capacity(batch.len());
+            while let Some(result) = tasks.join_next().await {
+                results.push(
+                    result
+                        .map_err(|_| fdo::Error::Failed("secret retrieval task failed".into()))?,
+                );
             }
-            let secret = self
-                .state
-                .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
-                .await?;
-            out.insert(path, secret);
+            results.sort_by_key(|(index, _)| *index);
+            for (_, result) in results {
+                if let Some((path, secret)) = result? {
+                    out.insert(path, secret);
+                }
+            }
         }
         Ok(out)
     }
