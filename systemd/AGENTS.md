@@ -57,6 +57,9 @@ choices, especially why `ReadWritePaths` names the data parent rather than the s
 
 ## Packaging and Validation
 
+Package version follows `Cargo.toml`; do not duplicate the release version in `flake.nix`.
+Package and formatting checks use repository-owned dependencies and fixtures and remain hermetic.
+
 `flake.nix` installs both service files, substitutes the packaged executable path in both, runs
 hermetic package checks, and exposes package/app/check/dev-shell outputs. Changes to unit names,
 activation keys, executable paths, writable paths, or hardening directives require inspecting the

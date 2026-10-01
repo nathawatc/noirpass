@@ -7,17 +7,17 @@ change, preserve security properties, and read the nearest scoped guidance befor
 
 Root rules. Read nearest `AGENTS.md` for narrower ownership guidance.
 
-- `src/cli/AGENTS.md`: CLI entrypoints, commands, confirmation, and daemon orchestration
-- `src/config/AGENTS.md`: configuration, initialization, recipient lifecycle, and deinitialization
-- `src/crypto/AGENTS.md`: Secret Service transport cryptography and secret-memory handling
-- `src/gpg/AGENTS.md`: OpenPGP encryption, certificate validation, and GPG-agent integration
-- `src/service/AGENTS.md`: Secret Service D-Bus API, sessions, objects, signals, and lifecycle
-- `src/store/AGENTS.md`: redb persistence, ciphertext storage, durability, recovery, and integrity
-- `systemd/AGENTS.md`: systemd user service, D-Bus activation, filesystem access, and sandbox hardening
-- `tests/AGENTS.md`: hermetic tests and production-isolation requirements
+- [src/cli/AGENTS.md](src/cli/AGENTS.md): CLI entrypoints, commands, confirmation, and daemon orchestration
+- [src/config/AGENTS.md](src/config/AGENTS.md): configuration, initialization, recipient lifecycle, and deinitialization
+- [src/crypto/AGENTS.md](src/crypto/AGENTS.md): Secret Service transport cryptography and secret-memory handling
+- [src/gpg/AGENTS.md](src/gpg/AGENTS.md): OpenPGP encryption, certificate validation, and GPG-agent integration
+- [src/service/AGENTS.md](src/service/AGENTS.md): Secret Service D-Bus API, sessions, objects, signals, and lifecycle
+- [src/service/state/AGENTS.md](src/service/state/AGENTS.md): handler admission, shutdown, mutation locking, workers, and temporary storage
+- [src/store/AGENTS.md](src/store/AGENTS.md): redb persistence, ciphertext storage, durability, recovery, and integrity
+- [systemd/AGENTS.md](systemd/AGENTS.md): `flake.nix` packaging, systemd activation, and sandbox hardening
+- [tests/AGENTS.md](tests/AGENTS.md): hermetic tests and production-isolation requirements
 
-Subsystem Rust files now live under their owning directories above. Keep new files within the
-nearest ownership boundary; do not duplicate guidance into child files.
+Keep new files within the nearest ownership boundary. Link scoped rules rather than duplicating them.
 
 ## Product Scope
 
@@ -70,16 +70,6 @@ git diff --check
 
 Claim a gate only from observed command output. Optional real-desktop smoke tests remain feature-
 gated and must skip safely when unavailable. Mandatory tests must follow [`tests/AGENTS.md`](tests/AGENTS.md).
-
-## Nix Packaging
-
-- `flake.nix` owns package, app, checks, and development-shell outputs for supported systems.
-- Package version follows `Cargo.toml`; do not duplicate or manually drift the release version in the
-  flake.
-- Package checks and formatting checks remain hermetic and use repository-owned dependencies and test
-  fixtures rather than ambient user services, stores, or keyrings.
-- Packaged activation and systemd service files must be installed and must reference the packaged
-  Noirpass binary, not `/usr/bin/noirpass` from the source templates.
 
 ## Global Change Rules
 
