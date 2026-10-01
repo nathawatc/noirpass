@@ -154,7 +154,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     connection.request_name(SERVICE_NAME).await?;
     info!(name = SERVICE_NAME, "secret service ready");
 
-    wait_for_shutdown(&state, idle_exit).await;
+    wait_for_shutdown(&connection, &state, idle_exit).await;
 
     // Graceful shutdown: release the name so a future activation starts a
     // fresh instance, then drop the connection.
@@ -212,7 +212,11 @@ async fn reap_vanished_clients(connection: zbus::Connection, state: Arc<ServiceS
 
 /// Wait until SIGTERM/SIGINT or configured idle exit with no open transport sessions or temporary secrets.
 /// Zero exits promptly after observed Noirpass application activity completes; -1 waits forever.
-async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: i64) {
+async fn wait_for_shutdown(
+    connection: &zbus::Connection,
+    state: &Arc<ServiceState>,
+    idle_exit: i64,
+) {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("installing SIGTERM handler");
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
@@ -220,6 +224,12 @@ async fn wait_for_shutdown(state: &Arc<ServiceState>, idle_exit: i64) {
 
     loop {
         tokio::select! {
+            () = connection.closed() => {
+                info!("session bus disconnected");
+                state.begin_shutdown();
+                state.wait_for_active_calls().await;
+                return;
+            }
             _ = tokio::signal::ctrl_c() => {
                 info!("received SIGINT");
                 state.begin_shutdown();

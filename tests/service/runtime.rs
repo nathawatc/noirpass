@@ -135,6 +135,90 @@ async fn idle_exit_daemon_exits() {
 }
 
 #[tokio::test]
+async fn temporary_secret_survives_idle_exit_but_not_bus_shutdown() {
+    use noirpass::service::session::Secret;
+    use zeroize::Zeroizing;
+
+    let h = harness();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "0",
+        Some(&h.fake_gpg_dir),
+    );
+    wait_for_name(&address);
+    let conn = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let service = service_proxy(&conn).await;
+    let (_, session): (OwnedValue, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap();
+    let collection = zbus::Proxy::new(
+        &conn,
+        SERVICE_NAME,
+        "/org/freedesktop/secrets/aliases/session",
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    let secret = Secret {
+        session: session.clone(),
+        parameters: Vec::new(),
+        value: Zeroizing::new(b"keep until bus ends".to_vec()),
+        content_type: "text/plain".into(),
+    };
+    let properties: HashMap<String, OwnedValue> = HashMap::new();
+    collection
+        .call::<_, _, (OwnedObjectPath, OwnedObjectPath)>(
+            "CreateItem",
+            &(&properties, &secret, false),
+        )
+        .await
+        .unwrap();
+    let transport = zbus::Proxy::new(
+        &conn,
+        SERVICE_NAME,
+        session,
+        "org.freedesktop.Secret.Session",
+    )
+    .await
+    .unwrap();
+    transport.call::<_, _, ()>("Close", &()).await.unwrap();
+    drop(transport);
+    drop(collection);
+    drop(service);
+    conn.close().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        daemon.try_wait().unwrap().is_none(),
+        "temporary secret must block idle_exit=0 after transport closes"
+    );
+    dbus.kill().expect("kill private dbus-daemon");
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&dbus.wait().unwrap()),
+        Some(libc::SIGKILL)
+    );
+    let status = tokio::task::spawn_blocking(move || {
+        wait_with_timeout(&mut daemon, Duration::from_secs(10))
+    })
+    .await
+    .unwrap();
+    assert!(
+        status.success(),
+        "daemon must exit when its private session bus closes: {status}"
+    );
+}
+
+#[tokio::test]
 async fn disconnect_unregisters_owned_session() {
     let h = harness();
     let (mut dbus, address) = spawn_dbus_daemon();
