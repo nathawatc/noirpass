@@ -1,7 +1,6 @@
 //! Item metadata and ciphertext persistence operations.
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 
 use redb::{ReadableDatabase, ReadableTable};
@@ -189,13 +188,13 @@ impl Store {
                 self.finish_post_commit_cleanup(Self::remove_recovery_file(
                     create_marker,
                     "item metadata committed",
-                    |path| fs::remove_file(path),
+                    |path| self.remove_secret_file(path),
                 ))?;
                 self.finish_post_commit_cleanup(self.sync_secrets_dir())
             }
             Err(PersistError::Definite(err)) => {
                 let path = self.secret_path(id)?;
-                if let Err(cleanup_err) = fs::remove_file(&path) {
+                if let Err(cleanup_err) = self.remove_secret_file(&path) {
                     return self.poison_error(Error::Config(format!(
                         "item metadata write failed: {err}; unindexed ciphertext cleanup failed at {}: {cleanup_err}",
                         path.display()
@@ -206,7 +205,7 @@ impl Store {
                         "item metadata write failed: {err}; unindexed ciphertext was removed, but directory sync failed: {sync_err}"
                     )));
                 }
-                if let Err(cleanup_err) = fs::remove_file(create_marker) {
+                if let Err(cleanup_err) = self.remove_secret_file(create_marker) {
                     return self.poison_error(Error::Config(format!(
                         "item metadata write failed: {err}; create marker cleanup failed at {}: {cleanup_err}",
                         create_marker.display()

@@ -44,7 +44,7 @@ cbc = "0.2.1"
 # `env` (feature addition) enables `#[arg(env = ...)]` for NOIRPASS_STORE.
 clap = { version = "4.6.2", features = ["derive", "env"] }
 hkdf = "0.13.0"
-# `O_NOFOLLOW`/`O_DIRECTORY` keep Noirpass-owned Unix paths fail-closed without unsafe code.
+# Linux `openat2` and dirfd-relative operations keep Noirpass-owned paths anchored and fail-closed.
 libc = "0.2.189"
 num-bigint-dig = { version = "0.9.1", features = ["zeroize"] }
 rand = "0.10.2"

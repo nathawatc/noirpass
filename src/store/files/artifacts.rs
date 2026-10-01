@@ -1,17 +1,15 @@
 //! Recovery and staging artifact mechanics.
 
-use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{create_regular_nofollow, open_directory_nofollow};
 
 use super::super::Store;
 
 impl Store {
     pub(in crate::store) fn sync_secrets_dir(&self) -> Result<()> {
-        open_directory_nofollow(&self.secrets_dir)?.sync_all()?;
+        self.secrets_directory.sync_all()?;
         Ok(())
     }
 
@@ -25,10 +23,10 @@ impl Store {
     pub(super) fn reserve_recovery_path(&self, kind: &str, id: &str) -> Result<PathBuf> {
         for _ in 0..16 {
             let path = self.recovery_path(kind, id);
-            match create_regular_nofollow(&path, 0o600) {
+            match self.create_secret_file(&path) {
                 Ok(file) => {
                     if let Err(sync_err) = file.sync_all() {
-                        return match fs::remove_file(&path) {
+                        return match self.remove_secret_file(&path) {
                             Ok(()) => Err(sync_err.into()),
                             Err(cleanup_err) => self.poison_error(Error::Config(format!(
                                 "failed to sync reserved recovery path: {sync_err}; cleanup {} also failed: {cleanup_err}",
@@ -47,10 +45,10 @@ impl Store {
         )))
     }
 
-    pub(super) fn cleanup_files(paths: &[&Path]) -> io::Result<()> {
+    pub(super) fn cleanup_files(&self, paths: &[&Path]) -> io::Result<()> {
         let mut first_error = None;
         for path in paths {
-            if let Err(err) = fs::remove_file(path)
+            if let Err(err) = self.remove_secret_file(path)
                 && first_error.is_none()
             {
                 first_error = Some(err);
@@ -70,12 +68,12 @@ impl Store {
     ) -> Result<PathBuf> {
         for _ in 0..16 {
             let path = self.recovery_path(kind, id);
-            match create_regular_nofollow(&path, 0o600) {
+            match self.create_secret_file(&path) {
                 Ok(mut file) => {
                     if let Err(write_err) =
                         file.write_all(ciphertext).and_then(|()| file.sync_all())
                     {
-                        return match fs::remove_file(&path) {
+                        return match self.remove_secret_file(&path) {
                             Ok(()) => Err(write_err.into()),
                             Err(cleanup_err) => self.poison_error(Error::Config(format!(
                                 "failed to write staged ciphertext: {write_err}; cleanup {} also failed: {cleanup_err}",
@@ -84,7 +82,7 @@ impl Store {
                         };
                     }
                     if let Err(sync_err) = self.sync_secrets_dir() {
-                        return match fs::remove_file(&path) {
+                        return match self.remove_secret_file(&path) {
                             Ok(()) => match self.sync_secrets_dir() {
                                 Ok(()) => Err(sync_err),
                                 Err(cleanup_sync_err) => self.poison_error(Error::Config(format!(
@@ -124,7 +122,7 @@ impl Store {
     pub(super) fn restore_quarantines(&self, moves: &[(PathBuf, PathBuf)]) -> Result<()> {
         let mut first_error = None;
         for (path, quarantine) in moves.iter().rev() {
-            if let Err(err) = fs::rename(quarantine, path)
+            if let Err(err) = self.rename_secret_file(quarantine, path)
                 && first_error.is_none()
             {
                 first_error = Some(format!(

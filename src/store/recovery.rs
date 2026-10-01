@@ -1,15 +1,11 @@
 //! Interrupted-operation recovery.
 
-use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 
 use redb::ReadableDatabase;
 
 use crate::error::{Error, Result};
-use crate::filesystem::{
-    read_regular_file_nofollow, validate_existing_regular_or_absent, validate_no_symlink_components,
-};
 
 use super::{ITEMS, Store, ciphertext_sha256, is_valid_item_id};
 
@@ -21,9 +17,10 @@ impl Store {
     )]
     pub fn recover_interrupted_operations(&self) -> Result<()> {
         let _recovery_guard = self.write_guard_checked()?;
-        validate_no_symlink_components(&self.secrets_dir)?;
-        let mut recovery_files = fs::read_dir(&self.secrets_dir)?
-            .map(|entry| entry.map(|entry| entry.path()))
+        let mut recovery_files = self
+            .secrets_directory
+            .read_dir()?
+            .map(|entry| entry.map(|entry| self.secrets_dir.join(entry.file_name())))
             .collect::<io::Result<Vec<_>>>()?;
         recovery_files.sort_by_key(|path| {
             let name = path
@@ -63,7 +60,7 @@ impl Store {
                     "invalid recovery filename: {file_name}"
                 )));
             };
-            let file_metadata = fs::symlink_metadata(&recovery)?;
+            let file_metadata = self.secret_metadata(&recovery)?;
             let valid_suffix = suffix.strip_suffix(".gpg").is_some_and(|token| {
                 token.len() == 16 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
             });
@@ -74,12 +71,12 @@ impl Store {
                 )));
             }
             if file_metadata.len() == 0 {
-                fs::remove_file(&recovery)?;
+                self.remove_secret_file(&recovery)?;
                 continue;
             }
 
             let canonical = self.secret_path(id)?;
-            validate_existing_regular_or_absent(&canonical)?;
+            self.validate_secret_regular_or_absent(&canonical)?;
             if kind == "create" {
                 match self.get_item(id) {
                     Ok(metadata) => {
@@ -89,24 +86,24 @@ impl Store {
                                 recovery.display()
                             ))
                         })?;
-                        let ciphertext = read_regular_file_nofollow(&canonical)?;
+                        let ciphertext = self.read_secret_path(&canonical)?;
                         if ciphertext_sha256(&ciphertext) != expected_hash {
                             return Err(Error::Config(format!(
                                 "create recovery file does not match committed ciphertext: {}",
                                 recovery.display()
                             )));
                         }
-                        fs::remove_file(&recovery)?;
+                        self.remove_secret_file(&recovery)?;
                     }
-                    Err(Error::NotFound(_)) => match fs::symlink_metadata(&canonical) {
+                    Err(Error::NotFound(_)) => match self.secret_metadata(&canonical) {
                         Ok(canonical_metadata)
                             if canonical_metadata.file_type().is_file()
                                 && canonical_metadata.dev() == file_metadata.dev()
                                 && canonical_metadata.ino() == file_metadata.ino() =>
                         {
-                            fs::remove_file(&canonical)?;
+                            self.remove_secret_file(&canonical)?;
                             self.sync_secrets_dir()?;
-                            fs::remove_file(&recovery)?;
+                            self.remove_secret_file(&recovery)?;
                         }
                         Ok(_) => {
                             return Err(Error::Config(format!(
@@ -115,7 +112,7 @@ impl Store {
                             )));
                         }
                         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                            fs::remove_file(&recovery)?;
+                            self.remove_secret_file(&recovery)?;
                         }
                         Err(err) => return Err(err.into()),
                     },
@@ -124,7 +121,7 @@ impl Store {
                 continue;
             }
             if kind == "update" {
-                fs::remove_file(&recovery)?;
+                self.remove_secret_file(&recovery)?;
                 continue;
             }
 
@@ -132,9 +129,9 @@ impl Store {
                 let txn = self.db.begin_read()?;
                 let items = txn.open_table(ITEMS)?;
                 if items.get(id)?.is_some() {
-                    fs::rename(&recovery, &canonical)?;
+                    self.rename_secret_file(&recovery, &canonical)?;
                 } else {
-                    fs::remove_file(&recovery)?;
+                    self.remove_secret_file(&recovery)?;
                 }
                 continue;
             }
@@ -150,16 +147,16 @@ impl Store {
                 Err(err) => return Err(err),
             };
             let Some(expected_hash) = metadata.ciphertext_sha256 else {
-                fs::rename(&recovery, &canonical)?;
+                self.rename_secret_file(&recovery, &canonical)?;
                 continue;
             };
-            match read_regular_file_nofollow(&canonical) {
+            match self.read_secret_path(&canonical) {
                 Ok(ciphertext) if ciphertext_sha256(&ciphertext) == expected_hash => {
-                    fs::remove_file(&recovery)?;
+                    self.remove_secret_file(&recovery)?;
                 }
-                Ok(_) => fs::rename(&recovery, &canonical)?,
+                Ok(_) => self.rename_secret_file(&recovery, &canonical)?,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    fs::rename(&recovery, &canonical)?;
+                    self.rename_secret_file(&recovery, &canonical)?;
                 }
                 Err(err) => return Err(err.into()),
             }

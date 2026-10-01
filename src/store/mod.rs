@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::filesystem::{
-    ensure_dir_0700, open_regular_read_nofollow, open_regular_rw_create_nofollow,
-    open_regular_rw_nofollow, validate_no_symlink_components,
+    Directory, ensure_dir_0700, open_regular_read_nofollow, open_regular_rw_nofollow,
+    validate_no_symlink_components,
 };
 
 mod collections;
@@ -85,6 +85,7 @@ pub struct ItemMeta {
 pub struct Store {
     db: Database,
     secrets_dir: PathBuf,
+    secrets_directory: Directory,
     poisoned: AtomicBool,
     transaction_gate: RwLock<()>,
 }
@@ -379,7 +380,10 @@ impl Store {
         let secrets_dir = dir.join("secrets");
         ensure_dir_0700(&secrets_dir)?;
 
-        let index = open_regular_rw_create_nofollow(&dir.join("index.redb"), 0o600)?;
+        let root = Directory::open(dir)?;
+        let secrets_directory = root.child(Path::new("secrets"))?;
+        let index =
+            root.open_regular(Path::new("index.redb"), libc::O_RDWR | libc::O_CREAT, 0o600)?;
         let db = Database::builder().create_file(index)?;
         // Ensure all tables exist so read-only transactions never fail on a
         // brand-new database.
@@ -393,6 +397,7 @@ impl Store {
 
         Ok(Self {
             db,
+            secrets_directory,
             secrets_dir,
             poisoned: AtomicBool::new(false),
             transaction_gate: RwLock::new(()),
@@ -406,7 +411,9 @@ impl Store {
     /// while the daemon is using the same index.
     pub fn open_existing(dir: &Path) -> Result<Self> {
         let (secrets_dir, index_path) = existing_store_paths(dir)?;
-        let index = open_regular_rw_nofollow(&index_path)?;
+        let root = Directory::open(dir)?;
+        let secrets_directory = root.child(Path::new("secrets"))?;
+        let index = root.open_regular(Path::new("index.redb"), libc::O_RDWR, 0)?;
         if index.metadata()?.len() == 0 {
             return Err(Error::Config(format!(
                 "metadata database is empty: {}",
@@ -431,6 +438,7 @@ impl Store {
         }
         Ok(Self {
             db,
+            secrets_directory,
             secrets_dir,
             poisoned: AtomicBool::new(false),
             transaction_gate: RwLock::new(()),

@@ -269,7 +269,7 @@ fn create_persist_ciphertext_cleanup_failure_poisons_store() {
 }
 
 #[test]
-fn create_persist_cleanup_sync_failure_poisons_store() {
+fn create_persist_cleanup_stays_in_pinned_directory_after_path_replacement() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -292,25 +292,18 @@ fn create_persist_cleanup_sync_failure_poisons_store() {
         )
         .unwrap_err();
 
-    let message = err.to_string();
-    assert!(
-        message.contains("item metadata write failed: config error: injected metadata failure"),
-        "{message}"
-    );
-    assert!(
-        message.contains("unindexed ciphertext was removed, but directory sync failed"),
-        "{message}"
-    );
-    assert!(!path.exists());
-    assert!(marker.exists());
+    // Replacing the pathname no longer injects a sync failure: rollback and sync use the pinned fd.
+    assert_eq!(err.to_string(), "config error: injected metadata failure");
+    assert!(!real_secrets_dir.join(path.file_name().unwrap()).exists());
+    assert!(!real_secrets_dir.join(marker.file_name().unwrap()).exists());
     assert!(
         fs::symlink_metadata(&store.secrets_dir)
             .unwrap()
             .file_type()
             .is_symlink()
     );
-    assert!(store.is_poisoned());
-    assert!(store.create_collection("blocked", None).is_err());
+    assert!(!store.is_poisoned());
+    assert!(store.create_collection("available", None).is_ok());
 }
 
 #[test]
@@ -530,4 +523,54 @@ fn create_install_final_marker_sync_failure_poisons_store() {
     assert!(!marker.exists());
     assert!(store.is_poisoned());
     assert!(store.create_collection("blocked", None).is_err());
+}
+
+#[test]
+fn ciphertext_operations_stay_in_pinned_store_after_parent_replacement() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let original = tmp.path().join("store");
+    let moved = tmp.path().join("moved");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(outside.join("secrets")).unwrap();
+    let store = Store::open(&original).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let item = store
+        .create_item(
+            &collection.id,
+            "first",
+            HashMap::new(),
+            "text/plain",
+            b"old",
+        )
+        .unwrap();
+    let filename = format!("{}.gpg", item.id);
+    fs::write(outside.join("secrets").join(&filename), b"unrelated").unwrap();
+    fs::rename(&original, &moved).unwrap();
+    symlink(&outside, &original).unwrap();
+    assert_eq!(store.read_item_secret(&item.id).unwrap().1, b"old");
+    store
+        .update_item(&item.id, None, None, None, Some(b"new"))
+        .unwrap();
+    assert_eq!(store.read_item_secret(&item.id).unwrap().1, b"new");
+    let added = store
+        .create_item(
+            &collection.id,
+            "second",
+            HashMap::new(),
+            "text/plain",
+            b"second",
+        )
+        .unwrap();
+    store.recover_interrupted_operations().unwrap();
+    assert!(store.check_integrity().unwrap().is_healthy());
+    store.delete_item(&item.id).unwrap();
+    store.delete_item(&added.id).unwrap();
+    assert_eq!(
+        fs::read(outside.join("secrets").join(filename)).unwrap(),
+        b"unrelated"
+    );
+    assert_eq!(fs::read_dir(outside.join("secrets")).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(moved.join("secrets")).unwrap().count(), 0);
+    assert!(Store::open_existing(&original).is_err());
 }

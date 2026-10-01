@@ -1,12 +1,15 @@
 //! Unix filesystem primitives for Noirpass-owned paths.
 //!
-//! Path checks reject symlink components, while final file opens use
-//! `O_NOFOLLOW` so reads and creates do not turn a metadata check into a
-//! symlink-following operation.
+//! Linux `openat2` resolves all components beneath an owned directory descriptor
+//! with `RESOLVE_NO_SYMLINKS`. Store ciphertext mutations use pinned directory
+//! descriptors. Kernels without openat2 fail closed rather than using racy opens.
 
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::ffi::CString;
+use std::fs::{self, File, Permissions};
 use std::io::{self, Read};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 const NOFOLLOW_NONBLOCK: i32 = libc::O_NOFOLLOW | libc::O_NONBLOCK;
@@ -22,68 +25,195 @@ fn regular_file(file: File, path: &Path) -> io::Result<File> {
     }
 }
 
-/// Open an existing regular file for reading without following its final symlink.
+/// A directory descriptor pins path operations to the opened directory even if renamed.
+#[derive(Debug)]
+pub(crate) struct Directory(File);
+
+impl Directory {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        Ok(Self(open_path(
+            path,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            0,
+        )?))
+    }
+
+    pub(crate) fn child(&self, name: &Path) -> io::Result<Self> {
+        Ok(Self(self.open_file(
+            name,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            0,
+        )?))
+    }
+
+    pub(crate) fn open_regular(&self, name: &Path, flags: i32, mode: u32) -> io::Result<File> {
+        regular_file(self.open_file(name, flags, mode)?, name)
+    }
+
+    fn ensure_linked(&self) -> io::Result<()> {
+        if self.0.metadata()?.nlink() == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "opened directory was removed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn sync_all(&self) -> io::Result<()> {
+        self.ensure_linked()?;
+        self.0.sync_all()
+    }
+
+    pub(crate) fn open_file(&self, name: &Path, flags: i32, mode: u32) -> io::Result<File> {
+        open_beneath(&self.0, name, flags, mode)
+    }
+
+    pub(crate) fn metadata(&self, name: &Path) -> io::Result<fs::Metadata> {
+        // O_PATH | O_NOFOLLOW inspects the final symlink itself, never its target.
+        self.open_file(name, libc::O_PATH | libc::O_NOFOLLOW, 0)?
+            .metadata()
+    }
+
+    pub(crate) fn read_dir(&self) -> io::Result<fs::ReadDir> {
+        self.ensure_linked()?;
+        // This deliberate procfs magic link refers to our live, owned descriptor.
+        // Entry names are subsequently accessed relative to that descriptor.
+        fs::read_dir(format!("/proc/self/fd/{}", self.0.as_raw_fd()))
+    }
+
+    pub(crate) fn remove(&self, name: &Path) -> io::Result<()> {
+        let name = entry_name(name)?;
+        // SAFETY: the directory fd and NUL-terminated name remain live for the call.
+        syscall_result(unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) })
+    }
+
+    pub(crate) fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let from = entry_name(from)?;
+        let to = entry_name(to)?;
+        // SAFETY: both names and the owned directory fd remain live for the call.
+        syscall_result(unsafe {
+            libc::renameat(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                self.0.as_raw_fd(),
+                to.as_ptr(),
+            )
+        })
+    }
+
+    pub(crate) fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let from = entry_name(from)?;
+        let to = entry_name(to)?;
+        // SAFETY: both names and the owned directory fd remain live for the call.
+        syscall_result(unsafe {
+            libc::linkat(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                self.0.as_raw_fd(),
+                to.as_ptr(),
+                0,
+            )
+        })
+    }
+}
+
+fn syscall_result(result: i32) -> io::Result<()> {
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn entry_name(path: &Path) -> io::Result<CString> {
+    if path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected one directory entry name",
+        ));
+    }
+    CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)
+}
+
+/// Resolve every component in the kernel; no check/open race or symlink fallback.
+fn open_beneath(directory: &File, path: &Path, flags: i32, mode: u32) -> io::Result<File> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    // SAFETY: open_how contains only integer fields, for which all-zero is valid.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    let nofollow = if flags & libc::O_PATH == 0 {
+        NOFOLLOW_NONBLOCK
+    } else {
+        libc::O_NOFOLLOW
+    };
+    how.flags = u64::try_from(flags | libc::O_CLOEXEC | nofollow).map_err(io::Error::other)?;
+    how.mode = u64::from(mode);
+    how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS;
+    // SAFETY: pointers reference live initialized values, size matches open_how, fd is owned.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            directory.as_raw_fd(),
+            path.as_ptr(),
+            &raw const how,
+            size_of::<libc::open_how>(),
+        )
+    };
+    if result == -1 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains symlink",
+            ));
+        }
+        return Err(error);
+    }
+    let fd = i32::try_from(result).map_err(io::Error::other)?;
+    // SAFETY: successful openat2 returns a new descriptor whose ownership transfers to File.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn open_path(path: &Path, flags: i32, mode: u32) -> io::Result<File> {
+    let (base, relative) = if path.is_absolute() {
+        (
+            File::open("/")?,
+            path.strip_prefix("/").map_err(io::Error::other)?,
+        )
+    } else {
+        (File::open(".")?, path)
+    };
+    let relative = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
+    open_beneath(&base, relative, flags, mode)
+}
+
 pub(crate) fn open_regular_read_nofollow(path: &Path) -> io::Result<File> {
-    validate_no_symlink_components(path)?;
-    regular_file(
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(NOFOLLOW_NONBLOCK)
-            .open(path)?,
-        path,
-    )
+    regular_file(open_path(path, libc::O_RDONLY, 0)?, path)
 }
 
-/// Open an existing regular file for read/write without following its final symlink.
 pub(crate) fn open_regular_rw_nofollow(path: &Path) -> io::Result<File> {
-    validate_no_symlink_components(path)?;
-    regular_file(
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(NOFOLLOW_NONBLOCK)
-            .open(path)?,
-        path,
-    )
+    regular_file(open_path(path, libc::O_RDWR, 0)?, path)
 }
 
-/// Open or create a regular file without following its final symlink.
 pub(crate) fn open_regular_rw_create_nofollow(path: &Path, mode: u32) -> io::Result<File> {
-    validate_no_symlink_components(path)?;
-    regular_file(
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(mode)
-            .custom_flags(NOFOLLOW_NONBLOCK)
-            .open(path)?,
-        path,
-    )
+    regular_file(open_path(path, libc::O_RDWR | libc::O_CREAT, mode)?, path)
 }
 
-/// Create a new regular file without following its final symlink.
 pub(crate) fn create_regular_nofollow(path: &Path, mode: u32) -> io::Result<File> {
-    validate_no_symlink_components(path)?;
     regular_file(
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(NOFOLLOW_NONBLOCK)
-            .open(path)?,
+        open_path(path, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)?,
         path,
     )
 }
 
-/// Open an existing directory without following its final symlink.
 pub(crate) fn open_directory_nofollow(path: &Path) -> io::Result<File> {
-    validate_no_symlink_components(path)?;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | NOFOLLOW_NONBLOCK)
-        .open(path)
+    open_path(path, libc::O_RDONLY | libc::O_DIRECTORY, 0)
 }
 
 /// Read one regular file through a no-follow descriptor.
@@ -165,4 +295,50 @@ pub(crate) fn ensure_dir_0700(path: &Path) -> io::Result<()> {
     let directory = open_directory_nofollow(path)?;
     directory.set_permissions(Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn kernel_resolution_rejects_symlinks_escape_and_nonregular_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = tmp.path().join("owned");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&owned).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("value"), b"untouched").unwrap();
+        symlink(&outside, owned.join("link")).unwrap();
+        assert!(open_regular_read_nofollow(&owned.join("link/value")).is_err());
+        assert!(create_regular_nofollow(&owned.join("link/new"), 0o600).is_err());
+        let directory = Directory::open(&owned).unwrap();
+        assert!(
+            directory
+                .open_file(Path::new("../outside/value"), libc::O_RDONLY, 0)
+                .is_err()
+        );
+        assert!(
+            directory
+                .open_file(&outside.join("value"), libc::O_RDONLY, 0)
+                .is_err()
+        );
+        for name in ["..", ".", "../outside/value", "/outside", ""] {
+            assert!(directory.remove(Path::new(name)).is_err());
+        }
+        assert!(
+            directory
+                .rename(Path::new("link"), Path::new("../escaped"))
+                .is_err()
+        );
+        assert!(
+            directory
+                .hard_link(Path::new("../outside/value"), Path::new("copy"))
+                .is_err()
+        );
+        assert!(open_regular_read_nofollow(&owned).is_err());
+        assert_eq!(fs::read(outside.join("value")).unwrap(), b"untouched");
+        assert!(!outside.join("new").exists());
+    }
 }

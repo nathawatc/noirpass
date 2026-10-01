@@ -1,14 +1,13 @@
 //! Store integrity scanning and startup safety policy.
 
 use std::collections::HashSet;
-use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 use redb::{DatabaseError, ReadableDatabase, ReadableTable};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{read_regular_file_nofollow, validate_no_symlink_components};
+use crate::filesystem::Directory;
 
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, ITEMS, IndexedItem,
@@ -29,7 +28,7 @@ impl Store {
 
     /// Cross-check every redb item against ciphertext files on disk.
     pub fn check_integrity(&self) -> Result<IntegrityReport> {
-        scan_integrity(&self.db, &self.secrets_dir)
+        scan_integrity(&self.db, &self.secrets_dir, &self.secrets_directory)
     }
 
     /// Cross-check an existing store without acquiring its writer lock.
@@ -44,7 +43,7 @@ impl Store {
             }
             Err(err) => return Err(err.into()),
         };
-        scan_integrity(&db, &secrets_dir)
+        scan_integrity(&db, &secrets_dir, &Directory::open(&secrets_dir)?)
     }
 }
 
@@ -52,8 +51,11 @@ impl Store {
     clippy::too_many_lines,
     reason = "single read transaction validates related collection, item, and alias tables"
 )]
-fn scan_integrity<D: ReadableDatabase>(db: &D, secrets_dir: &Path) -> Result<IntegrityReport> {
-    validate_no_symlink_components(secrets_dir)?;
+fn scan_integrity<D: ReadableDatabase>(
+    db: &D,
+    secrets_dir: &Path,
+    directory: &Directory,
+) -> Result<IntegrityReport> {
     let txn = db.begin_read()?;
     let mut collection_ids = HashSet::new();
     let mut present_collection_ids = HashSet::new();
@@ -149,10 +151,17 @@ fn scan_integrity<D: ReadableDatabase>(db: &D, secrets_dir: &Path) -> Result<Int
             }
         };
         let path = super::secret_path(secrets_dir, &table_key)?;
-        match fs::symlink_metadata(&path) {
+        match directory.metadata(Path::new(path.file_name().expect("canonical filename"))) {
             Ok(file_metadata) if file_metadata.file_type().is_file() => {
                 if let Some(expected_hash) = &metadata.ciphertext_sha256 {
-                    let ciphertext = read_regular_file_nofollow(&path)?;
+                    let mut ciphertext = Vec::new();
+                    directory
+                        .open_regular(
+                            Path::new(path.file_name().expect("canonical filename")),
+                            libc::O_RDONLY,
+                            0,
+                        )?
+                        .read_to_end(&mut ciphertext)?;
                     if ciphertext_sha256(&ciphertext) != *expected_hash {
                         ciphertext_mismatches.push(IndexedItem {
                             table_key,
@@ -198,16 +207,16 @@ fn scan_integrity<D: ReadableDatabase>(db: &D, secrets_dir: &Path) -> Result<Int
 
     let mut orphan_secret_files = Vec::new();
     let mut recovery_secret_files = Vec::new();
-    for entry in fs::read_dir(secrets_dir)? {
+    for entry in directory.read_dir()? {
         let entry = entry?;
-        let path = entry.path();
+        let path = secrets_dir.join(entry.file_name());
         let file_name = entry.file_name().to_string_lossy().into_owned();
         if file_name.starts_with(".noirpass-backup-")
             || file_name.starts_with(".noirpass-quarantine-")
             || file_name.starts_with(".noirpass-create-")
             || file_name.starts_with(".noirpass-update-")
         {
-            if !entry.file_type()?.is_file() {
+            if !directory.metadata(Path::new(&entry.file_name()))?.is_file() {
                 return Err(Error::Config(format!(
                     "recovery path is not a regular file: {}",
                     path.display()
@@ -219,7 +228,7 @@ fn scan_integrity<D: ReadableDatabase>(db: &D, secrets_dir: &Path) -> Result<Int
         if path.extension().is_none_or(|extension| extension != "gpg") {
             continue;
         }
-        if !entry.file_type()?.is_file() {
+        if !directory.metadata(Path::new(&entry.file_name()))?.is_file() {
             return Err(Error::Config(format!(
                 "secret path is not a regular file: {}",
                 path.display()

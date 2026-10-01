@@ -220,10 +220,13 @@ pub(in super::super) async fn s12_item_mutation_signals() {
             .await
             .unwrap()
     );
-    let secrets_dir = h.store_dir.join("secrets");
-    let hidden_secrets_dir = h.store_dir.join("s12-secrets-hidden");
-    std::fs::rename(&secrets_dir, &hidden_secrets_dir).unwrap();
-    std::fs::write(&secrets_dir, b"not a directory").unwrap();
+    // The daemon pins its directory fd, so replacing the directory pathname no longer fails writes.
+    // Replace the final ciphertext entry with a directory to inject a real validation failure.
+    let item_id = item_path.as_str().rsplit('/').next().unwrap();
+    let ciphertext = h.store_dir.join("secrets").join(format!("{item_id}.gpg"));
+    let hidden_ciphertext = h.store_dir.join("s12-ciphertext-hidden");
+    std::fs::rename(&ciphertext, &hidden_ciphertext).unwrap();
+    std::fs::create_dir(&ciphertext).unwrap();
     let failed_secret = WireSecret {
         session,
         parameters: Vec::new(),
@@ -233,8 +236,8 @@ pub(in super::super) async fn s12_item_mutation_signals() {
     let failure = item_proxy
         .call::<_, _, ()>("SetSecret", &(&failed_secret,))
         .await;
-    std::fs::remove_file(&secrets_dir).unwrap();
-    std::fs::rename(&hidden_secrets_dir, &secrets_dir).unwrap();
+    std::fs::remove_dir(&ciphertext).unwrap();
+    std::fs::rename(&hidden_ciphertext, &ciphertext).unwrap();
     assert!(failure.is_err(), "SetSecret persistence must fail");
     assert!(
         tokio::time::timeout(

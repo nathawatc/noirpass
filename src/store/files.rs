@@ -3,24 +3,86 @@
 mod artifacts;
 mod transactions;
 
-use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::fs::{File, Metadata};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{read_regular_file_nofollow, validate_existing_regular_or_absent};
 
 use super::Store;
 
 impl Store {
+    fn secret_entry<'a>(&self, path: &'a Path) -> io::Result<&'a Path> {
+        if path.parent() != Some(self.secrets_dir.as_path()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path is outside secrets directory",
+            ));
+        }
+        path.file_name()
+            .map(Path::new)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing secret filename"))
+    }
+
+    pub(super) fn secret_metadata(&self, path: &Path) -> io::Result<Metadata> {
+        self.secrets_directory.metadata(self.secret_entry(path)?)
+    }
+
+    pub(super) fn validate_secret_regular_or_absent(&self, path: &Path) -> io::Result<()> {
+        match self.secret_metadata(path) {
+            Ok(metadata) if metadata.is_file() => Ok(()),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secret path is not a regular file",
+            )),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(super) fn create_secret_file(&self, path: &Path) -> io::Result<File> {
+        self.secrets_directory.open_file(
+            self.secret_entry(path)?,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )
+    }
+
+    pub(super) fn read_secret_path(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let mut file =
+            self.secrets_directory
+                .open_file(self.secret_entry(path)?, libc::O_RDONLY, 0)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secret path is not a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub(super) fn remove_secret_file(&self, path: &Path) -> io::Result<()> {
+        self.secrets_directory.remove(self.secret_entry(path)?)
+    }
+
+    pub(super) fn rename_secret_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.secrets_directory
+            .rename(self.secret_entry(from)?, self.secret_entry(to)?)
+    }
+
     /// Atomically write `ciphertext` to `secrets/<id>.gpg` with `0600`
     /// permissions.
     pub(super) fn write_secret_file(&self, id: &str, ciphertext: &[u8]) -> Result<PathBuf> {
         let path = self.secret_path(id)?;
-        validate_existing_regular_or_absent(&path)?;
+        self.validate_secret_regular_or_absent(&path)?;
         let staged = self.stage_secret_file(id, ciphertext, "create")?;
-        if let Err(install_err) = fs::hard_link(&staged, &path) {
-            return match Self::cleanup_files(&[&staged]) {
+        if let Err(install_err) = self
+            .secrets_directory
+            .hard_link(self.secret_entry(&staged)?, self.secret_entry(&path)?)
+        {
+            return match self.cleanup_files(&[&staged]) {
                 Ok(()) => match self.sync_secrets_dir() {
                     Ok(()) => Err(install_err.into()),
                     Err(sync_err) => self.poison_error(Error::Config(format!(
@@ -37,7 +99,7 @@ impl Store {
             &path,
             &staged,
             || self.sync_secrets_dir(),
-            |candidate| fs::remove_file(candidate),
+            |candidate| self.remove_secret_file(candidate),
         )?;
         Ok(staged)
     }
@@ -45,7 +107,7 @@ impl Store {
     pub(super) fn read_secret_file_unlocked(&self, id: &str) -> Result<Vec<u8>> {
         self.ensure_not_poisoned()?;
         let path = self.secret_path(id)?;
-        match read_regular_file_nofollow(&path) {
+        match self.read_secret_path(&path) {
             Ok(bytes) => Ok(bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 Err(Error::NotFound(format!("secret file for item {id}")))

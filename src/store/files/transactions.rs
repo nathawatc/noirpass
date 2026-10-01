@@ -1,11 +1,9 @@
 //! Persistence transaction orchestration and state machines.
 
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{open_directory_nofollow, validate_existing_regular_or_absent};
 
 use super::super::{PersistError, Store};
 
@@ -51,23 +49,23 @@ impl Store {
         staged: &Path,
         commit: impl FnOnce() -> std::result::Result<T, PersistError>,
     ) -> Result<T> {
-        validate_existing_regular_or_absent(path)?;
+        self.validate_secret_regular_or_absent(path)?;
         let id = path
             .file_stem()
             .and_then(|name| name.to_str())
             .ok_or_else(|| Error::Config(format!("invalid secret path: {}", path.display())))?;
         let backup = self.reserve_recovery_path("backup", id)?;
-        if let Err(backup_err) = fs::rename(path, &backup) {
-            return match Self::cleanup_files(&[staged, &backup]) {
+        if let Err(backup_err) = self.rename_secret_file(path, &backup) {
+            return match self.cleanup_files(&[staged, &backup]) {
                 Ok(()) => Err(backup_err.into()),
                 Err(cleanup_err) => self.poison_error(Error::Config(format!(
                     "failed to preserve previous ciphertext: {backup_err}; staged/recovery cleanup also failed: {cleanup_err}"
                 ))),
             };
         }
-        if let Err(install_err) = fs::rename(staged, path) {
-            let restore = fs::rename(&backup, path);
-            let cleanup = fs::remove_file(staged);
+        if let Err(install_err) = self.rename_secret_file(staged, path) {
+            let restore = self.rename_secret_file(&backup, path);
+            let cleanup = self.remove_secret_file(staged);
             let sync = self.sync_secrets_dir();
             return match (&restore, &cleanup, &sync) {
                 (Ok(()), Ok(()), Ok(())) => Err(install_err.into()),
@@ -86,8 +84,9 @@ impl Store {
             };
         }
         if let Err(sync_err) = self.sync_secrets_dir() {
-            let rollback = fs::rename(&backup, path)
-                .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all());
+            let rollback = self
+                .rename_secret_file(&backup, path)
+                .and_then(|()| self.secrets_directory.sync_all());
             return match rollback {
                 Ok(()) => Err(sync_err),
                 Err(rollback_err) => self.poison_error(Error::Config(format!(
@@ -102,14 +101,15 @@ impl Store {
                 self.finish_post_commit_cleanup(Self::remove_recovery_file(
                     &backup,
                     "metadata committed and new ciphertext installed",
-                    |path| fs::remove_file(path),
+                    |path| self.remove_secret_file(path),
                 ))?;
                 self.finish_post_commit_cleanup(self.sync_secrets_dir())?;
                 Ok(value)
             }
             Err(PersistError::Definite(err)) => {
-                let rollback = fs::rename(&backup, path)
-                    .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all());
+                let rollback = self
+                    .rename_secret_file(&backup, path)
+                    .and_then(|()| self.secrets_directory.sync_all());
                 match rollback {
                     Ok(()) => Err(err),
                     Err(rollback_err) => self.poison_error(Error::Config(format!(
@@ -132,17 +132,18 @@ impl Store {
         path: &Path,
         commit: impl FnOnce() -> std::result::Result<T, PersistError>,
     ) -> Result<T> {
-        validate_existing_regular_or_absent(path)?;
+        self.validate_secret_regular_or_absent(path)?;
         let id = path
             .file_stem()
             .and_then(|name| name.to_str())
             .ok_or_else(|| Error::Config(format!("invalid secret path: {}", path.display())))?;
         let quarantine = self.reserve_recovery_path("quarantine", id)?;
-        let quarantined = match fs::rename(path, &quarantine) {
+        let quarantined = match self.rename_secret_file(path, &quarantine) {
             Ok(()) => {
                 if let Err(sync_err) = self.sync_secrets_dir() {
-                    let restore = fs::rename(&quarantine, path)
-                        .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all());
+                    let restore = self
+                        .rename_secret_file(&quarantine, path)
+                        .and_then(|()| self.secrets_directory.sync_all());
                     return match restore {
                         Ok(()) => Err(sync_err),
                         Err(restore_err) => self.poison_error(Error::Config(format!(
@@ -154,11 +155,11 @@ impl Store {
                 true
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                fs::remove_file(&quarantine)?;
+                self.remove_secret_file(&quarantine)?;
                 false
             }
             Err(err) => {
-                return match fs::remove_file(&quarantine) {
+                return match self.remove_secret_file(&quarantine) {
                     Ok(()) => Err(err.into()),
                     Err(cleanup_err) => self.poison_error(Error::Config(format!(
                         "failed to quarantine ciphertext: {err}; reserved-path cleanup also failed at {}: {cleanup_err}",
@@ -173,14 +174,14 @@ impl Store {
                 self.finish_post_commit_cleanup(Self::remove_recovery_file(
                     &quarantine,
                     "metadata deletion committed",
-                    |path| fs::remove_file(path),
+                    |path| self.remove_secret_file(path),
                 ))?;
                 self.finish_post_commit_cleanup(self.sync_secrets_dir())?;
                 Ok(value)
             }
             Ok(value) => Ok(value),
-            Err(PersistError::Definite(err)) if quarantined => match fs::rename(&quarantine, path)
-                .and_then(|()| open_directory_nofollow(&self.secrets_dir)?.sync_all())
+            Err(PersistError::Definite(err)) if quarantined => match self.rename_secret_file(&quarantine, path)
+                .and_then(|()| self.secrets_directory.sync_all())
             {
                 Ok(()) => Err(err),
                 Err(restore_err) => self.poison_error(Error::Config(format!(
@@ -206,7 +207,7 @@ impl Store {
         let validated = paths
             .iter()
             .map(|path| {
-                validate_existing_regular_or_absent(path)?;
+                self.validate_secret_regular_or_absent(path)?;
                 let id = path
                     .file_stem()
                     .and_then(|name| name.to_str())
@@ -225,7 +226,7 @@ impl Store {
                         .iter()
                         .map(|(_, quarantine): &(PathBuf, PathBuf)| quarantine.as_path())
                         .collect::<Vec<_>>();
-                    return match Self::cleanup_files(&reserved) {
+                    return match self.cleanup_files(&reserved) {
                         Ok(()) => Err(reserve_err),
                         Err(cleanup_err) => self.poison_error(Error::Config(format!(
                             "failed to reserve quarantine path: {reserve_err}; reserved-path cleanup also failed: {cleanup_err}"
@@ -236,14 +237,14 @@ impl Store {
         }
         let mut moves = Vec::new();
         for (index, (path, quarantine)) in planned.iter().enumerate() {
-            match fs::rename(path, quarantine) {
+            match self.rename_secret_file(path, quarantine) {
                 Ok(()) => moves.push((path.clone(), quarantine.clone())),
                 Err(err) => {
                     let reserved = planned[index..]
                         .iter()
                         .map(|(_, reserved)| reserved.as_path())
                         .collect::<Vec<_>>();
-                    let cleanup = Self::cleanup_files(&reserved);
+                    let cleanup = self.cleanup_files(&reserved);
                     let restore = self.restore_quarantines(&moves);
                     return match (cleanup, restore) {
                         (Ok(()), Ok(())) => Err(err.into()),
@@ -276,7 +277,7 @@ impl Store {
                     self.finish_post_commit_cleanup(Self::remove_recovery_file(
                         quarantine,
                         "metadata deletion committed",
-                        |path| fs::remove_file(path),
+                        |path| self.remove_secret_file(path),
                     ))?;
                 }
                 self.finish_post_commit_cleanup(self.sync_secrets_dir())?;

@@ -16,7 +16,7 @@ management UI, recipient migration, sync, backup management, or other manager fe
 
 Requirements:
 
-- Linux with user D-Bus session
+- Linux 5.6 or newer with user D-Bus session and mounted `/proc` (secure `openat2` path resolution)
 - GnuPG and personal OpenPGP key capable of encryption
 - Working `gpg-agent` and pinentry setup
 - Noirpass binary and included service files
