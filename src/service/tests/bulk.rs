@@ -6,6 +6,48 @@ use zeroize::Zeroizing;
 use super::super::{MAX_BULK_SECRET_BYTES, SecretError, insert_bulk_secret, secret_entry_bytes};
 use crate::service::session::Secret;
 
+#[tokio::test]
+async fn persistent_bulk_rejects_large_item_but_individual_retrieval_remains_available() {
+    use crate::crypto::SessionCipher;
+    use crate::gpg::test_support::TestGnupg;
+
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = super::test_state(&gnupg, tmp.path());
+    let plaintext = Zeroizing::new(vec![11; MAX_BULK_SECRET_BYTES + 1]);
+    let ciphertext = state.gpg().encrypt(&plaintext).unwrap();
+    let meta = state
+        .store()
+        .create_item(
+            "default",
+            "large",
+            HashMap::new(),
+            "application/octet-stream",
+            &ciphertext,
+        )
+        .unwrap();
+    let session = state
+        .register_session(SessionCipher::Plain, ":1.7".into())
+        .unwrap();
+    let path = super::super::item_path("default", &meta.id);
+    assert!(matches!(
+        state.secret_for_item_path(&path, &session, ":1.7").await,
+        Err(SecretError::LimitsExceeded(_))
+    ));
+    let secret = state
+        .persistent_secret("default", &meta.id, &session, ":1.7", None)
+        .await
+        .unwrap();
+    assert_eq!(secret.value, plaintext);
+    assert_eq!(secret.content_type, "application/octet-stream");
+    assert!(matches!(
+        state
+            .persistent_secret("other", &meta.id, &session, ":1.7", None)
+            .await,
+        Err(SecretError::NoSuchObject(_))
+    ));
+}
+
 #[test]
 fn bulk_response_bounds_wire_size_and_refunds_replaced_paths() {
     let path = OwnedObjectPath::try_from("/item").unwrap();

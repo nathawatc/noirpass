@@ -492,14 +492,14 @@ async fn persistent_decryption_rejects_foreign_and_closed_sessions_before_gpg() 
     let session = state
         .register_session(SessionCipher::Plain, ":1.7".into())
         .unwrap();
-    // Invalid OpenPGP bytes would return a GPG error if decryption were attempted.
+    // Missing metadata would return NoSuchObject if storage were accessed first.
     let foreign = state
-        .ciphertext_to_secret(&session, b"invalid ciphertext", "", ":1.8")
+        .persistent_secret("default", "missing", &session, ":1.8", None)
         .await;
     assert!(matches!(foreign, Err(SecretError::NoSession(_))));
     assert!(state.remove_session(&session, ":1.7"));
     let closed = state
-        .ciphertext_to_secret(&session, b"invalid ciphertext", "", ":1.7")
+        .persistent_secret("default", "missing", &session, ":1.7", None)
         .await;
     assert!(matches!(closed, Err(SecretError::NoSession(_))));
 }
@@ -671,9 +671,9 @@ async fn blocking_work_bounds_decryption_and_rechecks_queued_session() {
     let fifth = tokio::spawn(async move {
         queued_tx.send(()).unwrap();
         let result = worker_state
-            .ciphertext_to_secret(&worker_session, b"invalid ciphertext", "", ":1.7")
+            .persistent_secret("default", "missing", &worker_session, ":1.7", None)
             .await;
-        // Garbage ciphertext would fail as OpenPGP if the closed session reached the agent.
+        // Missing metadata would fail as NoSuchObject if the closed session reached storage.
         assert!(matches!(result, Err(SecretError::NoSession(_))));
         started_tx.send(()).unwrap();
     });

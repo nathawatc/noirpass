@@ -910,37 +910,45 @@ impl ServiceState {
         })
     }
 
-    /// Decrypt an item's at-rest ciphertext via `gpg-agent` and re-encrypt it
-    /// for transport under `session`'s cipher.
-    pub async fn ciphertext_to_secret(
+    /// Keep ciphertext, plaintext, and transport encoding within one worker reservation.
+    pub(crate) async fn persistent_secret(
         self: &Arc<Self>,
+        collection: &str,
+        item: &str,
         session: &OwnedObjectPath,
-        ciphertext: &[u8],
-        content_type: &str,
         owner: &str,
+        maximum: Option<usize>,
     ) -> Result<Secret, SecretError> {
-        // Reject foreign/closed sessions before invoking the private-key agent.
         if self.session_cipher(session, owner).is_none() {
             return Err(SecretError::NoSession(format!("no session {session}")));
         }
-        let ciphertext = ciphertext.to_vec();
-        let session_for_worker = session.clone();
-        let owner_for_worker = owner.to_string();
-        let plaintext = self
-            .blocking(None, move |state| {
-                // Capacity admission can wait; recheck before private-key access.
-                if state
-                    .session_cipher(&session_for_worker, &owner_for_worker)
-                    .is_none()
-                {
-                    return Err(SecretError::NoSession(format!(
-                        "no session {session_for_worker}"
-                    )));
-                }
-                Ok(state.gpg.decrypt_blocking(&ciphertext)?)
-            })
-            .await?;
-        self.plaintext_to_secret(session, &plaintext, content_type, owner)
+        let collection = collection.to_owned();
+        let item = item.to_owned();
+        let session = session.clone();
+        let owner = owner.to_owned();
+        self.blocking(None, move |state| {
+            if state.session_cipher(&session, &owner).is_none() {
+                return Err(SecretError::NoSession(format!("no session {session}")));
+            }
+            let (meta, ciphertext) = state.store().read_item_secret(&item)?;
+            if meta.collection != collection {
+                return Err(SecretError::NoSuchObject(format!(
+                    "no item {item} in collection {collection}"
+                )));
+            }
+            // The session can close during the filesystem read.
+            if state.session_cipher(&session, &owner).is_none() {
+                return Err(SecretError::NoSession(format!("no session {session}")));
+            }
+            let plaintext = state.gpg.decrypt_blocking(&ciphertext)?;
+            if maximum.is_some_and(|maximum| plaintext.len() > maximum) {
+                return Err(SecretError::LimitsExceeded(
+                    "bulk secret response exceeds 8 MiB; request individual secrets".into(),
+                ));
+            }
+            state.plaintext_to_secret(&session, &plaintext, &meta.content_type, &owner)
+        })
+        .await
     }
 
     /// Resolve one bulk-request path; missing and mismatched items are skipped.
@@ -966,21 +974,19 @@ impl ServiceState {
                 .plaintext_to_secret(session, &plaintext, &meta.content_type, owner)
                 .map(Some);
         }
-        let (meta, ciphertext) = match self
-            .blocking(None, move |state| {
-                Ok(state.store().read_item_secret(&item_id)?)
-            })
+        match self
+            .persistent_secret(
+                &collection_id,
+                &item_id,
+                session,
+                owner,
+                Some(super::MAX_BULK_SECRET_BYTES),
+            )
             .await
         {
-            Ok(item) => item,
-            Err(SecretError::NoSuchObject(_)) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        if meta.collection != collection_id {
-            return Ok(None);
+            Ok(secret) => Ok(Some(secret)),
+            Err(SecretError::NoSuchObject(_)) => Ok(None),
+            Err(err) => Err(err),
         }
-        self.ciphertext_to_secret(session, &ciphertext, &meta.content_type, owner)
-            .await
-            .map(Some)
     }
 }

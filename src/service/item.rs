@@ -269,18 +269,8 @@ impl Item {
             self.state
                 .plaintext_to_secret(&session, &plaintext, &meta.content_type, &owner)?
         } else {
-            if self.state.session_cipher(&session, &owner).is_none() {
-                return Err(SecretError::NoSession(format!("no session {session}")));
-            }
-            let id = self.id.clone();
-            let (meta, ciphertext) = self
-                .state
-                .blocking(None, move |state| {
-                    Ok(state.store().read_item_secret(&id)?)
-                })
-                .await?;
             self.state
-                .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
+                .persistent_secret(&self.collection_id, &self.id, &session, &owner, None)
                 .await?
         };
         Ok((secret,))
