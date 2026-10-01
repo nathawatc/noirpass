@@ -7,8 +7,8 @@ use zeroize::Zeroizing;
 
 use super::super::super::harness::harness;
 use super::super::super::helpers::{
-    COLLECTION_IFACE, ITEM_IFACE, PROPERTIES_IFACE, SERVICE_NAME, assert_no_signal, attrs,
-    next_event, next_item_changed, next_property_name, service_proxy,
+    COLLECTION_IFACE, ITEM_IFACE, PROPERTIES_IFACE, SERVICE_NAME, assert_method_error,
+    assert_no_signal, attrs, next_event, next_item_changed, next_property_name, service_proxy,
 };
 
 /// Scenario 12: item mutations emit required property and collection signals.
@@ -238,7 +238,7 @@ pub(in super::super) async fn s12_item_mutation_signals() {
         .await;
     std::fs::remove_dir(&ciphertext).unwrap();
     std::fs::rename(&hidden_ciphertext, &ciphertext).unwrap();
-    assert!(failure.is_err(), "SetSecret persistence must fail");
+    assert_method_error(&failure.unwrap_err(), "org.freedesktop.DBus.Error.Failed");
     assert!(
         tokio::time::timeout(
             Duration::from_millis(250),

@@ -218,12 +218,11 @@ pub(in super::super) async fn s6e_session_alias_lifecycle() {
             .unwrap(),
         session
     );
-    assert!(
-        service
-            .call::<_, _, ()>("SetAlias", &("session", &persisted))
-            .await
-            .is_err()
-    );
+    let error = service
+        .call::<_, _, ()>("SetAlias", &("session", &persisted))
+        .await
+        .unwrap_err();
+    assert_method_error(&error, "org.freedesktop.DBus.Error.NotSupported");
     let error = service
         .call::<_, _, ()>(
             "SetAlias",

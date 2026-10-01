@@ -86,7 +86,8 @@ async fn open_session_rejects_missing_sender() {
         )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("AccessDenied"));
+    assert!(matches!(err, zbus::Error::MethodError(ref name, _, _)
+        if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"));
     assert_eq!(state.session_count(), 0);
 
     // Missing identity also rejects DH sessions after input validation.
@@ -101,7 +102,8 @@ async fn open_session_rejects_missing_sender() {
         )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("AccessDenied"));
+    assert!(matches!(err, zbus::Error::MethodError(ref name, _, _)
+        if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"));
     assert_eq!(state.session_count(), 0);
 
     // Unknown algorithm is NotSupported.
@@ -115,7 +117,8 @@ async fn open_session_rejects_missing_sender() {
         )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("NotSupported"));
+    assert!(matches!(err, zbus::Error::MethodError(ref name, _, _)
+        if name.as_str() == "org.freedesktop.DBus.Error.NotSupported"));
 
     // ReadAlias resolves the default collection; unknown aliases → "/".
     let reply = client_conn

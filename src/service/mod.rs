@@ -56,6 +56,15 @@ pub enum SecretError {
     /// Invalid client arguments.
     #[zbus(name = "DBus.Error.InvalidArgs")]
     InvalidArgs(String),
+    /// The requested operation is unsupported.
+    #[zbus(name = "DBus.Error.NotSupported")]
+    NotSupported(String),
+    /// An internal operation failed.
+    #[zbus(name = "DBus.Error.Failed")]
+    Failed(String),
+    /// The caller lacks the required identity or authorization.
+    #[zbus(name = "DBus.Error.AccessDenied")]
+    AccessDenied(String),
     /// The session named in a `Secret` does not exist.
     #[zbus(name = "Secret.Error.NoSession")]
     NoSession(String),
@@ -68,6 +77,9 @@ impl From<fdo::Error> for SecretError {
     fn from(err: fdo::Error) -> Self {
         match err {
             fdo::Error::InvalidArgs(message) => Self::InvalidArgs(message),
+            fdo::Error::NotSupported(message) => Self::NotSupported(message),
+            fdo::Error::Failed(message) => Self::Failed(message),
+            fdo::Error::AccessDenied(message) => Self::AccessDenied(message),
             other => Self::ZBus(zbus::Error::FDO(Box::new(other))),
         }
     }

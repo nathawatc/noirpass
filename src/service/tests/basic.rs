@@ -4,12 +4,27 @@ use super::super::{
 use zbus::fdo;
 
 #[test]
-fn invalid_args_preserve_standard_dbus_error_name() {
-    let error: SecretError = fdo::Error::InvalidArgs("bad input".into()).into();
-    assert_eq!(
-        zbus::DBusError::name(&error).as_str(),
-        "org.freedesktop.DBus.Error.InvalidArgs"
-    );
+fn standard_dbus_error_names_survive_both_conversion_paths() {
+    for (error, expected) in [
+        (fdo::Error::InvalidArgs("bad input".into()), "InvalidArgs"),
+        (
+            fdo::Error::NotSupported("unsupported".into()),
+            "NotSupported",
+        ),
+        (fdo::Error::Failed("operation failed".into()), "Failed"),
+        (
+            fdo::Error::AccessDenied("missing identity".into()),
+            "AccessDenied",
+        ),
+    ] {
+        let expected = format!("org.freedesktop.DBus.Error.{expected}");
+        let direct: SecretError = error.clone().into();
+        let wrapped: SecretError = zbus::Error::FDO(Box::new(error)).into();
+        for converted in [direct, wrapped] {
+            assert_eq!(zbus::DBusError::name(&converted).as_str(), expected);
+            assert!(zbus::DBusError::description(&converted).is_some());
+        }
+    }
 }
 
 #[test]
