@@ -30,6 +30,9 @@ Serve the Secret Service tree at:
   service name. Session registration runs as an owned task; after object registration, check
   `NameHasOwner` on message-bus connections to catch disconnects processed before map insertion.
   A false result or failed presence query removes both the session map entry and D-Bus object.
+- Limit transport sessions to 64 per unique sender and 1024 in total. Check both limits atomically
+  with map insertion and return `org.freedesktop.DBus.Error.LimitsExceeded` without publishing an
+  object. Closing sessions or reaping a disconnected owner releases capacity.
 - Service, Collection, Item, Session, and alias objects must expose only state authorized by their
   owning store/session boundary. Alias-backed collections resolve their persisted target per call;
   valid alias paths are registered and invalid-path aliases remain usable through alias methods but

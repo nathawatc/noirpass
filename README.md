@@ -211,6 +211,10 @@ ending the graphical login session clears the secret.
 Temporary items are independent of a client's transport session; disconnecting the client does not
 delete them.
 
+The daemon accepts up to 64 transport sessions per client connection and 1024 in total. Clients
+exceeding these limits receive `org.freedesktop.DBus.Error.LimitsExceeded`; closing unused sessions
+or disconnecting releases capacity.
+
 Temporary item operations can continue while persistent secret workers are busy. Collection
 creation/deletion and alias changes still serialize with active mutations.
 
