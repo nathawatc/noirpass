@@ -1,29 +1,26 @@
 //! Initialization and recipient lifecycle preflight.
 
-use std::fs;
+use std::fs::{self, Permissions};
 use std::io::{self, Read};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{
-    Directory, ensure_dir_0700, open_regular_rw_nofollow, path_entry_exists,
-    validate_existing_directory_or_absent, validate_existing_regular_or_absent,
-    validate_no_symlink_components,
-};
+use crate::filesystem::{Directory, validate_no_symlink_components};
 use crate::gpg::{cert_to_binary, has_usable_encryption_key, parse_recipient_cert};
+use crate::store::Store;
+use sequoia_openpgp::Cert;
 
-use super::format::{
-    atomic_write, config_path, read_optional, recipient_cert_path, restore_recipient_cert,
-};
-use super::status::{load_configured_recipient, load_recipient};
+use super::format::{atomic_write_in, read_optional_in, restore_optional_in, validate_regular_in};
+use super::status::load_configured_recipient_in;
 use super::{
     CONFIG_VERSION, Config, DEFAULT_IDLE_EXIT_SECONDS, DIFFERENT_RECIPIENT_ERROR, INDEX_FILE,
     KEYS_DIR, RECIPIENT_REL, SECRETS_DIR,
 };
 
-fn has_encrypted_secret_files(data_dir: &Path) -> Result<bool> {
-    let secrets_dir = data_dir.join(SECRETS_DIR);
-    match fs::symlink_metadata(&secrets_dir) {
+fn has_encrypted_secret_files(root: &Directory) -> Result<bool> {
+    let secrets_dir = Path::new(SECRETS_DIR);
+    match root.metadata(secrets_dir) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(Error::Config(format!(
                 "cannot initialize with symlinked secrets path: {}",
@@ -41,7 +38,7 @@ fn has_encrypted_secret_files(data_dir: &Path) -> Result<bool> {
         Err(err) => return Err(Error::Io(err)),
     }
 
-    let directory = Directory::open(&secrets_dir)?;
+    let directory = root.child(secrets_dir)?;
     for entry in directory.read_dir()? {
         let entry = entry?;
         let path = secrets_dir.join(entry.file_name());
@@ -65,25 +62,83 @@ fn has_encrypted_secret_files(data_dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn reject_missing_index_for_initialized_store(data_dir: &Path) -> Result<()> {
-    let index_path = data_dir.join(INDEX_FILE);
-    validate_existing_regular_or_absent(&index_path)?;
-    if path_entry_exists(&index_path)? {
-        let _ = open_regular_rw_nofollow(&index_path)?;
+fn reject_missing_index_for_initialized_store(root: &Directory) -> Result<()> {
+    let index_path = Path::new(INDEX_FILE);
+    validate_regular_in(root, index_path)?;
+    let has_index = root.entry_exists(index_path)?;
+    if has_index {
+        root.open_regular(index_path, libc::O_RDWR, 0)?;
     }
-    let initialized = path_entry_exists(&config_path(data_dir))?
-        || path_entry_exists(&recipient_cert_path(data_dir))?;
-    if initialized && !path_entry_exists(&index_path)? {
+    let initialized = root.entry_exists(Path::new(super::CONFIG_FILE))?
+        || root.entry_exists(Path::new(RECIPIENT_REL))?;
+    if initialized && !has_index {
         return Err(Error::Config(
             "cannot initialize an already initialized store because metadata database `index.redb` is missing; run `noirpass deinit` before initializing again".into(),
         ));
     }
-    if path_entry_exists(&index_path)? && !path_entry_exists(&config_path(data_dir))? {
+    if has_index && !root.entry_exists(Path::new(super::CONFIG_FILE))? {
         return Err(Error::Config(
             "cannot initialize an already initialized store because `config.toml` is missing; run `noirpass deinit` before initializing again".into(),
         ));
     }
     Ok(())
+}
+
+fn parse_usable_recipient(bytes: &[u8]) -> Result<Cert> {
+    let cert = parse_recipient_cert(bytes)?;
+    if !has_usable_encryption_key(&cert) {
+        return Err(Error::Config(
+            "recipient certificate has no usable encryption-capable key".into(),
+        ));
+    }
+    Ok(cert)
+}
+
+/// Claim one root for the CLI's complete initialization operation.
+pub fn init_store_from_path(data_dir: &Path, path: &str) -> Result<Config> {
+    init_store_with(data_dir, || {
+        let mut bytes = Vec::new();
+        if path == "-" {
+            io::stdin().lock().read_to_end(&mut bytes)?;
+        } else {
+            fs::File::open(path)?.read_to_end(&mut bytes)?;
+        }
+        parse_usable_recipient(&bytes)
+    })
+}
+
+pub(super) fn init_store_with(
+    data_dir: &Path,
+    read_recipient: impl FnOnce() -> Result<Cert>,
+) -> Result<Config> {
+    let root = super::open_lifecycle_directory(data_dir)?;
+    let preopened = if root.entry_exists(Path::new(INDEX_FILE))? {
+        Some(Store::open_existing_in(data_dir, &root)?)
+    } else {
+        None
+    };
+    let had_existing = preopened.is_some();
+    let _lifecycle = super::LifecycleLock::acquire_in(&root)?;
+    let store = if root.entry_exists(Path::new(INDEX_FILE))? {
+        match preopened {
+            Some(store) => Some(store),
+            None => Some(Store::open_existing_in(data_dir, &root)?),
+        }
+    } else if had_existing {
+        return Err(Error::Config(
+            "store disappeared while acquiring lifecycle lock".into(),
+        ));
+    } else {
+        None
+    };
+    let cert = read_recipient()?;
+    let config = init_from_cert_in_with_hooks(data_dir, &root, &cert, || {}, || {})?;
+    let store = match store {
+        Some(store) => store,
+        None => Store::open_in(data_dir, &root)?,
+    };
+    store.ensure_default()?;
+    Ok(config)
 }
 
 /// Import an armored or binary recipient cert from `reader`.
@@ -105,18 +160,24 @@ pub fn init_from_path(data_dir: &Path, path: &str) -> Result<Config> {
 /// Import an armored or binary recipient cert from bytes.
 pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     validate_no_symlink_components(data_dir)?;
-    let cert = parse_recipient_cert(bytes)?;
-    if !has_usable_encryption_key(&cert) {
-        return Err(Error::Config(
-            "recipient certificate has no usable encryption-capable key".into(),
-        ));
-    }
-    let new_fingerprint = cert.fingerprint().to_hex();
-    reject_missing_index_for_initialized_store(data_dir)?;
-    let has_encrypted_files = has_encrypted_secret_files(data_dir)?;
+    let cert = parse_usable_recipient(bytes)?;
+    let root = super::open_lifecycle_directory(data_dir)?;
+    init_from_cert_in_with_hooks(data_dir, &root, &cert, || {}, || {})
+}
 
-    if path_entry_exists(&config_path(data_dir))? {
-        let (_, _, existing_fingerprint) = load_configured_recipient(data_dir).map_err(|err| {
+pub(super) fn init_from_cert_in_with_hooks(
+    data_dir: &Path,
+    root: &Directory,
+    cert: &Cert,
+    after_pin: impl FnOnce(),
+    after_certificate: impl FnOnce(),
+) -> Result<Config> {
+    let new_fingerprint = cert.fingerprint().to_hex();
+    reject_missing_index_for_initialized_store(root)?;
+    let has_encrypted_files = has_encrypted_secret_files(root)?;
+
+    if root.entry_exists(Path::new(super::CONFIG_FILE))? {
+        let (_, _, existing_fingerprint) = load_configured_recipient_in(data_dir, root).map_err(|err| {
             Error::Config(format!(
                 "cannot initialize an already initialized store because existing recipient fingerprint cannot be verified: {err}"
             ))
@@ -125,7 +186,7 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
             return Err(Error::Config(DIFFERENT_RECIPIENT_ERROR.into()));
         }
     } else if has_encrypted_files {
-        let _existing = load_recipient(data_dir).map_err(|err| {
+        let _existing = load_configured_recipient_in(data_dir, root).map_err(|err| {
             Error::Config(format!(
                 "cannot initialize non-empty store because existing recipient fingerprint cannot be verified: {err}"
             ))
@@ -133,19 +194,32 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     }
 
     let idle_exit =
-        Config::load(data_dir).map_or(DEFAULT_IDLE_EXIT_SECONDS, |config| config.idle_exit);
+        Config::load_in(root).map_or(DEFAULT_IDLE_EXIT_SECONDS, |config| config.idle_exit);
 
-    let keys_dir = data_dir.join(KEYS_DIR);
-    validate_existing_directory_or_absent(&keys_dir)?;
-    validate_existing_regular_or_absent(&recipient_cert_path(data_dir))?;
-    validate_existing_regular_or_absent(&config_path(data_dir))?;
-    ensure_dir_0700(data_dir)?;
-    ensure_dir_0700(&keys_dir)?;
-
-    let cert_path = recipient_cert_path(data_dir);
-    let previous_cert = read_optional(&cert_path)?;
-    let binary = cert_to_binary(&cert)?;
-    atomic_write(&cert_path, &binary, 0o600)?;
+    // Create and pin keys beneath the already selected root. Keep both handles
+    // through publication and rollback rather than reopening their pathnames.
+    match root.metadata(Path::new(KEYS_DIR)) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(Error::Config(
+                "keys path is not a directory; refusing symlink".into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    validate_regular_in(root, Path::new(RECIPIENT_REL))?;
+    validate_regular_in(root, Path::new(super::CONFIG_FILE))?;
+    root.set_permissions(Permissions::from_mode(0o700))?;
+    let keys = root.create_child(Path::new(KEYS_DIR), 0o700)?;
+    keys.set_permissions(Permissions::from_mode(0o700))?;
+    let name = Path::new("recipient.pgp");
+    let previous_cert = read_optional_in(&keys, name)?;
+    let previous_config = read_optional_in(root, Path::new(super::CONFIG_FILE))?;
+    let binary = cert_to_binary(cert)?;
+    after_pin();
+    atomic_write_in(&keys, name, &binary, 0o600)?;
+    after_certificate();
 
     let config = Config {
         version: CONFIG_VERSION,
@@ -153,10 +227,32 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
         recipient_cert: PathBuf::from(RECIPIENT_REL),
         idle_exit,
     };
-    if let Err(err) = config.write(data_dir) {
-        if let Err(restore_err) = restore_recipient_cert(&cert_path, previous_cert.as_deref()) {
+    let mut configuration_attempted = false;
+    let write_result = (|| -> Result<()> {
+        let current = root.metadata(Path::new(KEYS_DIR))?;
+        let owned = keys.metadata(Path::new("."))?;
+        if (current.dev(), current.ino()) != (owned.dev(), owned.ino()) {
+            return Err(Error::Config(
+                "recipient directory changed during initialization".into(),
+            ));
+        }
+        configuration_attempted = true;
+        config.write_in(root)
+    })();
+    if let Err(err) = write_result {
+        let certificate_restore = restore_optional_in(&keys, name, previous_cert.as_deref());
+        let config_restore = if configuration_attempted {
+            restore_optional_in(
+                root,
+                Path::new(super::CONFIG_FILE),
+                previous_config.as_deref(),
+            )
+        } else {
+            Ok(())
+        };
+        if certificate_restore.is_err() || config_restore.is_err() {
             return Err(Error::Config(format!(
-                "failed to write config: {err}; failed to restore previous recipient cert: {restore_err}"
+                "failed to write config: {err}; certificate restoration: {certificate_restore:?}; configuration restoration: {config_restore:?}"
             )));
         }
         return Err(err);

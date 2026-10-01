@@ -1,6 +1,7 @@
 mod deinit;
 mod format;
 mod init;
+mod init_pinning;
 mod lifecycle;
 mod reinit;
 mod startup;

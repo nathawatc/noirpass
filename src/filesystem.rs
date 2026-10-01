@@ -9,7 +9,7 @@ use std::fs::{self, File, Permissions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 const NOFOLLOW_NONBLOCK: i32 = libc::O_NOFOLLOW | libc::O_NONBLOCK;
@@ -48,6 +48,21 @@ impl Directory {
 
     pub(crate) fn open_regular(&self, name: &Path, flags: i32, mode: u32) -> io::Result<File> {
         regular_file(self.open_file(name, flags, mode)?, name)
+    }
+
+    pub(crate) fn read_regular(&self, name: &Path) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.open_regular(name, libc::O_RDONLY, 0)?
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn entry_exists(&self, name: &Path) -> io::Result<bool> {
+        match self.metadata(name) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     fn ensure_linked(&self) -> io::Result<()> {
@@ -100,7 +115,7 @@ impl Directory {
         self.0.set_permissions(permissions)
     }
 
-    fn create_child(&self, name: &Path, mode: u32) -> io::Result<Self> {
+    pub(crate) fn create_child(&self, name: &Path, mode: u32) -> io::Result<Self> {
         let c_name = entry_name(name)?;
         // SAFETY: the directory fd and NUL-terminated name remain live for the call.
         if let Err(err) =
@@ -274,20 +289,6 @@ pub(crate) fn validate_existing_regular_or_absent(path: &Path) -> io::Result<()>
     }
 }
 
-/// Validate an existing directory, or an absent path, without following symlinks.
-pub(crate) fn validate_existing_directory_or_absent(path: &Path) -> io::Result<()> {
-    validate_no_symlink_components(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => Ok(()),
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path is not a directory: {}", path.display()),
-        )),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
 /// Whether an entry exists, inspecting its final component without following it.
 pub(crate) fn path_entry_exists(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
@@ -328,15 +329,10 @@ pub(crate) fn create_directory_all_nofollow(path: &Path, mode: u32) -> io::Resul
     Ok(directory)
 }
 
-/// Create `path` if absent and force its permissions to `0700` through a safe directory handle.
-pub(crate) fn ensure_dir_0700(path: &Path) -> io::Result<()> {
-    create_directory_all_nofollow(path, 0o700)?.set_permissions(Permissions::from_mode(0o700))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     #[test]
     fn directory_mutations_stay_on_pinned_parent() {
@@ -377,7 +373,7 @@ mod tests {
         fs::write(outside.join("value"), b"untouched").unwrap();
         symlink(&outside, owned.join("link")).unwrap();
         assert!(open_regular_read_nofollow(&owned.join("link/value")).is_err());
-        assert!(ensure_dir_0700(&owned.join("link/new")).is_err());
+        assert!(create_directory_all_nofollow(&owned.join("link/new"), 0o700).is_err());
         assert!(create_directory_all_nofollow(&owned.join("../outside/new"), 0o700).is_err());
         let directory = Directory::open(&owned).unwrap();
         assert!(

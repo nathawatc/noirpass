@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::filesystem::{
-    Directory, ensure_dir_0700, open_regular_read_nofollow, open_regular_rw_nofollow,
+    Directory, create_directory_all_nofollow, open_regular_read_nofollow, open_regular_rw_nofollow,
     validate_no_symlink_components,
 };
 
@@ -244,10 +244,13 @@ fn decode_item(table_key: &str, value: &[u8]) -> Result<ItemMeta> {
 fn open_readonly_database_nofollow(
     path: &Path,
 ) -> std::result::Result<ReadOnlyDatabase, DatabaseError> {
-    // redb 4.1 accepts only a path for read-only opens. Keep the no-follow
-    // descriptor alive while redb opens its procfs alias, which remains pinned
-    // to the verified file even if the original path is replaced meanwhile.
-    let file = open_regular_read_nofollow(path).map_err(DatabaseError::from)?;
+    open_readonly_database_file(&open_regular_read_nofollow(path).map_err(DatabaseError::from)?)
+}
+
+fn open_readonly_database_file(
+    file: &fs::File,
+) -> std::result::Result<ReadOnlyDatabase, DatabaseError> {
+    // Pin the verified file while redb opens its procfs alias.
     let proc_path = PathBuf::from("/proc/self/fd").join(file.as_raw_fd().to_string());
     ReadOnlyDatabase::open(proc_path)
 }
@@ -388,12 +391,16 @@ impl Store {
     /// Creates `dir` and `dir/secrets/` as `0700` directories and opens (or
     /// creates) `dir/index.redb`.
     pub fn open(dir: &Path) -> Result<Self> {
-        ensure_dir_0700(dir)?;
-        let secrets_dir = dir.join("secrets");
-        ensure_dir_0700(&secrets_dir)?;
+        let root = create_directory_all_nofollow(dir, 0o700)?;
+        Self::open_in(dir, &root)
+    }
 
-        let root = Directory::open(dir)?;
-        let secrets_directory = root.child(Path::new("secrets"))?;
+    pub(crate) fn open_in(dir: &Path, root: &Directory) -> Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        root.set_permissions(fs::Permissions::from_mode(0o700))?;
+        let secrets_dir = dir.join("secrets");
+        let secrets_directory = root.create_child(Path::new("secrets"), 0o700)?;
+        secrets_directory.set_permissions(fs::Permissions::from_mode(0o700))?;
         let index =
             root.open_regular(Path::new("index.redb"), libc::O_RDWR | libc::O_CREAT, 0o600)?;
         let db = Database::builder().create_file(index)?;
@@ -468,8 +475,14 @@ impl Store {
 
     /// Check whether an existing store is usable without mutating it.
     pub fn probe_health(dir: &Path) -> Result<()> {
-        let (_, index_path) = existing_store_paths(dir)?;
-        let db = match open_readonly_database_nofollow(&index_path) {
+        existing_store_paths(dir)?;
+        Self::probe_health_in(&Directory::open(dir)?)
+    }
+
+    pub(crate) fn probe_health_in(root: &Directory) -> Result<()> {
+        root.child(Path::new("secrets"))?;
+        let index = root.open_regular(Path::new("index.redb"), libc::O_RDONLY, 0)?;
+        let db = match open_readonly_database_file(&index) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => return Ok(()),
             Err(err) => return Err(err.into()),

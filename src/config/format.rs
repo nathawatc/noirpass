@@ -7,9 +7,11 @@ use toml_edit::{DocumentMut, value};
 
 use crate::error::{Error, Result};
 use crate::filesystem::{
-    Directory, ensure_dir_0700, read_regular_file_nofollow, validate_existing_regular_or_absent,
+    Directory, create_directory_all_nofollow, validate_existing_regular_or_absent,
     validate_no_symlink_components,
 };
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 
 use super::{CONFIG_FILE, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT, RECIPIENT_REL};
 
@@ -17,14 +19,14 @@ impl Config {
     /// Load `config.toml`.
     pub fn load(data_dir: &Path) -> Result<Self> {
         validate_no_symlink_components(data_dir)?;
-        let text = read_regular_file_nofollow(&config_path(data_dir))
-            .map_err(|e| {
-                if e.kind() == io::ErrorKind::NotFound {
-                    Error::Config(format!("noirpass is not initialized; {INIT_HINT}"))
-                } else {
-                    Error::Io(e)
-                }
-            })
+        let directory = Directory::open(data_dir).map_err(uninitialized_or_io)?;
+        Self::load_in(&directory)
+    }
+
+    pub(crate) fn load_in(directory: &Directory) -> Result<Self> {
+        let text = directory
+            .read_regular(Path::new(CONFIG_FILE))
+            .map_err(uninitialized_or_io)
             .and_then(|bytes| {
                 String::from_utf8(bytes)
                     .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::InvalidData, e)))
@@ -37,16 +39,31 @@ impl Config {
         validate_recipient_cert_path(&self.recipient_cert)?;
         validate_idle_exit(self.idle_exit)?;
         let _ = recipient_cert_path_from_config(data_dir, &self.recipient_cert)?;
-        ensure_dir_0700(data_dir)?;
+        let directory = create_directory_all_nofollow(data_dir, 0o700)?;
+        directory.set_permissions(Permissions::from_mode(0o700))?;
+        self.write_in(&directory)
+    }
 
+    pub(super) fn write_in(&self, directory: &Directory) -> Result<()> {
+        validate_recipient_cert_path(&self.recipient_cert)?;
+        validate_idle_exit(self.idle_exit)?;
+        validate_regular_in(directory, &self.recipient_cert)?;
         let mut doc = DocumentMut::new();
         doc["version"] = value(self.version);
         doc["recipient_fingerprint"] = value(self.recipient_fingerprint.as_str());
         doc["recipient_cert"] = value(self.recipient_cert.to_string_lossy().as_ref());
         doc["idle_exit"] = value(self.idle_exit);
         let text = doc.to_string();
-        atomic_write(&config_path(data_dir), text.as_bytes(), 0o600)?;
+        atomic_write_in(directory, Path::new(CONFIG_FILE), text.as_bytes(), 0o600)?;
         Ok(())
+    }
+}
+
+pub(super) fn uninitialized_or_io(error: io::Error) -> Error {
+    if error.kind() == io::ErrorKind::NotFound {
+        Error::Config(format!("noirpass is not initialized; {INIT_HINT}"))
+    } else {
+        Error::Io(error)
     }
 }
 
@@ -95,22 +112,13 @@ pub(super) fn recipient_cert_path_from_config(data_dir: &Path, path: &Path) -> R
     Ok(full_path)
 }
 
-pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    validate_no_symlink_components(path)?;
-    let parent = path.parent().ok_or_else(|| {
-        Error::Config(format!(
-            "cannot determine parent directory for {}",
-            path.display()
-        ))
-    })?;
-    let name = path.file_name().ok_or_else(|| {
-        Error::Config(format!("cannot determine file name for {}", path.display()))
-    })?;
-    atomic_write_in(&Directory::open(parent)?, Path::new(name), bytes, mode)
-}
-
 // Keep creation, cleanup, publication, and durability on the same opened directory.
-fn atomic_write_in(directory: &Directory, name: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+pub(super) fn atomic_write_in(
+    directory: &Directory,
+    name: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<()> {
     validate_regular_in(directory, name)?;
     for _ in 0..16 {
         let tmp = PathBuf::from(format!(".noirpass-tmp-{:016x}", rand::random::<u64>()));
@@ -142,7 +150,7 @@ fn atomic_write_in(directory: &Directory, name: &Path, bytes: &[u8], mode: u32) 
     )))
 }
 
-fn validate_regular_in(directory: &Directory, name: &Path) -> io::Result<()> {
+pub(super) fn validate_regular_in(directory: &Directory, name: &Path) -> io::Result<()> {
     match directory.metadata(name) {
         Ok(metadata) if metadata.is_file() => Ok(()),
         Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
@@ -158,26 +166,22 @@ fn validate_regular_in(directory: &Directory, name: &Path) -> io::Result<()> {
     }
 }
 
-pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    match read_regular_file_nofollow(path) {
+pub(super) fn read_optional_in(directory: &Directory, name: &Path) -> Result<Option<Vec<u8>>> {
+    match directory.read_regular(name) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(Error::Io(err)),
     }
 }
 
-pub(super) fn restore_recipient_cert(path: &Path, previous: Option<&[u8]>) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::Config("recipient path has no parent".into()))?;
-    let name = Path::new(
-        path.file_name()
-            .ok_or_else(|| Error::Config("recipient path has no name".into()))?,
-    );
-    let directory = Directory::open(parent)?;
-    validate_regular_in(&directory, name)?;
+pub(super) fn restore_optional_in(
+    directory: &Directory,
+    name: &Path,
+    previous: Option<&[u8]>,
+) -> Result<()> {
+    validate_regular_in(directory, name)?;
     if let Some(bytes) = previous {
-        atomic_write_in(&directory, name, bytes, 0o600)
+        atomic_write_in(directory, name, bytes, 0o600)
     } else {
         match directory.remove(name) {
             Ok(()) => {
@@ -259,6 +263,6 @@ mod atomic_tests {
         assert_eq!(fs::read(outside.join("config.toml")).unwrap(), b"untouched");
         assert_eq!(fs::read_dir(&moved).unwrap().count(), 1);
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
-        assert!(atomic_write(&parent.join("config.toml"), b"rejected", 0o600).is_err());
+        assert!(Directory::open(&parent).is_err());
     }
 }

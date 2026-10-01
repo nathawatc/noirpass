@@ -7,7 +7,7 @@ use sequoia_openpgp::Cert;
 
 use crate::error::{Error, Result};
 use crate::filesystem::{
-    path_entry_exists, read_regular_file_nofollow, validate_no_symlink_components,
+    Directory, path_entry_exists, read_regular_file_nofollow, validate_no_symlink_components,
 };
 use crate::gpg::{has_usable_encryption_key, parse_recipient_cert};
 use crate::store::Store;
@@ -15,8 +15,11 @@ use crate::store::Store;
 use super::format::{config_path, recipient_cert_path_from_config};
 use super::{CONFIG_VERSION, Config, INIT_HINT, Recipient, Status};
 
-pub(super) fn load_configured_recipient(data_dir: &Path) -> Result<(Config, Cert, String)> {
-    let config = Config::load(data_dir)?;
+pub(super) fn load_configured_recipient_in(
+    data_dir: &Path,
+    root: &Directory,
+) -> Result<(Config, Cert, String)> {
+    let config = Config::load_in(root)?;
     if config.version != CONFIG_VERSION {
         return Err(Error::Config(format!(
             "unsupported config version {}; expected {CONFIG_VERSION}",
@@ -24,8 +27,10 @@ pub(super) fn load_configured_recipient(data_dir: &Path) -> Result<(Config, Cert
         )));
     }
 
-    let path = recipient_cert_path_from_config(data_dir, &config.recipient_cert)?;
-    let bytes = read_regular_file_nofollow(&path).map_err(|e| {
+    super::format::validate_recipient_cert_path(&config.recipient_cert)?;
+    super::format::validate_regular_in(root, &config.recipient_cert)?;
+    let path = data_dir.join(&config.recipient_cert);
+    let bytes = root.read_regular(&config.recipient_cert).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             Error::Config(format!(
                 "recipient certificate missing at {}; {INIT_HINT}",
@@ -48,13 +53,19 @@ pub(super) fn load_configured_recipient(data_dir: &Path) -> Result<(Config, Cert
 
 /// Load config and recipient certificate, validating consistency and key usability.
 pub fn load_recipient(data_dir: &Path) -> Result<Recipient> {
-    let (_, cert, fingerprint) = load_configured_recipient(data_dir)?;
+    validate_no_symlink_components(data_dir)?;
+    let root = Directory::open(data_dir).map_err(super::format::uninitialized_or_io)?;
+    Ok(load_recipient_in(data_dir, &root)?.1)
+}
+
+pub(super) fn load_recipient_in(data_dir: &Path, root: &Directory) -> Result<(Config, Recipient)> {
+    let (config, cert, fingerprint) = load_configured_recipient_in(data_dir, root)?;
     if !has_usable_encryption_key(&cert) {
         return Err(Error::Config(
             "recipient certificate has no usable encryption-capable key".into(),
         ));
     }
-    Ok(Recipient { cert, fingerprint })
+    Ok((config, Recipient { cert, fingerprint }))
 }
 
 /// Compute status without mutating store.
