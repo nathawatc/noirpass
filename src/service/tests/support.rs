@@ -10,7 +10,10 @@ use zbus::export::futures_core::Stream;
 use super::super::{SERVICE_PATH, Service, ServiceState};
 
 /// Build a state around a temp store and a hermetic `GnuPG` home.
-pub(super) fn test_state(gnupg: &TestGnupg, dir: &std::path::Path) -> Arc<ServiceState> {
+pub(in crate::service) fn test_state(
+    gnupg: &TestGnupg,
+    dir: &std::path::Path,
+) -> Arc<ServiceState> {
     let store = Store::open(dir).unwrap();
     store.ensure_default().unwrap();
     let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
