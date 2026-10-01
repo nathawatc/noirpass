@@ -574,3 +574,28 @@ fn ciphertext_operations_stay_in_pinned_store_after_parent_replacement() {
     assert_eq!(fs::read_dir(moved.join("secrets")).unwrap().count(), 0);
     assert!(Store::open_existing(&original).is_err());
 }
+
+#[tokio::test]
+async fn poison_notification_handles_existing_and_future_waiters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let waiting = store.wait_until_poisoned();
+    tokio::pin!(waiting);
+    assert!(
+        std::future::poll_fn(|context| {
+            assert!(waiting.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(true)
+        })
+        .await
+    );
+    store.poison();
+    tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.wait_until_poisoned(),
+    )
+    .await
+    .unwrap();
+}

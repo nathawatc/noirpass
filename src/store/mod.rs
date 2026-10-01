@@ -87,6 +87,7 @@ pub struct Store {
     secrets_dir: PathBuf,
     secrets_directory: Directory,
     poisoned: AtomicBool,
+    poison_changed: tokio::sync::Notify,
     transaction_gate: RwLock<()>,
 }
 
@@ -281,6 +282,7 @@ fn existing_store_paths(dir: &Path) -> Result<(PathBuf, PathBuf)> {
 impl Store {
     fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
+        self.poison_changed.notify_waiters();
     }
 
     fn ensure_not_poisoned(&self) -> Result<()> {
@@ -365,6 +367,16 @@ impl Store {
         }
     }
 
+    /// Wait for a poisoned store without polling or losing a concurrent notification.
+    pub async fn wait_until_poisoned(&self) {
+        let notified = self.poison_changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_poisoned() {
+            notified.await;
+        }
+    }
+
     /// Whether an indeterminate database commit requires daemon shutdown.
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
@@ -400,6 +412,7 @@ impl Store {
             secrets_directory,
             secrets_dir,
             poisoned: AtomicBool::new(false),
+            poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
         })
     }
@@ -441,6 +454,7 @@ impl Store {
             secrets_directory,
             secrets_dir,
             poisoned: AtomicBool::new(false),
+            poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
         })
     }

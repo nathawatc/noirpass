@@ -220,7 +220,6 @@ async fn wait_for_shutdown(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("installing SIGTERM handler");
     let mut ticker = tokio::time::interval(Duration::from_secs(10));
-    let mut poison_ticker = tokio::time::interval(Duration::from_millis(100));
 
     loop {
         tokio::select! {
@@ -242,14 +241,14 @@ async fn wait_for_shutdown(
                 state.wait_for_active_calls().await;
                 return;
             }
-            _ = poison_ticker.tick() => {
-                if state.store().is_poisoned() {
-                    info!("store commit outcome indeterminate; shutting down");
-                    state.begin_shutdown();
-                    state.wait_for_active_calls().await;
-                    return;
-                }
-                if idle_exit == 0 && state.try_begin_idle_shutdown(idle_exit) {
+            () = state.store().wait_until_poisoned() => {
+                info!("store commit outcome indeterminate; shutting down");
+                state.begin_shutdown();
+                state.wait_for_active_calls().await;
+                return;
+            }
+            () = state.wait_for_activity_completion(), if idle_exit == 0 => {
+                if state.try_begin_idle_shutdown(idle_exit) {
                     info!("Noirpass application activity complete");
                     return;
                 }
