@@ -218,6 +218,8 @@ or disconnecting releases capacity.
 Queued operations are bounded to 64 requests and 32 MiB of combined input payload, including
 persistent writes. Excess operations receive `org.freedesktop.DBus.Error.LimitsExceeded` and may be
 retried after earlier work completes. Property reads and closing sessions remain available.
+Bulk `GetSecrets` replies are limited to 8 MiB of encoded secret data and item framing. Larger requests receive
+`org.freedesktop.DBus.Error.LimitsExceeded`; clients can retrieve fewer items per call.
 
 Temporary item operations can continue while persistent secret workers are busy. Collection
 creation/deletion and alias changes still serialize with active mutations.

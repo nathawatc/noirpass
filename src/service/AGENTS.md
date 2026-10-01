@@ -83,6 +83,10 @@ cancellation. Never wrap an untracked nested `spawn_blocking`
 operation inside this boundary. Recheck session ownership after queue admission and before agent
 decryption, then again when encoding the result. Bulk retrieval admits at most four item tasks per
 request and preserves input order when merging repeated paths.
+Bound retained bulk responses to 8 MiB of encoded dictionary entries, including the array header
+and conservative alignment padding. Measure without copying plaintext, refund the previous entry
+when a repeated path is replaced, and reject excess with `org.freedesktop.DBus.Error.LimitsExceeded`.
+Return no partial response; clients may retry with fewer items.
 All admitted item, collection, and alias mutations run as owned tasks so cancellation cannot separate
 a completed commit from object publication or required signals.
 
