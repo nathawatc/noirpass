@@ -257,7 +257,10 @@ impl Collection {
         } else {
             (None, Some(self.state.encrypt_secret(plaintext).await?))
         };
-        let lifecycle = self.state.lock_owned_object_lifecycle().await;
+        let lifecycle = self
+            .state
+            .lock_owned_collection_lifecycle(&initial_id)
+            .await;
         // Aliases can change during encryption. Resolve again under lifecycle serialization.
         let id = self.resolve_id()?;
         if id != initial_id {
@@ -506,8 +509,12 @@ impl Collection {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
+        let initial_id = self.resolve_id()?;
+        let _lifecycle = self.state.lock_collection_lifecycle(&initial_id).await;
         let id = self.resolve_id()?;
+        if id != initial_id {
+            return Err(fdo::Error::Failed("collection alias changed; retry".into()));
+        }
         if id == SESSION_COLLECTION_ID {
             self.state
                 .set_session_collection_label(label)

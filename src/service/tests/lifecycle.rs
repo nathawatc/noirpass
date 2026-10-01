@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::super::{
     alias_path, collection_path, item_path, register_alias, register_collection, register_item,
@@ -7,6 +8,100 @@ use super::super::{
 };
 use super::{p2p_pair, test_state};
 use crate::gpg::test_support::TestGnupg;
+
+#[tokio::test]
+async fn temporary_mutations_remain_available_while_persistent_workers_are_busy() {
+    use super::super::{
+        SESSION_COLLECTION_ID, SessionCipher, collection::Collection, session::Secret,
+    };
+    use zeroize::Zeroizing;
+
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let mut ids = vec![crate::store::DEFAULT_COLLECTION_ID.to_string()];
+    for _ in 1..super::super::state::MAX_BLOCKING_WORKERS {
+        ids.push(state.store().create_collection("busy", None).unwrap().id);
+    }
+    let (server, client) = p2p_pair(state.clone()).await;
+    super::super::register_existing(server.object_server(), &state)
+        .await
+        .unwrap();
+    let mut tasks = Vec::new();
+    let mut releases = Vec::new();
+    for id in ids {
+        let worker_state = state.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        tasks.push(tokio::spawn(async move {
+            let lifecycle = worker_state.lock_owned_collection_lifecycle(&id).await;
+            worker_state
+                .blocking(Some(lifecycle), move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }));
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        releases.push(release_tx);
+    }
+    let session = state
+        .register_session(SessionCipher::Plain, ":1.7".into())
+        .unwrap();
+    let collection = Collection::new(state.clone(), SESSION_COLLECTION_ID.into());
+    let message = zbus::Message::method_call(collection_path(SESSION_COLLECTION_ID), "CreateItem")
+        .unwrap()
+        .sender(":1.7")
+        .unwrap()
+        .build(&())
+        .unwrap();
+    let secret = Secret {
+        session,
+        parameters: Vec::new(),
+        value: Zeroizing::new(b"temporary".to_vec()),
+        content_type: "text/plain".into(),
+    };
+    let (path, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        collection.create_item_for_test(secret, server.object_server(), &server, message.header()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let item = zbus::Proxy::new(&client, ":1.0", path.clone(), "org.freedesktop.Secret.Item")
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        item.set_property("Label", "changed"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        item.get_property::<String>("Label").await.unwrap(),
+        "changed"
+    );
+    // Namespace changes still wait for complete commit/publication of active collections.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), state.lock_object_lifecycle())
+            .await
+            .is_err()
+    );
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let _: zbus::zvariant::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
+    assert!(state.list_session_items().is_empty());
+}
 
 #[tokio::test]
 async fn item_delete_cannot_race_replacement_registration() {
@@ -46,7 +141,9 @@ async fn item_delete_cannot_race_replacement_registration() {
     let replacement_committed = committed.clone();
     let replacement_resume = resume.clone();
     let replacement = tokio::spawn(async move {
-        let _lifecycle = replacement_state.lock_object_lifecycle().await;
+        let _lifecycle = replacement_state
+            .lock_collection_lifecycle(&replacement_collection)
+            .await;
         let (metadata, replaced) = replacement_state
             .store()
             .create_or_replace_item(
@@ -78,7 +175,9 @@ async fn item_delete_cannot_race_replacement_registration() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let deletion = tokio::spawn(async move {
         started_tx.send(()).unwrap();
-        let _lifecycle = deletion_state.lock_object_lifecycle().await;
+        let _lifecycle = deletion_state
+            .lock_collection_lifecycle(&deletion_item.collection)
+            .await;
         deletion_state
             .store()
             .delete_item(&deletion_item.id)
@@ -130,7 +229,9 @@ async fn collection_delete_removes_concurrently_created_item_object() {
     let creation_committed = committed.clone();
     let creation_resume = resume.clone();
     let creation = tokio::spawn(async move {
-        let _lifecycle = creation_state.lock_object_lifecycle().await;
+        let _lifecycle = creation_state
+            .lock_collection_lifecycle(&creation_collection)
+            .await;
         let metadata = creation_state
             .store()
             .create_item(

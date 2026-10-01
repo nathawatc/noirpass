@@ -629,7 +629,7 @@ async fn cancelled_blocking_waiter_retains_mutation_lock_and_activity() {
     let gnupg = TestGnupg::new();
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(&gnupg, tmp.path());
-    let lifecycle = state.lock_owned_object_lifecycle().await;
+    let lifecycle = state.lock_owned_collection_lifecycle("default").await;
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let worker_state = state.clone();

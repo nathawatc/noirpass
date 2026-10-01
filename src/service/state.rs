@@ -1,12 +1,17 @@
 //! Shared daemon state, session ownership, and secret transport.
+//!
+//! Collection mutations hold a per-collection mutex and a shared namespace guard through
+//! persistence and publication. Namespace changes take the exclusive guard, preserving alias
+//! targets and collection deletion ordering without serializing unrelated item mutations.
+//! Persistent mutations reserve blocking capacity first; temporary mutations need no worker slot.
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{
-    Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, OwnedMutexGuard,
-    OwnedSemaphorePermit, Semaphore,
+    Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedSemaphorePermit,
+    RwLock as AsyncRwLock, RwLockWriteGuard, Semaphore,
 };
 use zbus::fdo;
 use zbus::zvariant::OwnedObjectPath;
@@ -169,11 +174,16 @@ impl Drop for ActivityGuard {
     }
 }
 
-/// Reserve blocking capacity before taking lifecycle serialization.
-/// Shared ownership keeps both reservations alive through commit and publication.
+/// Serialize one collection through persistence and publication while pinning the namespace.
+pub(crate) struct CollectionGuard {
+    _collection: OwnedMutexGuard<()>,
+    _namespace: OwnedRwLockReadGuard<()>,
+}
+
+/// Reserve persistent worker capacity before taking lifecycle serialization.
 pub(crate) struct MutationGuard {
-    _lifecycle: OwnedMutexGuard<()>,
-    _permit: OwnedSemaphorePermit,
+    _lifecycle: CollectionGuard,
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 /// State shared by every D-Bus object of the daemon.
@@ -184,7 +194,8 @@ pub struct ServiceState {
     session_collection: Mutex<SessionCollectionState>,
     activity: Mutex<ActivityState>,
     activity_complete: Notify,
-    object_lifecycle: Arc<AsyncMutex<()>>,
+    object_lifecycle: Arc<AsyncRwLock<()>>,
+    collection_lifecycle: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     blocking_slots: Arc<Semaphore>,
 }
 
@@ -204,7 +215,8 @@ impl ServiceState {
                 shutting_down: false,
             }),
             activity_complete: Notify::new(),
-            object_lifecycle: Arc::new(AsyncMutex::new(())),
+            object_lifecycle: Arc::new(AsyncRwLock::new(())),
+            collection_lifecycle: Mutex::new(HashMap::new()),
             blocking_slots: Arc::new(Semaphore::new(MAX_BLOCKING_WORKERS)),
         })
     }
@@ -221,9 +233,34 @@ impl ServiceState {
         &self.gpg
     }
 
-    /// Serialize Store mutations with matching D-Bus object lifecycle changes.
-    pub(crate) async fn lock_object_lifecycle(&self) -> AsyncMutexGuard<'_, ()> {
-        self.object_lifecycle.lock().await
+    /// Serialize namespace changes against collection mutations and publication.
+    pub(crate) async fn lock_object_lifecycle(&self) -> RwLockWriteGuard<'_, ()> {
+        self.object_lifecycle.write().await
+    }
+
+    /// Serialize only the selected collection; reclaim unused lock entries on admission.
+    pub(crate) async fn lock_collection_lifecycle(&self, id: &str) -> CollectionGuard {
+        let collection = {
+            let mut locks = self
+                .collection_lifecycle
+                .lock()
+                .expect("collection lifecycle lock poisoned");
+            locks.retain(|_, lock| lock.strong_count() != 0);
+            if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(id.to_string(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        // Do not pin the namespace while queued behind another mutation of this collection.
+        let collection = collection.lock_owned().await;
+        let namespace = self.object_lifecycle.clone().read_owned().await;
+        CollectionGuard {
+            _collection: collection,
+            _namespace: namespace,
+        }
     }
 
     /// Run synchronous encryption/storage without blocking executor threads.
@@ -254,14 +291,20 @@ impl ServiceState {
         .map_err(|_| fdo::Error::Failed("blocking work failed".into()))?
     }
 
-    pub(crate) async fn lock_owned_object_lifecycle(&self) -> Arc<MutationGuard> {
-        let permit = self
-            .blocking_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("blocking capacity is never closed");
-        let lifecycle = self.object_lifecycle.clone().lock_owned().await;
+    pub(crate) async fn lock_owned_collection_lifecycle(&self, id: &str) -> Arc<MutationGuard> {
+        // Temporary mutations must remain available when every persistent worker is busy.
+        let permit = if id == SESSION_COLLECTION_ID {
+            None
+        } else {
+            Some(
+                self.blocking_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("blocking capacity is never closed"),
+            )
+        };
+        let lifecycle = self.lock_collection_lifecycle(id).await;
         Arc::new(MutationGuard {
             _lifecycle: lifecycle,
             _permit: permit,

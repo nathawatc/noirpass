@@ -99,7 +99,10 @@ impl Item {
         } else {
             (None, Some(self.state.encrypt_secret(plaintext).await?))
         };
-        let lifecycle = self.state.lock_owned_object_lifecycle().await;
+        let lifecycle = self
+            .state
+            .lock_owned_collection_lifecycle(&self.collection_id)
+            .await;
         if self.collection_id == SESSION_COLLECTION_ID {
             self.state.update_session_item(
                 &self.id,
@@ -206,7 +209,10 @@ impl Item {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
         let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
+        let _lifecycle = self
+            .state
+            .lock_collection_lifecycle(&self.collection_id)
+            .await;
         if self.collection_id == SESSION_COLLECTION_ID {
             self.state.delete_session_item(&self.id)?;
         } else {
@@ -263,7 +269,10 @@ impl Item {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
+        let _lifecycle = self
+            .state
+            .lock_collection_lifecycle(&self.collection_id)
+            .await;
         if self.collection_id == SESSION_COLLECTION_ID {
             self.state
                 .update_session_item(&self.id, None, Some(attributes), None, None)
@@ -311,7 +320,10 @@ impl Item {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<()> {
         let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
+        let _lifecycle = self
+            .state
+            .lock_collection_lifecycle(&self.collection_id)
+            .await;
         if self.collection_id == SESSION_COLLECTION_ID {
             self.state
                 .update_session_item(&self.id, Some(label), None, None, None)
