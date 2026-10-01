@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify};
+use tokio::sync::{
+    Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, OwnedMutexGuard,
+    OwnedSemaphorePermit, Semaphore,
+};
 use zbus::fdo;
 use zbus::zvariant::OwnedObjectPath;
 use zeroize::Zeroizing;
@@ -145,11 +148,11 @@ impl SessionCollectionState {
 }
 
 /// Marks one in-flight D-Bus method as activity until handler return.
-pub(crate) struct ActivityGuard<'a> {
-    state: &'a ServiceState,
+pub(crate) struct ActivityGuard {
+    state: Arc<ServiceState>,
 }
 
-impl Drop for ActivityGuard<'_> {
+impl Drop for ActivityGuard {
     fn drop(&mut self) {
         let notify = {
             let mut activity = self.state.activity.lock().expect("activity lock poisoned");
@@ -163,6 +166,13 @@ impl Drop for ActivityGuard<'_> {
     }
 }
 
+/// Reserve blocking capacity before taking lifecycle serialization.
+/// Shared ownership keeps both reservations alive through commit and publication.
+pub(crate) struct MutationGuard {
+    _lifecycle: OwnedMutexGuard<()>,
+    _permit: OwnedSemaphorePermit,
+}
+
 /// State shared by every D-Bus object of the daemon.
 pub struct ServiceState {
     store: Store,
@@ -171,7 +181,8 @@ pub struct ServiceState {
     session_collection: Mutex<SessionCollectionState>,
     activity: Mutex<ActivityState>,
     activity_complete: Notify,
-    object_lifecycle: AsyncMutex<()>,
+    object_lifecycle: Arc<AsyncMutex<()>>,
+    blocking_slots: Arc<Semaphore>,
 }
 
 impl ServiceState {
@@ -190,7 +201,8 @@ impl ServiceState {
                 shutting_down: false,
             }),
             activity_complete: Notify::new(),
-            object_lifecycle: AsyncMutex::new(()),
+            object_lifecycle: Arc::new(AsyncMutex::new(())),
+            blocking_slots: Arc::new(Semaphore::new(4)),
         })
     }
 
@@ -211,15 +223,59 @@ impl ServiceState {
         self.object_lifecycle.lock().await
     }
 
+    /// Run synchronous encryption/storage without blocking executor threads.
+    /// Keep admission, capacity, and any mutation lock alive even if the waiter is cancelled.
+    pub(crate) async fn blocking<T: Send + 'static>(
+        self: &Arc<Self>,
+        lifecycle: Option<Arc<MutationGuard>>,
+        operation: impl FnOnce(&Self) -> Result<T, SecretError> + Send + 'static,
+    ) -> Result<T, SecretError> {
+        let activity = self.activity()?;
+        let permit = if lifecycle.is_none() {
+            Some(
+                self.blocking_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| fdo::Error::Failed("blocking work is unavailable".into()))?,
+            )
+        } else {
+            None // MutationGuard already reserved capacity before acquiring the lifecycle lock.
+        };
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let (_activity, _permit, _lifecycle) = (activity, permit, lifecycle);
+            operation(&state)
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("blocking work failed".into()))?
+    }
+
+    pub(crate) async fn lock_owned_object_lifecycle(&self) -> Arc<MutationGuard> {
+        let permit = self
+            .blocking_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("blocking capacity is never closed");
+        let lifecycle = self.object_lifecycle.clone().lock_owned().await;
+        Arc::new(MutationGuard {
+            _lifecycle: lifecycle,
+            _permit: permit,
+        })
+    }
+
     /// Track one D-Bus method until its handler returns.
-    pub(crate) fn activity(&self) -> fdo::Result<ActivityGuard<'_>> {
+    pub(crate) fn activity(self: &Arc<Self>) -> fdo::Result<ActivityGuard> {
         let mut activity = self.activity.lock().expect("activity lock poisoned");
         if activity.shutting_down {
             return Err(fdo::Error::Failed("service is shutting down".into()));
         }
         activity.active_calls += 1;
         activity.had_activity = true;
-        Ok(ActivityGuard { state: self })
+        Ok(ActivityGuard {
+            state: self.clone(),
+        })
     }
 
     /// Close admission for new application handlers.
@@ -228,6 +284,11 @@ impl ServiceState {
             .lock()
             .expect("activity lock poisoned")
             .shutting_down = true;
+    }
+
+    /// Wake shutdown selection when the last active handler completes.
+    pub async fn wait_for_activity_completion(&self) {
+        self.activity_complete.notified().await;
     }
 
     /// Wait until every already-admitted application handler has returned.
@@ -642,6 +703,9 @@ impl ServiceState {
         for path in &paths {
             sessions.remove(path);
         }
+        if !paths.is_empty() {
+            self.activity_complete.notify_one();
+        }
         paths
     }
 
@@ -688,14 +752,13 @@ impl ServiceState {
         Ok(cipher.decrypt(&secret.parameters, &secret.value)?)
     }
 
-    /// Decrypt an incoming [`Secret`], then `gpg`-encrypt it for persistent storage.
-    pub fn secret_to_ciphertext(
-        &self,
-        secret: &Secret,
-        owner: &str,
+    /// Encrypt already-authorized zeroizing plaintext off the executor, before lifecycle locking.
+    pub(crate) async fn encrypt_secret(
+        self: &Arc<Self>,
+        plaintext: Zeroizing<Vec<u8>>,
     ) -> Result<Vec<u8>, SecretError> {
-        let plaintext = self.secret_to_plaintext(secret, owner)?;
-        Ok(self.gpg.encrypt(&plaintext)?)
+        self.blocking(None, move |state| Ok(state.gpg.encrypt(&plaintext)?))
+            .await
     }
 
     /// Encode plaintext for transport under an owned Secret Service session.

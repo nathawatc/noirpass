@@ -137,6 +137,7 @@ pub(crate) async fn emit_alias_target_invalidated(
 }
 
 /// What a served collection object points at.
+#[derive(Clone)]
 enum Target {
     /// A collection by id (the canonical `/collection/<id>` object).
     Collection(String),
@@ -146,6 +147,7 @@ enum Target {
 }
 
 /// A `org.freedesktop.Secret.Collection` D-Bus object.
+#[derive(Clone)]
 pub struct Collection {
     state: Arc<ServiceState>,
     target: Target,
@@ -200,12 +202,119 @@ impl Collection {
     }
 
     #[cfg(test)]
+    pub(crate) async fn create_item_for_test(
+        &self,
+        secret: Secret,
+        server: &ObjectServer,
+        connection: &zbus::Connection,
+        header: zbus::message::Header<'_>,
+    ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
+        self.create_item(HashMap::new(), secret, false, server, connection, header)
+            .await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn delete_for_test(
         &self,
         server: &ObjectServer,
         connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
         self.delete(server, connection).await
+    }
+}
+
+impl Collection {
+    async fn create_item_inner(
+        &self,
+        properties: HashMap<String, OwnedValue>,
+        secret: Secret,
+        replace: bool,
+        server: &ObjectServer,
+        connection: &zbus::Connection,
+        owner: &str,
+    ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
+        let label = match properties.get("org.freedesktop.Secret.Item.Label") {
+            None => String::new(),
+            Some(value) => String::try_from(value.clone()).map_err(|_| {
+                SecretError::InvalidArgs(
+                    "org.freedesktop.Secret.Item.Label must be a string".into(),
+                )
+            })?,
+        };
+        let attributes = match properties.get("org.freedesktop.Secret.Item.Attributes") {
+            None => HashMap::new(),
+            Some(value) => HashMap::<String, String>::try_from(value.clone()).map_err(|_| {
+                SecretError::InvalidArgs(
+                    "org.freedesktop.Secret.Item.Attributes must be a string dictionary".into(),
+                )
+            })?,
+        };
+
+        let plaintext = self.state.secret_to_plaintext(&secret, owner)?;
+        let initial_id = self.resolve_id()?;
+        let (plaintext, ciphertext) = if initial_id == SESSION_COLLECTION_ID {
+            (Some(plaintext), None)
+        } else {
+            (None, Some(self.state.encrypt_secret(plaintext).await?))
+        };
+        let lifecycle = self.state.lock_owned_object_lifecycle().await;
+        // Aliases can change during encryption. Resolve again under lifecycle serialization.
+        let id = self.resolve_id()?;
+        if id != initial_id {
+            return Err(fdo::Error::Failed(
+                "collection alias changed during encryption; retry".into(),
+            )
+            .into());
+        }
+
+        // Emit from the canonical collection path regardless of how we were
+        // addressed (id or alias).
+        let emitter =
+            SignalEmitter::new(connection, collection_path(&id)).map_err(SecretError::ZBus)?;
+
+        let (meta, replaced) = if id == SESSION_COLLECTION_ID {
+            self.state.create_or_replace_session_item(
+                &label,
+                attributes,
+                &secret.content_type,
+                plaintext.expect("session plaintext was retained"),
+                replace,
+            )?
+        } else {
+            let collection_id = id.clone();
+            self.state
+                .blocking(Some(lifecycle.clone()), move |state| {
+                    Ok(state.store().create_or_replace_item(
+                        &collection_id,
+                        &label,
+                        attributes,
+                        &secret.content_type,
+                        ciphertext
+                            .as_deref()
+                            .expect("persistent target was encrypted"),
+                        replace,
+                    )?)
+                })
+                .await?
+        };
+        let path = register_item(server, &self.state, &id, &meta.id)
+            .await
+            .map_err(SecretError::ZBus)?;
+        if replaced {
+            let item_emitter = SignalEmitter::new(connection, path.clone())?;
+            let item_ref = server.interface::<_, Item>(&path).await?;
+            let item = item_ref.get().await;
+            item.emit_label_changed(&item_emitter).await?;
+            item.modified_changed(&item_emitter).await?;
+            Self::item_changed(&emitter, path.clone()).await?;
+            emit_session_collection_modified(&self.state, connection, &id).await?;
+            return Ok((path, no_prompt()));
+        }
+        Self::item_created(&emitter, path.clone()).await?;
+        // Refresh client-side caches of the `Items` property on every path.
+        emit_collection_items_changed(&self.state, server, connection, &id).await?;
+        emit_session_collection_modified(&self.state, connection, &id).await?;
+        Ok((path, no_prompt()))
     }
 }
 
@@ -218,7 +327,7 @@ impl Collection {
         clippy::needless_pass_by_value,
         reason = "zbus deserializes method arguments by value"
     )]
-    fn search_items(
+    async fn search_items(
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
@@ -228,12 +337,11 @@ impl Collection {
             self.state.search_session_items(&attributes)
         } else {
             self.state
-                .store()
-                .search_items(&attributes)
-                .map_err(fdo::Error::from)?
-                .into_iter()
-                .filter(|meta| meta.collection == id)
-                .collect()
+                .blocking(None, move |state| {
+                    Ok(state.store().search_collection_items(&id, &attributes)?)
+                })
+                .await
+                .map_err(|err| fdo::Error::Failed(err.to_string()))?
         };
         Ok(items
             .into_iter()
@@ -260,71 +368,20 @@ impl Collection {
         #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
-        let label = match properties.get("org.freedesktop.Secret.Item.Label") {
-            None => String::new(),
-            Some(value) => String::try_from(value.clone()).map_err(|_| {
-                SecretError::InvalidArgs(
-                    "org.freedesktop.Secret.Item.Label must be a string".into(),
-                )
-            })?,
-        };
-        let attributes = match properties.get("org.freedesktop.Secret.Item.Attributes") {
-            None => HashMap::new(),
-            Some(value) => HashMap::<String, String>::try_from(value.clone()).map_err(|_| {
-                SecretError::InvalidArgs(
-                    "org.freedesktop.Secret.Item.Attributes must be a string dictionary".into(),
-                )
-            })?,
-        };
-
-        let id = self.resolve_id()?;
+        let activity = self.state.activity()?;
         let owner = message_sender(&header)?;
-
-        // Emit from the canonical collection path regardless of how we were
-        // addressed (id or alias).
-        let emitter =
-            SignalEmitter::new(connection, collection_path(&id)).map_err(SecretError::ZBus)?;
-
-        let (meta, replaced) = if id == SESSION_COLLECTION_ID {
-            let plaintext = self.state.secret_to_plaintext(&secret, &owner)?;
-            self.state.create_or_replace_session_item(
-                &label,
-                attributes,
-                &secret.content_type,
-                plaintext,
-                replace,
-            )?
-        } else {
-            let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
-            self.state.store().create_or_replace_item(
-                &id,
-                &label,
-                attributes,
-                &secret.content_type,
-                &ciphertext,
-                replace,
-            )?
-        };
-        let path = register_item(server, &self.state, &id, &meta.id)
-            .await
-            .map_err(SecretError::ZBus)?;
-        if replaced {
-            let item_emitter = SignalEmitter::new(connection, path.clone())?;
-            let item_ref = server.interface::<_, Item>(&path).await?;
-            let item = item_ref.get().await;
-            item.emit_label_changed(&item_emitter).await?;
-            item.modified_changed(&item_emitter).await?;
-            Self::item_changed(&emitter, path.clone()).await?;
-            emit_session_collection_modified(&self.state, connection, &id).await?;
-            return Ok((path, no_prompt()));
-        }
-        Self::item_created(&emitter, path.clone()).await?;
-        // Refresh client-side caches of the `Items` property on every path.
-        emit_collection_items_changed(&self.state, server, connection, &id).await?;
-        emit_session_collection_modified(&self.state, connection, &id).await?;
-        Ok((path, no_prompt()))
+        let object = self.clone();
+        let server = server.clone();
+        let connection = connection.clone();
+        // Once admitted, finish commit, object publication, and signals even if the caller leaves.
+        tokio::spawn(async move {
+            let _activity = activity;
+            object
+                .create_item_inner(properties, secret, replace, &server, &connection, &owner)
+                .await
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("secret mutation failed".into()))?
     }
 
     /// Delete this collection, all its items and their secret files.

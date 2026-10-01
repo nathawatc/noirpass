@@ -288,6 +288,24 @@ impl Store {
     /// value; an empty query therefore matches every item. This is a full
     /// table scan, which is acceptable for the expected data sizes.
     pub fn search_items(&self, attrs: &HashMap<String, String>) -> Result<Vec<ItemMeta>> {
+        self.search_items_matching(None, attrs)
+    }
+
+    /// Search only matches in the selected collection without building a global result vector.
+    pub(crate) fn search_collection_items(
+        &self,
+        collection: &str,
+        attrs: &HashMap<String, String>,
+    ) -> Result<Vec<ItemMeta>> {
+        self.search_items_matching(Some(collection), attrs)
+    }
+
+    fn search_items_matching(
+        &self,
+        collection: Option<&str>,
+        attrs: &HashMap<String, String>,
+    ) -> Result<Vec<ItemMeta>> {
+        // ponytail: existing item keys are global; retain validated full scans until profiling justifies an index.
         self.ensure_not_poisoned()?;
         let txn = self.db.begin_read()?;
         let items = txn.open_table(ITEMS)?;
@@ -295,6 +313,9 @@ impl Store {
         for entry in items.iter()? {
             let (key, value) = entry?;
             let metadata = decode_item(key.value(), value.value())?;
+            if collection.is_some_and(|id| metadata.collection != id) {
+                continue;
+            }
             let matches = attrs.iter().all(|(name, expected)| {
                 metadata
                     .attributes

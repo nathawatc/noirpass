@@ -31,6 +31,7 @@ fn no_prompt() -> OwnedObjectPath {
 const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
 
 /// A `org.freedesktop.Secret.Item` D-Bus object.
+#[derive(Clone)]
 pub struct Item {
     state: Arc<ServiceState>,
     collection_id: String,
@@ -85,6 +86,60 @@ impl Item {
     }
 }
 
+impl Item {
+    async fn set_secret_inner(
+        &self,
+        secret: Secret,
+        owner: &str,
+        connection: &zbus::Connection,
+    ) -> Result<(), SecretError> {
+        let plaintext = self.state.secret_to_plaintext(&secret, owner)?;
+        let (plaintext, ciphertext) = if self.collection_id == SESSION_COLLECTION_ID {
+            (Some(plaintext), None)
+        } else {
+            (None, Some(self.state.encrypt_secret(plaintext).await?))
+        };
+        let lifecycle = self.state.lock_owned_object_lifecycle().await;
+        if self.collection_id == SESSION_COLLECTION_ID {
+            self.state.update_session_item(
+                &self.id,
+                None,
+                None,
+                Some(&secret.content_type),
+                plaintext,
+            )?;
+        } else {
+            let id = self.id.clone();
+            self.state
+                .blocking(Some(lifecycle.clone()), move |state| {
+                    Ok(state.store().update_item(
+                        &id,
+                        None,
+                        None,
+                        Some(&secret.content_type),
+                        ciphertext.as_deref(),
+                    )?)
+                })
+                .await?;
+        }
+
+        let item_path = self.path();
+        let item_emitter =
+            SignalEmitter::new(connection, item_path.clone()).map_err(SecretError::ZBus)?;
+        let collection_emitter =
+            SignalEmitter::new(connection, collection_path(&self.collection_id))
+                .map_err(SecretError::ZBus)?;
+        self.modified_changed(&item_emitter)
+            .await
+            .map_err(SecretError::ZBus)?;
+        Collection::item_changed(&collection_emitter, item_path)
+            .await
+            .map_err(SecretError::ZBus)?;
+        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
+        Ok(())
+    }
+}
+
 #[interface(name = "org.freedesktop.Secret.Item")]
 impl Item {
     /// Retrieve the secret, decrypted via `gpg-agent` and encoded for the
@@ -102,7 +157,16 @@ impl Item {
             self.state
                 .plaintext_to_secret(&session, &plaintext, &meta.content_type, &owner)?
         } else {
-            let (meta, ciphertext) = self.state.store().read_item_secret(&self.id)?;
+            if self.state.session_cipher(&session, &owner).is_none() {
+                return Err(SecretError::NoSession(format!("no session {session}")));
+            }
+            let id = self.id.clone();
+            let (meta, ciphertext) = self
+                .state
+                .blocking(None, move |state| {
+                    Ok(state.store().read_item_secret(&id)?)
+                })
+                .await?;
             self.state
                 .ciphertext_to_secret(&session, &ciphertext, &meta.content_type, &owner)
                 .await?
@@ -121,43 +185,17 @@ impl Item {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
+        let activity = self.state.activity()?;
         let owner = message_sender(&header)?;
-        if self.collection_id == SESSION_COLLECTION_ID {
-            let plaintext = self.state.secret_to_plaintext(&secret, &owner)?;
-            self.state.update_session_item(
-                &self.id,
-                None,
-                None,
-                Some(&secret.content_type),
-                Some(plaintext),
-            )?;
-        } else {
-            let ciphertext = self.state.secret_to_ciphertext(&secret, &owner)?;
-            self.state.store().update_item(
-                &self.id,
-                None,
-                None,
-                Some(&secret.content_type),
-                Some(&ciphertext),
-            )?;
-        }
-
-        let item_path = self.path();
-        let item_emitter =
-            SignalEmitter::new(connection, item_path.clone()).map_err(SecretError::ZBus)?;
-        let collection_emitter =
-            SignalEmitter::new(connection, collection_path(&self.collection_id))
-                .map_err(SecretError::ZBus)?;
-        self.modified_changed(&item_emitter)
-            .await
-            .map_err(SecretError::ZBus)?;
-        Collection::item_changed(&collection_emitter, item_path)
-            .await
-            .map_err(SecretError::ZBus)?;
-        emit_session_collection_modified(&self.state, connection, &self.collection_id).await?;
-        Ok(())
+        let object = self.clone();
+        let connection = connection.clone();
+        // Once admitted, finish commit, object publication, and signals even if the caller leaves.
+        tokio::spawn(async move {
+            let _activity = activity;
+            object.set_secret_inner(secret, &owner, &connection).await
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("secret mutation failed".into()))?
     }
 
     /// Delete this item and its secret value (and persistent file, when present).

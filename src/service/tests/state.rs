@@ -547,3 +547,111 @@ fn session_registration_stops_after_bounded_collisions() {
     assert_eq!(state.session_count(), 1);
     assert!(state.session_cipher(&occupied, ":1.7").is_some());
 }
+
+#[tokio::test]
+async fn blocking_work_is_bounded_and_does_not_hold_lifecycle_lock() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let mut tasks = Vec::new();
+    let mut releases = Vec::new();
+    for _ in 0..4 {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_state = state.clone();
+        tasks.push(tokio::spawn(async move {
+            worker_state
+                .blocking(None, move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }));
+        started_rx.await.unwrap();
+        releases.push(release_tx);
+    }
+    let worker_state = state.clone();
+    let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+    let fifth = tokio::spawn(async move {
+        worker_state
+            .blocking(None, move |_| {
+                started_tx.send(()).unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut started_rx)
+            .await
+            .is_err()
+    );
+    let lifecycle = tokio::time::timeout(Duration::from_secs(2), state.lock_object_lifecycle())
+        .await
+        .unwrap();
+    drop(lifecycle);
+    // A real object-server call remains responsive on this single-thread executor.
+    let (_server, client) = super::p2p_pair(state.clone()).await;
+    let proxy = zbus::Proxy::new(
+        &client,
+        ":1.0",
+        super::super::SERVICE_PATH,
+        "org.freedesktop.Secret.Service",
+    )
+    .await
+    .unwrap();
+    let _: Vec<zbus::zvariant::OwnedObjectPath> =
+        tokio::time::timeout(Duration::from_secs(2), proxy.get_property("Collections"))
+            .await
+            .unwrap()
+            .unwrap();
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    started_rx.await.unwrap();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    fifth.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_blocking_waiter_retains_mutation_lock_and_activity() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let lifecycle = state.lock_owned_object_lifecycle().await;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker_state = state.clone();
+    let waiter = tokio::spawn(async move {
+        worker_state
+            .blocking(Some(lifecycle), move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+    });
+    started_rx.await.unwrap();
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), state.lock_object_lifecycle())
+            .await
+            .is_err()
+    );
+    state.begin_shutdown();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), state.wait_for_active_calls())
+            .await
+            .is_err()
+    );
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
+        .await
+        .unwrap();
+    drop(state.lock_object_lifecycle().await);
+}

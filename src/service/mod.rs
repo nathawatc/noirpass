@@ -249,16 +249,17 @@ impl Service {
         clippy::needless_pass_by_value,
         reason = "zbus deserializes method arguments by value"
     )]
-    fn search_items(
+    async fn search_items(
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
         let _activity = self.state.activity()?;
+        let query = attributes.clone();
         let mut unlocked: Vec<_> = self
             .state
-            .store()
-            .search_items(&attributes)
-            .map_err(fdo_err)?
+            .blocking(None, move |state| Ok(state.store().search_items(&query)?))
+            .await
+            .map_err(|err| fdo::Error::Failed(err.to_string()))?
             .into_iter()
             .map(|meta| item_path(&meta.collection, &meta.id))
             .collect();
@@ -333,10 +334,16 @@ impl Service {
                 continue;
             }
 
-            let (meta, ciphertext) = match self.state.store().read_item_secret(&item_id) {
+            let (meta, ciphertext) = match self
+                .state
+                .blocking(None, move |state| {
+                    Ok(state.store().read_item_secret(&item_id)?)
+                })
+                .await
+            {
                 Ok(item) => item,
-                Err(crate::Error::NotFound(_)) => continue,
-                Err(err) => return Err(err.into()),
+                Err(SecretError::NoSuchObject(_)) => continue,
+                Err(err) => return Err(err),
             };
             if meta.collection != collection_id {
                 continue;

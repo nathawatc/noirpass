@@ -228,3 +228,35 @@ fn invalid_item_ids_never_form_filesystem_paths() {
     assert!(store.delete_item("../outside").is_err());
     assert_eq!(fs::read(outside).unwrap(), b"keep");
 }
+
+#[test]
+fn collection_search_filters_before_attribute_matching() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let first = store.create_collection("first", None).unwrap();
+    let second = store.create_collection("second", None).unwrap();
+    let query = attrs(&[("service", "mail")]);
+    let item = store
+        .create_item(&first.id, "first", query.clone(), "text/plain", b"first")
+        .unwrap();
+    store
+        .create_item(&second.id, "second", query.clone(), "text/plain", b"second")
+        .unwrap();
+    assert_eq!(
+        store.search_collection_items(&first.id, &query).unwrap(),
+        vec![item.clone()]
+    );
+    assert_eq!(
+        store
+            .search_collection_items(&first.id, &HashMap::new())
+            .unwrap(),
+        vec![item]
+    );
+    assert!(
+        store
+            .search_collection_items(&first.id, &attrs(&[("service", "chat")]))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.search_items(&query).unwrap().len(), 2);
+}

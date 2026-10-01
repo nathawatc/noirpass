@@ -275,3 +275,75 @@ async fn collection_delete_removes_concurrently_registered_alias() {
         Err(zbus::Error::InterfaceNotFound)
     ));
 }
+
+#[tokio::test]
+async fn cancelled_create_waiter_still_commits_and_registers_item() {
+    use super::super::{SessionCipher, collection::Collection, session::Secret};
+    use std::future::Future;
+    use std::time::Duration;
+    use zeroize::Zeroizing;
+
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let (server, _client) = p2p_pair(state.clone()).await;
+    let id = crate::store::DEFAULT_COLLECTION_ID;
+    register_collection(server.object_server(), &state, id)
+        .await
+        .unwrap();
+    let session = state
+        .register_session(SessionCipher::Plain, ":1.7".into())
+        .unwrap();
+    let collection = Collection::new(state.clone(), id.into());
+    let message = zbus::Message::method_call(collection_path(id), "CreateItem")
+        .unwrap()
+        .sender(":1.7")
+        .unwrap()
+        .build(&())
+        .unwrap();
+    let secret = Secret {
+        session,
+        parameters: Vec::new(),
+        value: Zeroizing::new(b"test cancellation".to_vec()),
+        content_type: "text/plain".into(),
+    };
+    let lifecycle = state.lock_object_lifecycle().await;
+    // Poll admission once, then drop only the caller future while the mutation task waits.
+    {
+        let creation = collection.create_item_for_test(
+            secret,
+            server.object_server(),
+            &server,
+            message.header(),
+        );
+        tokio::pin!(creation);
+        std::future::poll_fn(|context| {
+            assert!(creation.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+    drop(lifecycle);
+    tokio::time::timeout(Duration::from_secs(5), state.wait_for_active_calls())
+        .await
+        .unwrap();
+    let items = state.store().list_items(id).unwrap();
+    assert_eq!(items.len(), 1);
+    let path = item_path(id, &items[0].id);
+    assert!(
+        server
+            .object_server()
+            .interface::<_, super::super::item::Item>(&path)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        state
+            .gpg()
+            .decrypt(&state.store().read_item_secret(&items[0].id).unwrap().1)
+            .await
+            .unwrap()
+            .as_slice(),
+        b"test cancellation"
+    );
+}
