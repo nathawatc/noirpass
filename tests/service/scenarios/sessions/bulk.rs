@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use noirpass::crypto::DhHandshake;
 use noirpass::service::session::Secret as WireSecret;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zeroize::Zeroizing;
 
 use super::super::super::helpers::{
     NO_SESSION_ERROR, SERVICE_NAME, UNKNOWN_OBJECT_ERROR, assert_method_error, service_proxy,
@@ -115,6 +116,55 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
         .unwrap_err();
     assert_method_error(&err, UNKNOWN_OBJECT_ERROR);
 
+    delete_items(paths).await;
+    bounded_bulk_response(&conn, &proxy, &plain_session).await;
+}
+
+async fn bounded_bulk_response(
+    conn: &zbus::Connection,
+    service: &zbus::Proxy<'_>,
+    session: &OwnedObjectPath,
+) {
+    let collection = zbus::Proxy::new(
+        conn,
+        SERVICE_NAME,
+        "/org/freedesktop/secrets/collection/session",
+        "org.freedesktop.Secret.Collection",
+    )
+    .await
+    .unwrap();
+    let properties = HashMap::from([(
+        "org.freedesktop.Secret.Item.Label",
+        Value::from("bulk response limit").try_to_owned().unwrap(),
+    )]);
+    let secret = WireSecret {
+        session: session.clone(),
+        parameters: Vec::new(),
+        value: Zeroizing::new(vec![17; 1024 * 1024]),
+        content_type: "application/octet-stream".into(),
+    };
+    let mut paths = Vec::new();
+    for _ in 0..9 {
+        let (path, _): (OwnedObjectPath, OwnedObjectPath) = collection
+            .call("CreateItem", &(&properties, &secret, false))
+            .await
+            .unwrap();
+        paths.push(path);
+    }
+    let error = service
+        .call::<_, _, HashMap<OwnedObjectPath, WireSecret>>("GetSecrets", &(&paths, session))
+        .await
+        .unwrap_err();
+    assert_method_error(&error, "org.freedesktop.DBus.Error.LimitsExceeded");
+
+    let mut smaller = paths[..7].to_vec();
+    smaller.extend(std::iter::repeat_n(paths[0].clone(), 4));
+    let secrets: HashMap<OwnedObjectPath, WireSecret> = service
+        .call("GetSecrets", &(&smaller, session))
+        .await
+        .unwrap();
+    assert_eq!(secrets.len(), 7);
+    assert!(secrets.values().all(|value| value.value == secret.value));
     delete_items(paths).await;
 }
 
