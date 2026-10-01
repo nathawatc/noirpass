@@ -231,8 +231,6 @@ impl Store {
         Ok(meta)
     }
 
-    // --- aliases ---------------------------------------------------------
-
     /// Set (`Some`) or remove (`None`) the alias `name`.
     pub fn set_alias(&self, name: &str, collection_id: Option<&str>) -> Result<()> {
         let (_mutation_guard, txn) = self.begin_write_checked()?;

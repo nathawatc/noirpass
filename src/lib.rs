@@ -13,3 +13,10 @@ pub mod service;
 pub mod store;
 
 pub use error::{Error, Result};
+
+/// Seconds since the Unix epoch (saturating at 0 for pre-epoch clocks).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
