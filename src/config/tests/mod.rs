@@ -5,5 +5,6 @@ mod init_pinning;
 mod lifecycle;
 mod reinit;
 mod startup;
+mod startup_pinning;
 mod status;
 mod support;

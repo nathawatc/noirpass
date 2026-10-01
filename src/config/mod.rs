@@ -86,11 +86,13 @@ impl LifecycleLock {
 mod deinit;
 mod format;
 mod init;
+mod startup;
 mod status;
 
 pub use deinit::deinit;
 pub use format::{config_path, recipient_cert_path};
 pub use init::{init_from_bytes, init_from_path, init_from_reader, init_store_from_path};
+pub use startup::open_startup_store;
 pub use status::{load_recipient, status};
 
 /// Minimal persisted config.
