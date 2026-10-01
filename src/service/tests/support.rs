@@ -1,4 +1,4 @@
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -39,4 +39,14 @@ where
     S: Stream + Unpin,
 {
     poll_fn(|context| Pin::new(&mut *stream).poll_next(context)).await
+}
+
+/// Poll admission once, then cancel only the caller future while its owned task waits.
+pub(super) async fn admit_then_cancel(future: impl Future) {
+    tokio::pin!(future);
+    poll_fn(|context| {
+        assert!(future.as_mut().poll(context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
 }

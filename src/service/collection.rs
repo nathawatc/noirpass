@@ -322,6 +322,82 @@ impl Collection {
 }
 
 impl Collection {
+    async fn delete_inner(
+        &self,
+        server: &ObjectServer,
+        connection: &zbus::Connection,
+    ) -> Result<OwnedObjectPath, SecretError> {
+        let lifecycle = self.state.lock_owned_namespace_lifecycle().await;
+        let id = self.resolve_id()?;
+        if id == SESSION_COLLECTION_ID {
+            return Err(fdo::Error::NotSupported(
+                "the built-in session collection cannot be deleted".into(),
+            )
+            .into());
+        }
+        let real_path = collection_path(&id);
+
+        let collection_id = id.clone();
+        let deleted = self
+            .state
+            .blocking(Some(lifecycle.clone()), move |state| {
+                Ok(state.store().delete_collection(&collection_id)?)
+            })
+            .await?;
+
+        // Unregister exactly the objects removed by the Store transaction.
+        // Attempt every removal even when one ObjectServer operation fails.
+        let mut cleanup_error = None;
+        for item_id in deleted.item_ids {
+            if let Err(err) = object_removed_or_absent(
+                server
+                    .remove::<crate::service::item::Item, _>(&item_path(&id, &item_id))
+                    .await,
+            ) && cleanup_error.is_none()
+            {
+                cleanup_error = Some(err);
+            }
+        }
+        if let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&real_path).await)
+            && cleanup_error.is_none()
+        {
+            cleanup_error = Some(err);
+        }
+        for name in deleted.aliases {
+            if name == SESSION_COLLECTION_ALIAS {
+                continue;
+            }
+            if let Ok(path) = alias_path(&name)
+                && let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&path).await)
+                && cleanup_error.is_none()
+            {
+                cleanup_error = Some(err);
+            }
+        }
+        if let Some(err) = cleanup_error {
+            return Err(SecretError::ZBus(err));
+        }
+
+        // CollectionDeleted is a Service signal, emitted from the service path.
+        let emitter = SignalEmitter::new(connection, SERVICE_PATH).map_err(SecretError::ZBus)?;
+        Service::collection_deleted(&emitter, real_path)
+            .await
+            .map_err(SecretError::ZBus)?;
+        // Refresh client-side caches of the service's `Collections` property.
+        let service_ref = server
+            .interface::<_, Service>(SERVICE_PATH)
+            .await
+            .map_err(SecretError::ZBus)?;
+        service_ref
+            .get()
+            .await
+            .collections_changed(service_ref.signal_emitter())
+            .await
+            .map_err(SecretError::ZBus)?;
+
+        Ok(no_prompt())
+    }
+
     async fn set_label_inner(
         &self,
         label: &str,
@@ -438,70 +514,16 @@ impl Collection {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
-        let _activity = self.state.activity()?;
-        let _lifecycle = self.state.lock_object_lifecycle().await;
-        let id = self.resolve_id()?;
-        if id == SESSION_COLLECTION_ID {
-            return Err(fdo::Error::NotSupported(
-                "the built-in session collection cannot be deleted".into(),
-            )
-            .into());
-        }
-        let real_path = collection_path(&id);
-
-        let deleted = self.state.store().delete_collection(&id)?;
-
-        // Unregister exactly the objects removed by the Store transaction.
-        // Attempt every removal even when one ObjectServer operation fails.
-        let mut cleanup_error = None;
-        for item_id in deleted.item_ids {
-            if let Err(err) = object_removed_or_absent(
-                server
-                    .remove::<crate::service::item::Item, _>(&item_path(&id, &item_id))
-                    .await,
-            ) && cleanup_error.is_none()
-            {
-                cleanup_error = Some(err);
-            }
-        }
-        if let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&real_path).await)
-            && cleanup_error.is_none()
-        {
-            cleanup_error = Some(err);
-        }
-        for name in deleted.aliases {
-            if name == SESSION_COLLECTION_ALIAS {
-                continue;
-            }
-            if let Ok(path) = alias_path(&name)
-                && let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&path).await)
-                && cleanup_error.is_none()
-            {
-                cleanup_error = Some(err);
-            }
-        }
-        if let Some(err) = cleanup_error {
-            return Err(SecretError::ZBus(err));
-        }
-
-        // CollectionDeleted is a Service signal, emitted from the service path.
-        let emitter = SignalEmitter::new(connection, SERVICE_PATH).map_err(SecretError::ZBus)?;
-        Service::collection_deleted(&emitter, real_path)
-            .await
-            .map_err(SecretError::ZBus)?;
-        // Refresh client-side caches of the service's `Collections` property.
-        let service_ref = server
-            .interface::<_, Service>(SERVICE_PATH)
-            .await
-            .map_err(SecretError::ZBus)?;
-        service_ref
-            .get()
-            .await
-            .collections_changed(service_ref.signal_emitter())
-            .await
-            .map_err(SecretError::ZBus)?;
-
-        Ok(no_prompt())
+        let activity = self.state.activity()?;
+        let object = self.clone();
+        let server = server.clone();
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            let _activity = activity;
+            object.delete_inner(&server, &connection).await
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("collection deletion failed".into()))?
     }
 
     /// Object paths of the items in this collection.

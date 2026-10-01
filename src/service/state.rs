@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{
-    Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedSemaphorePermit,
-    RwLock as AsyncRwLock, RwLockWriteGuard, Semaphore,
+    Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard,
+    OwnedSemaphorePermit, RwLock as AsyncRwLock, Semaphore,
 };
 use zbus::fdo;
 use zbus::zvariant::OwnedObjectPath;
@@ -182,8 +182,13 @@ pub(crate) struct CollectionGuard {
 
 /// Reserve persistent worker capacity before taking lifecycle serialization.
 pub(crate) struct MutationGuard {
-    _lifecycle: CollectionGuard,
+    _lifecycle: LifecycleGuard,
     _permit: Option<OwnedSemaphorePermit>,
+}
+
+enum LifecycleGuard {
+    Collection { _guard: CollectionGuard },
+    Namespace { _guard: OwnedRwLockWriteGuard<()> },
 }
 
 /// State shared by every D-Bus object of the daemon.
@@ -234,7 +239,7 @@ impl ServiceState {
     }
 
     /// Serialize namespace changes against collection mutations and publication.
-    pub(crate) async fn lock_object_lifecycle(&self) -> RwLockWriteGuard<'_, ()> {
+    pub(crate) async fn lock_object_lifecycle(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
         self.object_lifecycle.write().await
     }
 
@@ -306,8 +311,23 @@ impl ServiceState {
         };
         let lifecycle = self.lock_collection_lifecycle(id).await;
         Arc::new(MutationGuard {
-            _lifecycle: lifecycle,
+            _lifecycle: LifecycleGuard::Collection { _guard: lifecycle },
             _permit: permit,
+        })
+    }
+
+    /// Reserve worker capacity before exclusive namespace admission, through publication.
+    pub(crate) async fn lock_owned_namespace_lifecycle(&self) -> Arc<MutationGuard> {
+        let permit = self
+            .blocking_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("blocking capacity is never closed");
+        let namespace = self.object_lifecycle.clone().write_owned().await;
+        Arc::new(MutationGuard {
+            _lifecycle: LifecycleGuard::Namespace { _guard: namespace },
+            _permit: Some(permit),
         })
     }
 

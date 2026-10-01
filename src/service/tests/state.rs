@@ -627,38 +627,44 @@ async fn blocking_work_bounds_decryption_and_rechecks_queued_session() {
 #[tokio::test]
 async fn cancelled_blocking_waiter_retains_mutation_lock_and_activity() {
     let gnupg = TestGnupg::new();
-    let tmp = tempfile::tempdir().unwrap();
-    let state = test_state(&gnupg, tmp.path());
-    let lifecycle = state.lock_owned_collection_lifecycle("default").await;
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let worker_state = state.clone();
-    let waiter = tokio::spawn(async move {
-        worker_state
-            .blocking(Some(lifecycle), move |_| {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok(())
-            })
+    for namespace in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        let lifecycle = if namespace {
+            state.lock_owned_namespace_lifecycle().await
+        } else {
+            state.lock_owned_collection_lifecycle("default").await
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_state = state.clone();
+        let waiter = tokio::spawn(async move {
+            worker_state
+                .blocking(Some(lifecycle), move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), state.lock_object_lifecycle())
+                .await
+                .is_err()
+        );
+        state.begin_shutdown();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), state.wait_for_active_calls())
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
             .await
-    });
-    started_rx.await.unwrap();
-    waiter.abort();
-    assert!(waiter.await.unwrap_err().is_cancelled());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), state.lock_object_lifecycle())
-            .await
-            .is_err()
-    );
-    state.begin_shutdown();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), state.wait_for_active_calls())
-            .await
-            .is_err()
-    );
-    release_tx.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
-        .await
-        .unwrap();
-    drop(state.lock_object_lifecycle().await);
+            .unwrap();
+        drop(state.lock_object_lifecycle().await);
+    }
 }
