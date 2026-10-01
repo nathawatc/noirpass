@@ -116,6 +116,7 @@
             clippy
             rustfmt
             cargo-llvm-cov
+            cargo-audit
             llvm
             libsecret
           ]
