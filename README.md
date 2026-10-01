@@ -9,6 +9,8 @@ the daemon/login session ends.
 
 Applications interact with Noirpass through the standard Secret Service D-Bus API. The Noirpass CLI
 is limited to initialization, inspection, deletion, integrity maintenance, and deinitialization.
+Applications can retrieve several secrets in one D-Bus request. Persistent decryption runs with
+bounded concurrency and follows the same GPG-agent and pinentry policy as individual retrieval.
 Noirpass intentionally does not provide password-manager UI, secret editing workflows, keyring
 management UI, recipient migration, sync, backup management, or other manager features.
 

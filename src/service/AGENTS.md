@@ -51,7 +51,22 @@ The lifecycle guard must prevent clients observing half-applied state:
 Every Noirpass application method and property handler holds the activity guard for its complete
 lifetime. Admission, active-call count, completion time, and shutdown selection share one activity
 state. Once idle shutdown is selected, new application handlers fail instead of entering a closing
-service. Idle shutdown requires no sessions and no active application handler.
+service. Idle shutdown requires no sessions, no temporary items, and no active application handler.
+
+Encryption, persistent secret reads/writes, and agent decryption share four blocking worker slots.
+Reserve capacity before acquiring an owned lifecycle guard; the worker retains capacity, activity,
+and any mutation guard after caller cancellation. Never wrap an untracked nested `spawn_blocking`
+operation inside this boundary. Recheck session ownership after queue admission and before agent
+decryption, then again when encoding the result. Bulk retrieval admits at most four item tasks per
+request and preserves input order when merging repeated paths.
+
+## Temporary Collection
+
+The reserved `session` alias resolves to `/org/freedesktop/secrets/collection/session` before any
+persisted alias. Temporary item metadata, aliases, and zeroizing secret values remain process-local;
+they never enter redb or ciphertext files. Temporary items prevent idle shutdown and disappear on
+deletion or daemon exit. Enforce item, attribute, string, and aggregate payload limits before mutation;
+rejected replacements retain the existing item. Runtime aliases must also remain bounded.
 
 ## Always-Unlocked Contract
 
