@@ -7,6 +7,31 @@ use std::fs;
 use std::os::unix::fs::symlink;
 
 #[test]
+fn deinit_refuses_legacy_redb_lock_before_lifecycle_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (certificate, _) = generated_recipient();
+    init_from_bytes(tmp.path(), &certificate).unwrap();
+    drop(Store::open(tmp.path()).unwrap());
+    let index_path = tmp.path().join(INDEX_FILE);
+    let index = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&index_path)
+        .unwrap();
+    index.try_lock().unwrap();
+    let before = fs::read(&index_path).unwrap();
+
+    let err = crate::config::deinit(tmp.path()).unwrap_err();
+    assert!(err.to_string().contains("store is in use"));
+    assert_eq!(fs::read(&index_path).unwrap(), before);
+    assert!(tmp.path().join(CONFIG_FILE).exists());
+    assert!(!tmp.path().join(".noirpass-lifecycle.lock").exists());
+    drop(index);
+    crate::config::deinit(tmp.path()).unwrap();
+    assert!(!index_path.exists());
+}
+
+#[test]
 fn deinit_refuses_busy_index_when_secrets_directory_is_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let (certificate, _) = generated_recipient();

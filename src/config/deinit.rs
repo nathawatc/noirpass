@@ -211,7 +211,24 @@ fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<FileBack
     // Claim redb ownership without parsing, initializing, or recovering the index:
     // explicit destructive cleanup must also work for corrupt databases. A daemon
     // may retain a renamed secrets directory, so every existing index needs a lock.
-    let index = FileBackend::new(root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR, 0)?)?;
+    let file = root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR, 0)?;
+    // redb <= 4.2 uses flock; newer redb uses independent OFD range locks.
+    // Hold both on this descriptor until destructive cleanup finishes.
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(Error::Config(format!(
+                "store is in use by another noirpass process: {}; stop the daemon before running maintenance commands",
+                data_dir.join(INDEX_FILE).display()
+            )));
+        }
+        Err(std::fs::TryLockError::Error(err)) => {
+            return Err(Error::Config(format!(
+                "cannot acquire index ownership: {err}"
+            )));
+        }
+    }
+    let index = FileBackend::new(file)?;
     if !index
         .try_lock_range(Bound::Unbounded, Bound::Unbounded)
         .map_err(|err| Error::Config(format!("cannot acquire index ownership: {err}")))?
