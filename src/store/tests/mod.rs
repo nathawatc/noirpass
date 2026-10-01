@@ -13,6 +13,7 @@ mod filesystem_failures;
 mod integrity;
 mod items;
 mod recovery;
+mod scan_benchmark;
 
 fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs

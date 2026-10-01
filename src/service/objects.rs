@@ -249,13 +249,15 @@ pub async fn register_existing(
         .map_err(|e| zbus::Error::FDO(Box::new(e.into())))?;
     for collection in collections {
         register_collection(server, state, &collection.id).await?;
-        let items = state
-            .store()
-            .list_items(&collection.id)
-            .map_err(|e| zbus::Error::FDO(Box::new(e.into())))?;
-        for item in items {
-            register_item(server, state, &collection.id, &item.id).await?;
-        }
+    }
+    // Item keys are global. Scan once after registering every parent instead of
+    // deserializing the complete item table again for each collection.
+    let items = state
+        .store()
+        .search_items(&std::collections::HashMap::new())
+        .map_err(|e| zbus::Error::FDO(Box::new(e.into())))?;
+    for item in items {
+        register_item(server, state, &item.collection, &item.id).await?;
     }
     let aliases = state
         .store()

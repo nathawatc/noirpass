@@ -559,3 +559,74 @@ async fn collection_delete_ignores_already_absent_interface_and_finishes_cleanup
         ));
     }
 }
+
+#[tokio::test]
+async fn startup_registers_items_from_every_persisted_collection() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let first = state.store().get_collection("default").unwrap();
+    let second = state
+        .store()
+        .create_collection("second", Some("second_alias"))
+        .unwrap();
+    let empty = state.store().create_collection("empty", None).unwrap();
+    let mut expected = Vec::new();
+    for collection in [&first, &second] {
+        let item = state
+            .store()
+            .create_item(
+                &collection.id,
+                "persisted",
+                HashMap::new(),
+                "text/plain",
+                b"ciphertext",
+            )
+            .unwrap();
+        expected.push((collection.id.clone(), item.id));
+    }
+    let (server, client) = p2p_pair(state.clone()).await;
+    register_existing(server.object_server(), &state)
+        .await
+        .unwrap();
+    for (collection, item) in expected {
+        let path = item_path(&collection, &item);
+        assert!(
+            server
+                .object_server()
+                .interface::<_, crate::service::item::Item>(&path)
+                .await
+                .is_ok()
+        );
+        let items: Vec<OwnedObjectPath> = get_property(
+            &client,
+            &collection_path(&collection),
+            "org.freedesktop.Secret.Collection",
+            "Items",
+        )
+        .await
+        .try_into()
+        .unwrap();
+        assert_eq!(items, vec![path]);
+    }
+    let items: Vec<OwnedObjectPath> = get_property(
+        &client,
+        &collection_path(&empty.id),
+        "org.freedesktop.Secret.Collection",
+        "Items",
+    )
+    .await
+    .try_into()
+    .unwrap();
+    assert!(items.is_empty());
+    let items: Vec<OwnedObjectPath> = get_property(
+        &client,
+        &alias_path("second_alias").unwrap(),
+        "org.freedesktop.Secret.Collection",
+        "Items",
+    )
+    .await
+    .try_into()
+    .unwrap();
+    assert_eq!(items.len(), 1);
+}
