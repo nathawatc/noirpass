@@ -12,6 +12,96 @@ use super::super::common::{
 };
 use super::harness::harness;
 
+#[tokio::test]
+async fn daemon_subscribes_to_client_disconnects_before_publishing_name() {
+    use std::collections::HashSet;
+    use std::pin::Pin;
+
+    let h = harness();
+    let (mut dbus, address) = spawn_dbus_daemon();
+    let store = tempfile::tempdir().unwrap();
+    let cert = export_public_cert(&h.gnupg_home);
+    init_noirpass_store(store.path(), &cert);
+    let monitor = zbus::connection::Builder::address(address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let mut messages = zbus::MessageStream::from(&monitor);
+    let rules = vec![
+        "type='method_call',interface='org.freedesktop.DBus',member='AddMatch'",
+        "type='method_call',interface='org.freedesktop.DBus',member='RequestName'",
+    ];
+    monitor
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus.Monitoring"),
+            "BecomeMonitor",
+            &(rules, 0u32),
+        )
+        .await
+        .unwrap();
+    let mut daemon = spawn_daemon(
+        &address,
+        &h.gnupg_home,
+        store.path(),
+        "-1",
+        Some(&h.fake_gpg_dir),
+    );
+    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut watching = HashSet::new();
+        loop {
+            let message = super::helpers::next_event(Pin::new(&mut messages))
+                .await
+                .ok_or_else(|| {
+                    zbus::Error::Failure("monitor stream ended before RequestName".into())
+                })??;
+            let header = message.header();
+            let Some(sender) = header.sender() else {
+                continue;
+            };
+            match header.member().map(zbus::names::MemberName::as_str) {
+                Some("AddMatch") => {
+                    let (text,): (String,) = message.body().deserialize()?;
+                    let rule = zbus::MatchRule::try_from(text.as_str())?;
+                    if rule
+                        .member()
+                        .is_some_and(|member| member.as_str() == "NameOwnerChanged")
+                        && rule.args().is_empty()
+                        && rule.arg0ns().is_none()
+                        && rule.arg_paths().is_empty()
+                    {
+                        watching.insert(sender.to_string());
+                    }
+                }
+                Some("RequestName") => {
+                    let (name, _flags): (String, u32) = message.body().deserialize()?;
+                    if name == super::helpers::SERVICE_NAME {
+                        return Ok::<_, zbus::Error>(watching.contains(sender.as_str()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+    .await;
+    sigterm(daemon.id());
+    let status = wait_with_timeout(&mut daemon, Duration::from_secs(10));
+    monitor.close().await.unwrap();
+    dbus.kill().expect("kill private dbus-daemon");
+    let bus_status = dbus.wait().unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&bus_status),
+        Some(libc::SIGKILL)
+    );
+    assert!(
+        observed.unwrap().unwrap(),
+        "daemon published name before subscribing to client disconnects"
+    );
+}
+
 #[test]
 fn daemon_recovers_pending_backup_and_quarantine() {
     let h = harness();

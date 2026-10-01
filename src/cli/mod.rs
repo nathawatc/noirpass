@@ -150,11 +150,14 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
     register_existing(connection.object_server(), &state).await?;
-    tokio::spawn(reap_vanished_clients(connection.clone(), state.clone()));
+    let reaper = reap_vanished_clients(connection.clone(), state.clone()).await?;
     connection.request_name(SERVICE_NAME).await?;
     info!(name = SERVICE_NAME, "secret service ready");
 
     wait_for_shutdown(&connection, &state, idle_exit).await;
+
+    reaper.abort();
+    let _ = reaper.await;
 
     // Graceful shutdown: release the name so a future activation starts a
     // fresh instance, then drop the connection.
@@ -190,24 +193,27 @@ fn confirm(prompt: &str, assume_yes: bool) -> noirpass::Result<bool> {
 /// `Session.Close` (most clients don't). Watches `NameOwnerChanged` for
 /// unique names losing their owner; leaked sessions would otherwise block
 /// idle-exit forever and accumulate cipher state.
-async fn reap_vanished_clients(connection: zbus::Connection, state: Arc<ServiceState>) {
-    let Ok(proxy) = zbus::fdo::DBusProxy::new(&connection).await else {
-        return;
-    };
-    let Ok(stream) = proxy.receive_name_owner_changed().await else {
-        return;
-    };
-    let mut stream = std::pin::pin!(stream);
-    while let Some(signal) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
-        let Ok(args) = signal.args() else { continue };
-        // A unique name (":x.y") with no new owner means the client is gone.
-        if args.new_owner().is_none() && args.name().starts_with(':') {
-            for path in state.remove_sessions_owned_by(args.name().as_str()) {
-                debug!(%path, owner = %args.name(), "reaping session of vanished client");
-                let _ = connection.object_server().remove::<Session, _>(&path).await;
+async fn reap_vanished_clients(
+    connection: zbus::Connection,
+    state: Arc<ServiceState>,
+) -> zbus::Result<tokio::task::JoinHandle<()>> {
+    let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
+    // Complete AddMatch before publishing the well-known name. Otherwise a fast client
+    // can open a session and vanish before its disconnect is observable.
+    let stream = proxy.receive_name_owner_changed().await?;
+    Ok(tokio::spawn(async move {
+        let mut stream = std::pin::pin!(stream);
+        while let Some(signal) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+            let Ok(args) = signal.args() else { continue };
+            // A unique name (":x.y") with no new owner means the client is gone.
+            if args.new_owner().is_none() && args.name().starts_with(':') {
+                for path in state.remove_sessions_owned_by(args.name().as_str()) {
+                    debug!(%path, owner = %args.name(), "reaping session of vanished client");
+                    let _ = connection.object_server().remove::<Session, _>(&path).await;
+                }
             }
         }
-    }
+    }))
 }
 
 /// Wait until SIGTERM/SIGINT or configured idle exit with no open transport sessions or temporary secrets.
