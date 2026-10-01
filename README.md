@@ -215,6 +215,10 @@ The daemon accepts up to 64 transport sessions per client connection and 1024 in
 exceeding these limits receive `org.freedesktop.DBus.Error.LimitsExceeded`; closing unused sessions
 or disconnecting releases capacity.
 
+Queued operations are bounded to 64 requests and 32 MiB of combined input payload, including
+persistent writes. Excess operations receive `org.freedesktop.DBus.Error.LimitsExceeded` and may be
+retried after earlier work completes. Property reads and closing sessions remain available.
+
 Temporary item operations can continue while persistent secret workers are busy. Collection
 creation/deletion and alias changes still serialize with active mutations.
 

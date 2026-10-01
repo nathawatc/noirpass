@@ -68,6 +68,13 @@ lifetime. Admission, active-call count, completion time, and shutdown selection 
 state. Once idle shutdown is selected, new application handlers fail instead of entering a closing
 service. Idle shutdown requires no sessions, no temporary items, and no active application handler.
 
+Session negotiation, searches, secret retrieval, and mutations additionally reserve nonblocking
+request capacity: 64 active or queued requests and 32 MiB of combined D-Bus-encoded input payload.
+Check capacity before copying arguments or spawning owned work; reject exhaustion with
+`org.freedesktop.DBus.Error.LimitsExceeded`. Owned tasks retain both reservations through publication
+after caller cancellation. Property reads and internal worker/publication activity do not reserve
+request capacity, so saturation cannot interrupt an admitted mutation's required signals.
+
 Encryption, persistent reads/writes (including namespace metadata), and agent decryption share four
 blocking worker slots.
 Reserve persistent capacity before acquiring an owned lifecycle guard; temporary mutations reserve
