@@ -41,7 +41,8 @@ The lifecycle guard must prevent clients observing half-applied state:
 
 Item mutations and collection relabeling hold a collection mutex plus a shared namespace guard
 through commit, registration/removal, and signals. Collection creation/deletion and alias changes
-hold the exclusive namespace guard. Acquire persistent worker capacity before collection guards;
+hold the exclusive namespace guard and reserve worker capacity before acquiring it. Acquire
+persistent worker capacity before collection guards;
 acquire the collection mutex before the shared namespace guard. Never upgrade a shared guard to
 exclusive or acquire a collection guard while holding the exclusive namespace guard. Re-resolve
 alias-backed targets under the guard and reject a changed target before mutation. Reclaim unused
@@ -61,14 +62,15 @@ lifetime. Admission, active-call count, completion time, and shutdown selection 
 state. Once idle shutdown is selected, new application handlers fail instead of entering a closing
 service. Idle shutdown requires no sessions, no temporary items, and no active application handler.
 
-Encryption, persistent secret reads/writes, and agent decryption share four blocking worker slots.
+Encryption, persistent reads/writes (including namespace metadata), and agent decryption share four
+blocking worker slots.
 Reserve persistent capacity before acquiring an owned lifecycle guard; temporary mutations reserve
-no worker capacity. The worker retains capacity, activity,
-and any mutation guard after caller cancellation. Never wrap an untracked nested `spawn_blocking`
+no worker capacity. The worker retains capacity, activity, and any mutation guard after caller
+cancellation. Never wrap an untracked nested `spawn_blocking`
 operation inside this boundary. Recheck session ownership after queue admission and before agent
 decryption, then again when encoding the result. Bulk retrieval admits at most four item tasks per
 request and preserves input order when merging repeated paths.
-Admitted item mutations and collection relabeling run as owned tasks so cancellation cannot separate
+All admitted item, collection, and alias mutations run as owned tasks so cancellation cannot separate
 a completed commit from object publication or required signals.
 
 ## Temporary Collection
