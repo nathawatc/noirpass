@@ -1,5 +1,6 @@
 mod aliases;
 mod collections;
+mod introspection;
 mod items;
 mod persistence;
 mod properties;
@@ -7,6 +8,8 @@ mod sessions;
 mod signals;
 
 pub(super) async fn run_ordered() {
+    eprintln!("scenario 0: D-Bus introspection contract");
+    introspection::introspection_contract().await;
     eprintln!("scenario 1: encrypted session roundtrip");
     sessions::s1_encrypted_roundtrip().await;
     eprintln!("scenario 2: plain session roundtrip");
