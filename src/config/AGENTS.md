@@ -79,5 +79,10 @@ the pinned descriptor and preserve replacements when identities differ. Regressi
 roots and children with both ordinary directories and symlinks and verify replacement state remains
 intact.
 
+Every existing index requires ownership before lifecycle-file creation, including when `secrets/`
+is missing. For incomplete stores, acquire redb's full-file backend lock without parsing or writing
+the index. A live daemon may retain a renamed secrets directory; pathname absence is not evidence
+that its database is offline.
+
 OpenPGP certificate parsing and usable-key semantics belong to [`../gpg/AGENTS.md`](../gpg/AGENTS.md);
 this file owns how the primary fingerprint controls lifecycle decisions.

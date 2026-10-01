@@ -39,8 +39,8 @@ Do not add manager workflows or hidden runtime/testing overrides. The daemon alw
 - `deinit` removes only recognized Noirpass state after both confirmations. It must never invoke
   itself from `init`, change recipient implicitly, or delete unknown files. Store path and symlink
   safety remain enforced by the config/store layers. After pure preflight, it acquires the same
-  lifecycle exclusivity before removing recognized temporary files; complete stores acquire redb
-  ownership first so busy-store rejection cannot create a new lifecycle path.
+  lifecycle exclusivity before removing recognized temporary files; existing indexes acquire redb
+  ownership first, even without `secrets/`, so busy-store rejection cannot create a new lifecycle path.
 
 Complete existing-store lifecycle operations use `Store`/redb → lifecycle-lock ordering. Fresh
 initialization, with no existing Store to claim, uses lifecycle-lock → newly created Store ordering.
