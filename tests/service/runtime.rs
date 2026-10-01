@@ -22,6 +22,42 @@ pub(super) fn daemon_runtime_does_not_spawn_gpg() {
     );
 }
 
+pub(super) async fn transport_session_limit_is_reported_and_close_restores_capacity() {
+    harness();
+    let connection = zbus::Connection::session().await.unwrap();
+    let proxy = service_proxy(&connection).await;
+    let mut sessions = Vec::new();
+    for _ in 0..64 {
+        let (_, path): (OwnedValue, OwnedObjectPath) = proxy
+            .call("OpenSession", &("plain", Value::from("")))
+            .await
+            .unwrap();
+        sessions.push(path);
+    }
+    let err = proxy
+        .call::<_, _, (OwnedValue, OwnedObjectPath)>("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap_err();
+    assert_method_error(&err, "org.freedesktop.DBus.Error.LimitsExceeded");
+    let session = zbus::Proxy::new(
+        &connection,
+        SERVICE_NAME,
+        &sessions[0],
+        "org.freedesktop.Secret.Session",
+    )
+    .await
+    .unwrap();
+    session.call::<_, _, ()>("Close", &()).await.unwrap();
+    let (_, replacement): (OwnedValue, OwnedObjectPath) = proxy
+        .call("OpenSession", &("plain", Value::from("")))
+        .await
+        .unwrap();
+    assert_ne!(replacement, sessions[0]);
+    drop(session);
+    drop(proxy);
+    connection.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn rejected_plain_open_session_does_not_register_session() {
     let h = harness();

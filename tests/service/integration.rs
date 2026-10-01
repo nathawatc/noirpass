@@ -32,6 +32,7 @@ async fn end_to_end() {
     harness::harness();
 
     scenarios::run_ordered().await;
+    runtime::transport_session_limit_is_reported_and_close_restores_capacity().await;
     eprintln!("scenario 14: no daemon gpg spawn");
     runtime::daemon_runtime_does_not_spawn_gpg();
 

@@ -10,10 +10,60 @@ use super::super::SecretError;
 use super::super::state::{
     MAX_BLOCKING_WORKERS, MAX_SESSION_ALIAS_BYTES, MAX_SESSION_ALIASES, MAX_SESSION_ATTRIBUTES,
     MAX_SESSION_BYTES, MAX_SESSION_ITEMS, MAX_SESSION_METADATA_BYTES, MAX_SESSION_SECRET_BYTES,
-    MAX_SESSION_STRING_BYTES, SESSION_ALLOCATION_ATTEMPTS, session_item_bytes,
+    MAX_SESSION_STRING_BYTES, MAX_TRANSPORT_SESSIONS, MAX_TRANSPORT_SESSIONS_PER_OWNER,
+    SESSION_ALLOCATION_ATTEMPTS, session_item_bytes,
 };
 use super::super::{DhHandshake, SessionCipher, session_path};
 use super::test_state;
+
+#[test]
+fn transport_session_limits_release_capacity_on_close_and_disconnect() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let owner = ":1.7";
+    let mut paths = Vec::new();
+    for _ in 0..MAX_TRANSPORT_SESSIONS_PER_OWNER {
+        paths.push(
+            state
+                .register_session(SessionCipher::Plain, owner.into())
+                .unwrap(),
+        );
+    }
+    let err = state
+        .register_session_with(SessionCipher::Plain, owner.into(), || {
+            panic!("rejected session must not allocate a path")
+        })
+        .unwrap_err();
+    assert!(matches!(err, zbus::fdo::Error::LimitsExceeded(_)));
+    assert_eq!(state.session_count(), MAX_TRANSPORT_SESSIONS_PER_OWNER);
+    assert!(!state.remove_session(&paths[0], ":1.8"));
+    assert!(state.remove_session(&paths[0], owner));
+    state
+        .register_session(SessionCipher::Plain, owner.into())
+        .unwrap();
+    for i in MAX_TRANSPORT_SESSIONS_PER_OWNER..MAX_TRANSPORT_SESSIONS {
+        state
+            .register_session(SessionCipher::Plain, format!(":2.{i}"))
+            .unwrap();
+    }
+    let err = state
+        .register_session(SessionCipher::Plain, ":1.8".into())
+        .unwrap_err();
+    assert!(matches!(err, zbus::fdo::Error::LimitsExceeded(_)));
+    assert_eq!(state.session_count(), MAX_TRANSPORT_SESSIONS);
+    assert_eq!(
+        state.remove_sessions_owned_by(owner).len(),
+        MAX_TRANSPORT_SESSIONS_PER_OWNER
+    );
+    state
+        .register_session(SessionCipher::Plain, ":1.8".into())
+        .unwrap();
+    assert_eq!(
+        state.session_count(),
+        MAX_TRANSPORT_SESSIONS - MAX_TRANSPORT_SESSIONS_PER_OWNER + 1
+    );
+}
 
 #[tokio::test]
 async fn session_registry_adds_looks_up_and_removes() {

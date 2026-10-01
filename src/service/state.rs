@@ -27,6 +27,10 @@ use crate::store::{CollectionMeta, ItemMeta, Store};
 /// Exhausting this with random 128-bit IDs requires 128 consecutive collisions.
 pub(super) const SESSION_ALLOCATION_ATTEMPTS: usize = 128;
 
+/// Bound retained transport ciphers and session objects, independently of temporary items.
+pub(super) const MAX_TRANSPORT_SESSIONS: usize = 1024;
+pub(super) const MAX_TRANSPORT_SESSIONS_PER_OWNER: usize = 64;
+
 /// Share a fixed worker budget across encryption, storage, and agent decryption.
 pub(super) const MAX_BLOCKING_WORKERS: usize = 4;
 
@@ -741,6 +745,17 @@ impl ServiceState {
         F: FnMut() -> u128,
     {
         let mut sessions = self.sessions.lock().expect("session lock poisoned");
+        if sessions.len() >= MAX_TRANSPORT_SESSIONS
+            || sessions
+                .values()
+                .filter(|entry| entry.owner == owner)
+                .count()
+                >= MAX_TRANSPORT_SESSIONS_PER_OWNER
+        {
+            return Err(fdo::Error::LimitsExceeded(
+                "transport session limit reached; close unused sessions".into(),
+            ));
+        }
         for _ in 0..SESSION_ALLOCATION_ATTEMPTS {
             let path = session_path(next_id());
             if let Entry::Vacant(entry) = sessions.entry(path.clone()) {
