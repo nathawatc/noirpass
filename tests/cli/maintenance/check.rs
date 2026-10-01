@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use noirpass::store::{ItemMeta, Store};
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
 #[test]
 fn cli_lists_deletes_and_repairs_stale_items() {
@@ -255,4 +255,107 @@ fn cli_check_recovers_quarantined_ciphertext_before_repair() {
     );
     assert!(!quarantine.exists());
     assert!(store.check_integrity().unwrap().is_healthy());
+}
+
+#[test]
+fn cli_delete_removes_rows_files_and_preserves_other_items() {
+    const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
+    for missing_ciphertext in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let collection = store.ensure_default().unwrap();
+        let target = store
+            .create_or_replace_item(
+                &collection.id,
+                "deleted item",
+                HashMap::from([("service".into(), "deleted".into())]),
+                "text/plain",
+                b"fixture target ciphertext",
+                false,
+            )
+            .unwrap()
+            .0;
+        let survivor = store
+            .create_or_replace_item(
+                &collection.id,
+                "survivor",
+                HashMap::new(),
+                "text/plain",
+                b"fixture survivor ciphertext",
+                false,
+            )
+            .unwrap()
+            .0;
+        let target_file = dir
+            .path()
+            .join("secrets")
+            .join(format!("{}.gpg", target.id));
+        if missing_ciphertext {
+            std::fs::remove_file(&target_file).unwrap();
+        }
+        drop(store);
+        let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+            .env_remove("NOIRPASS_STORE")
+            .arg("--store-dir")
+            .arg(dir.path())
+            .args(["delete", &target.id, "--yes"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let store = Store::open_existing(dir.path()).unwrap();
+        assert!(matches!(
+            store.get_item(&target.id),
+            Err(noirpass::Error::NotFound(_))
+        ));
+        assert_eq!(
+            store.read_item_secret(&survivor.id).unwrap().1,
+            b"fixture survivor ciphertext"
+        );
+        assert_eq!(
+            store.search_items(&HashMap::new()).unwrap(),
+            vec![survivor.clone()]
+        );
+        assert_eq!(
+            store.get_collection(&collection.id).unwrap().id,
+            collection.id
+        );
+        assert_eq!(
+            store.read_alias("default").unwrap(),
+            Some(collection.id.clone())
+        );
+        assert!(store.check_integrity().unwrap().is_healthy());
+        assert!(!target_file.exists());
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("secrets"))
+                .unwrap()
+                .count(),
+            1
+        );
+        drop(store);
+        let db = Database::open(dir.path().join("index.redb")).unwrap();
+        {
+            let txn = db.begin_read().unwrap();
+            let table = txn.open_table(ITEMS).unwrap();
+            assert!(table.get(target.id.as_str()).unwrap().is_none());
+            assert_eq!(table.len().unwrap(), 1);
+        }
+        drop(db);
+        let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+            .env_remove("NOIRPASS_STORE")
+            .arg("--store-dir")
+            .arg(dir.path())
+            .args(["delete", &survivor.id, "--yes"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let db = Database::open(dir.path().join("index.redb")).unwrap();
+        let txn = db.begin_read().unwrap();
+        assert_eq!(txn.open_table(ITEMS).unwrap().len().unwrap(), 0);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("secrets"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
 }
