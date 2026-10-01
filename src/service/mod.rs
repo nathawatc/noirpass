@@ -34,7 +34,7 @@ use state::MAX_BLOCKING_WORKERS;
 pub use state::ServiceState;
 
 pub(crate) use objects::object_removed_or_absent;
-use objects::{register_session_object_with, root_path};
+use objects::{register_session_object_with, root_path, validate_session_owner};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -134,9 +134,10 @@ impl Service {
         algorithm: &str,
         input: Value<'_>,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
-        let _activity = self.state.activity()?;
+        let activity = self.state.activity()?;
         let (output, cipher) = match algorithm {
             ALGORITHM_PLAIN => {
                 let input = String::try_from(input).map_err(|_| {
@@ -181,9 +182,27 @@ impl Service {
             .sender()
             .map(ToString::to_string)
             .ok_or_else(|| fdo::Error::AccessDenied("missing D-Bus sender identity".into()))?;
-        let path =
-            register_session_object_with(server, &self.state, cipher, owner, rand::random).await?;
-        Ok((output, path))
+        let state = self.state.clone();
+        let server = server.clone();
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            let _activity = activity;
+            let path =
+                register_session_object_with(&server, &state, cipher, owner.clone(), rand::random)
+                    .await?;
+            if connection.is_bus() {
+                let presence = async {
+                    let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
+                    let name = zbus::names::BusName::try_from(owner.as_str())
+                        .map_err(|err| fdo::Error::InvalidArgs(err.to_string()))?;
+                    proxy.name_has_owner(name).await
+                };
+                validate_session_owner(&server, &state, &path, &owner, presence).await?;
+            }
+            Ok((output, path))
+        })
+        .await
+        .map_err(|_| fdo::Error::Failed("session registration failed".into()))?
     }
 
     /// Create a collection.

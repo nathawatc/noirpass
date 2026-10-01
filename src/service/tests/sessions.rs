@@ -1,5 +1,6 @@
 use zbus::zvariant::{OwnedObjectPath, Value};
 
+use super::super::objects::validate_session_owner;
 use super::super::session::Session;
 use super::super::{
     ALGORITHM_DH, DhHandshake, SERVICE_PATH, SessionCipher, register_session_object_with,
@@ -7,6 +8,40 @@ use super::super::{
 };
 use super::{p2p_pair, test_state};
 use crate::gpg::test_support::TestGnupg;
+
+#[tokio::test]
+async fn vanished_owner_before_registration_and_presence_failure_leave_no_session() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
+    let server = server_conn.object_server();
+    let owner = ":1.7";
+    assert!(state.remove_sessions_owned_by(owner).is_empty());
+    for presence in [
+        Ok(false),
+        Err(zbus::fdo::Error::Failed("presence query failed".into())),
+    ] {
+        let path =
+            register_session_object_with(server, &state, SessionCipher::Plain, owner.into(), || 63)
+                .await
+                .unwrap();
+        assert_eq!(state.session_count(), 1);
+        let err =
+            validate_session_owner(server, &state, &path, owner, std::future::ready(presence))
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            zbus::fdo::Error::AccessDenied(_) | zbus::fdo::Error::Failed(_)
+        ));
+        assert_eq!(state.session_count(), 0);
+        assert!(matches!(
+            server.interface::<_, Session>(&path).await,
+            Err(zbus::Error::InterfaceNotFound)
+        ));
+    }
+}
 
 #[tokio::test]
 async fn failed_object_registration_rolls_back_session_state() {

@@ -1,5 +1,6 @@
 //! D-Bus object paths and object-server registration.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use zbus::fdo;
@@ -125,6 +126,30 @@ where
             let _ = server.remove::<Session, _>(&path).await;
             Err(err.into())
         }
+    }
+}
+
+/// Reject a session if its unique owner vanished before or during registration.
+pub(super) async fn validate_session_owner(
+    server: &ObjectServer,
+    state: &Arc<ServiceState>,
+    path: &OwnedObjectPath,
+    owner: &str,
+    owner_present: impl Future<Output = fdo::Result<bool>>,
+) -> fdo::Result<()> {
+    let result = owner_present.await;
+    if matches!(result, Ok(true)) {
+        return Ok(());
+    }
+    // A vanished-owner notification may have been processed before map insertion.
+    // Fail closed and remove both registries even if the presence query itself fails.
+    state.remove_session(path, owner);
+    object_removed_or_absent(server.remove::<Session, _>(path).await)?;
+    match result {
+        Ok(_) => Err(fdo::Error::AccessDenied(
+            "session owner disconnected during registration".into(),
+        )),
+        Err(err) => Err(err),
     }
 }
 
