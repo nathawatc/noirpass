@@ -24,8 +24,6 @@ pub const ALGORITHM_PLAIN: &str = "plain";
 pub const SESSION_COLLECTION_ID: &str = "session";
 pub const SESSION_COLLECTION_ALIAS: &str = "session";
 
-// --- path helpers ---------------------------------------------------------
-
 /// The "no object" path used for prompt-less returns and unset aliases.
 pub(super) fn root_path() -> OwnedObjectPath {
     OwnedObjectPath::try_from("/").expect("/ is a valid object path")
@@ -85,8 +83,6 @@ pub fn parse_item_path(path: &str) -> Option<(String, String)> {
     }
     Some((collection.to_string(), item.to_string()))
 }
-
-// --- object registration -----------------------------------------------------
 
 pub(super) async fn register_session_object_with<F>(
     server: &ObjectServer,
