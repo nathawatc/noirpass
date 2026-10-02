@@ -5,7 +5,10 @@
 //! Non-default homes use the first 120 SHA-1 bits, encoded with z-base-32.
 //! SHA-1 here identifies a directory; it provides no security decision.
 
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::{CStr, CString, OsStr, OsString};
+use std::io;
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
@@ -14,6 +17,99 @@ use sequoia_openpgp::types::HashAlgorithm;
 use crate::error::{Error, Result};
 
 use super::cert::pgp_err;
+
+fn account_home(user: Option<&[u8]>) -> Result<Option<OsString>> {
+    let name = user
+        .map(CString::new)
+        .transpose()
+        .map_err(|err| Error::OpenPgp(format!("invalid account name: {err}")))?;
+    let mut buffer = vec![0_u8; 1024];
+    loop {
+        let mut account = MaybeUninit::<libc::passwd>::uninit();
+        let mut found = std::ptr::null_mut();
+        // SAFETY: both reentrant lookups write only into this account and buffer.
+        // The optional name is NUL-terminated and all pointers remain live.
+        let error = unsafe {
+            if let Some(name) = &name {
+                libc::getpwnam_r(
+                    name.as_ptr(),
+                    account.as_mut_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    &raw mut found,
+                )
+            } else {
+                libc::getpwuid_r(
+                    libc::getuid(),
+                    account.as_mut_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    &raw mut found,
+                )
+            }
+        };
+        if error == libc::ERANGE {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error).into());
+        }
+        if found.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: success with a non-null result initializes the passwd record.
+        let directory = unsafe { (*found).pw_dir };
+        if directory.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: pw_dir is NUL-terminated inside the still-live lookup buffer.
+        let directory = unsafe { CStr::from_ptr(directory) }.to_bytes().to_vec();
+        return Ok(Some(OsString::from_vec(directory)));
+    }
+}
+
+fn normalize_home(home: &Path, user_home: Option<&OsStr>) -> Result<PathBuf> {
+    // GnuPG strips trailing slashes, expands tildes and prefixes relative paths.
+    // Do not canonicalize: absolute dots, repeated slashes and symlinks affect its hash.
+    let mut home = home.as_os_str().as_bytes().to_vec();
+    while home.len() > 1 && home.last() == Some(&b'/') {
+        home.pop();
+    }
+    if home.starts_with(b"~") {
+        let end = home
+            .iter()
+            .position(|byte| *byte == b'/')
+            .unwrap_or(home.len());
+        let directory = if end == 1 {
+            match user_home {
+                Some(home) => Some(home.to_os_string()),
+                None => account_home(None)?,
+            }
+        } else {
+            account_home(Some(&home[1..end]))?
+        };
+        // GnuPG leaves an unknown user's tilde expression unchanged.
+        if let Some(directory) = directory {
+            let mut expanded = directory.into_vec();
+            expanded.extend_from_slice(&home[end..]);
+            home = expanded;
+        }
+    }
+    if !home.starts_with(b"/") {
+        let mut absolute = std::env::current_dir()?.into_os_string().into_vec();
+        if absolute != b"/" {
+            absolute.push(b'/');
+        }
+        absolute.extend_from_slice(&home);
+        // GnuPG removes a final /. only when making a relative path absolute.
+        if absolute.len() > 2 && absolute.ends_with(b"/.") {
+            absolute.truncate(absolute.len() - 2);
+        }
+        home = absolute;
+    }
+    Ok(PathBuf::from(OsString::from_vec(home)))
+}
 
 fn runtime_suffix(home: &Path) -> Result<String> {
     const ALPHABET: &[u8; 32] = b"ybndrfg8ejkmcpqxot1uwisza345h769";
@@ -34,7 +130,8 @@ fn runtime_suffix(home: &Path) -> Result<String> {
 }
 
 pub(super) fn agent_socket(homedir: Option<&Path>) -> Result<PathBuf> {
-    let default_home = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".gnupg"));
+    let user_home = std::env::var_os("HOME");
+    let default_home = normalize_home(Path::new("~/.gnupg"), user_home.as_deref())?;
     let home = homedir
         .map(Path::to_path_buf)
         .or_else(|| {
@@ -42,15 +139,9 @@ pub(super) fn agent_socket(homedir: Option<&Path>) -> Result<PathBuf> {
                 .filter(|home| !home.is_empty())
                 .map(PathBuf::from)
         })
-        .or_else(|| default_home.clone())
-        .ok_or_else(|| Error::OpenPgp("neither GNUPGHOME nor HOME is set".into()))?;
-    let home = std::path::absolute(home)?;
-    let non_default = default_home
-        .as_ref()
-        .map(std::path::absolute)
-        .transpose()?
-        .as_ref()
-        != Some(&home);
+        .unwrap_or_else(|| default_home.clone());
+    let home = normalize_home(&home, user_home.as_deref())?;
+    let non_default = default_home.as_os_str() != home.as_os_str();
     let suffix = if non_default {
         Some(runtime_suffix(&home)?)
     } else {
@@ -82,6 +173,91 @@ pub(super) fn agent_socket(homedir: Option<&Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_normalization_preserves_gnupg_hash_spelling() {
+        for (input, expected) in [
+            ("/tmp/gnupg///", "/tmp/gnupg"),
+            ("/tmp/gnupg/./", "/tmp/gnupg/."),
+            ("/tmp//gnupg", "/tmp//gnupg"),
+            ("/tmp/link/../gnupg", "/tmp/link/../gnupg"),
+            ("~/gnupg/", "/tmp/user/gnupg"),
+            ("~", "/tmp/user"),
+            ("///", "/"),
+        ] {
+            let actual = normalize_home(Path::new(input), Some(OsStr::new("/tmp/user"))).unwrap();
+            assert_eq!(actual.as_os_str().as_bytes(), expected.as_bytes());
+        }
+        let actual = normalize_home(Path::new("./gnupg/."), None).unwrap();
+        let expected = std::env::current_dir().unwrap().join("./gnupg");
+        assert_eq!(
+            actual.as_os_str().as_bytes(),
+            expected.as_os_str().as_bytes()
+        );
+        let actual = normalize_home(Path::new("."), None).unwrap();
+        assert_eq!(actual, std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn tilde_expansion_uses_accounts_for_named_users_and_missing_home() {
+        let mut buffer = vec![0_u8; 1024];
+        let mut account = MaybeUninit::<libc::passwd>::uninit();
+        let mut found = std::ptr::null_mut();
+        loop {
+            // SAFETY: the reentrant lookup owns its record and backing buffer.
+            let error = unsafe {
+                libc::getpwuid_r(
+                    libc::getuid(),
+                    account.as_mut_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    &raw mut found,
+                )
+            };
+            if error == libc::ERANGE {
+                buffer.resize(buffer.len() * 2, 0);
+                continue;
+            }
+            assert_eq!(error, 0);
+            assert!(!found.is_null());
+            break;
+        }
+        // SAFETY: the successful lookup supplies NUL-terminated fields backed
+        // by buffer, which remains live until both fields have been copied.
+        let (name, directory) = unsafe {
+            (
+                CStr::from_ptr((*found).pw_name).to_bytes().to_vec(),
+                CStr::from_ptr((*found).pw_dir).to_bytes().to_vec(),
+            )
+        };
+        let mut named = b"~".to_vec();
+        named.extend_from_slice(&name);
+        named.extend_from_slice(b"/gnupg/.");
+        let mut expected = directory.clone();
+        expected.extend_from_slice(b"/gnupg/.");
+        for (input, home) in [
+            (
+                Path::new(OsStr::from_bytes(&named)),
+                Some(OsStr::new("/ignored")),
+            ),
+            (Path::new("~/gnupg/."), None),
+        ] {
+            let actual = normalize_home(input, home).unwrap();
+            assert_eq!(actual.as_os_str().as_bytes(), expected);
+        }
+        let actual = normalize_home(Path::new("~"), None).unwrap();
+        assert_eq!(actual.as_os_str().as_bytes(), directory);
+        assert!(account_home(Some(b"invalid\0account")).is_err());
+
+        // A name longer than any login name cannot resolve to an ambient account.
+        let missing = format!("~{}/gnupg", "noirpass-fixture-".repeat(32));
+        let actual = normalize_home(Path::new(&missing), None).unwrap();
+        let expected = std::env::current_dir().unwrap().join(&missing);
+        assert_eq!(
+            actual.as_os_str().as_bytes(),
+            expected.as_os_str().as_bytes()
+        );
+    }
 
     #[test]
     fn runtime_suffix_matches_gnupg_120_bit_zbase32_layout() {

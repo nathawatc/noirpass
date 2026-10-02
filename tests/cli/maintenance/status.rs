@@ -1,10 +1,63 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 use noirpass::store::Store;
 
-use crate::common::{export_public_cert, init_noirpass_store, setup_gnupg};
+use crate::common::{export_public_cert, init_noirpass_store, noirpass_command, setup_gnupg};
+
+#[test]
+fn cli_status_finds_agent_for_gnupg_home_spellings() {
+    struct AgentHome(PathBuf);
+    impl Drop for AgentHome {
+        fn drop(&mut self) {
+            let _ = Command::new("gpgconf")
+                .arg("--homedir")
+                .arg(&self.0)
+                .args(["--kill", "gpg-agent"])
+                .status();
+        }
+    }
+
+    for spelling in ["plain", "slash", "dot", "tilde"] {
+        // Each spelling starts its own agent; an agent for the plain spelling
+        // must not hide a wrong hash for the absolute /. spelling.
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("gnupg");
+        fs::create_dir(&home).unwrap();
+        let mut agent_home = home.into_os_string();
+        match spelling {
+            "slash" => agent_home.push("/"),
+            "dot" => agent_home.push("/."),
+            _ => {}
+        }
+        let agent = AgentHome(PathBuf::from(agent_home));
+        setup_gnupg(&agent.0);
+        let cert = export_public_cert(&agent.0);
+        let store = fixture.path().join("store");
+        fs::create_dir(&store).unwrap();
+        init_noirpass_store(&store, &cert);
+        let selected = if spelling == "tilde" {
+            PathBuf::from("~/gnupg")
+        } else {
+            agent.0.clone()
+        };
+        let output = noirpass_command()
+            .arg("--store-dir")
+            .arg(&store)
+            .arg("status")
+            .env("HOME", fixture.path())
+            .env("GNUPGHOME", selected)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{spelling}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
 
 #[test]
 fn cli_status_rejects_missing_ciphertext_without_repairing() {

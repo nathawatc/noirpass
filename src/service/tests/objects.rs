@@ -314,6 +314,8 @@ async fn registration_errors_can_leave_persisted_interfaces_served() {
         .store()
         .set_alias(alias, Some(&collection.id))
         .unwrap();
+    // Item creation updates the parent timestamp before registration begins.
+    let collection = state.store().get_collection(&collection.id).unwrap();
 
     let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
     let server = server_conn.object_server().clone();
