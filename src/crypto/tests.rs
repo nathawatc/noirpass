@@ -111,7 +111,7 @@ fn malformed_ciphertext_fails() {
 fn plain_passthrough() {
     let cipher = SessionCipher::Plain;
     let (iv, ct) = cipher.encrypt(b"hello");
-    assert!(iv.is_empty());
+    assert_eq!(iv.len(), 0);
     assert_eq!(ct.as_slice(), b"hello");
     let pt = cipher.decrypt(&iv, &ct).unwrap();
     assert_eq!(&pt[..], b"hello");

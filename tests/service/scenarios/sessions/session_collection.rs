@@ -120,7 +120,7 @@ async fn exercise_temporary_item(
     let (found, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) =
         service.call("SearchItems", &(attributes,)).await.unwrap();
     assert_eq!(found, std::slice::from_ref(&path));
-    assert!(locked.is_empty());
+    assert_eq!(locked.len(), 0);
     let bulk: HashMap<OwnedObjectPath, WireSecret> = service
         .call("GetSecrets", &(&found, session))
         .await

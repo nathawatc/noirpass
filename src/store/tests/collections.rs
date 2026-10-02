@@ -89,7 +89,7 @@ fn alias_set_read_remove() {
 
     store.set_alias("session", None).unwrap();
     assert_eq!(store.read_alias("session").unwrap(), None);
-    assert!(store.list_aliases().unwrap().is_empty());
+    assert_eq!(store.list_aliases().unwrap().len(), 0);
 }
 
 #[test]

@@ -134,7 +134,7 @@ fn sessions_of_vanished_owner_are_reaped() {
     assert!(state.session_cipher(&p1, ":1.7").is_none());
 
     // Unknown owners and other owners' sessions are untouched.
-    assert!(state.remove_sessions_owned_by(":9.9").is_empty());
+    assert_eq!(state.remove_sessions_owned_by(":9.9").len(), 0);
     assert_eq!(state.session_count(), 2);
 }
 
@@ -163,7 +163,7 @@ fn session_registration_retries_path_collision_without_overwrite() {
     assert_eq!(state.session_count(), 2);
     let occupied_cipher = state.session_cipher(&occupied, ":1.7").unwrap();
     let (parameters, value) = occupied_cipher.encrypt(b"collision probe");
-    assert!(parameters.is_empty());
+    assert_eq!(parameters.len(), 0);
     assert_eq!(value.as_slice(), b"collision probe");
     assert!(state.session_cipher(&occupied, ":1.8").is_none());
     let replacement_cipher = state.session_cipher(&replacement, ":1.8").unwrap();

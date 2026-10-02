@@ -618,7 +618,7 @@ async fn startup_registers_items_from_every_persisted_collection() {
     .await
     .try_into()
     .unwrap();
-    assert!(items.is_empty());
+    assert_eq!(items.len(), 0);
     let items: Vec<OwnedObjectPath> = get_property(
         &client,
         &alias_path("second_alias").unwrap(),
@@ -673,10 +673,9 @@ async fn items_reads_wait_for_workers_while_temporary_reads_remain_available() {
     )
     .await
     .unwrap();
-    assert!(
-        Vec::<OwnedObjectPath>::try_from(temporary)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        Vec::<OwnedObjectPath>::try_from(temporary).unwrap().len(),
+        0
     );
     let persistent_path = collection_path("default");
     let property = get_property(
@@ -769,7 +768,7 @@ async fn items_signals_reuse_reserved_workers_and_match_canonical_and_alias_valu
             Vec<String>,
         ) = signal.body().deserialize().unwrap();
         assert_eq!(interface, "org.freedesktop.Secret.Collection");
-        assert!(invalidated.is_empty());
+        assert_eq!(invalidated.len(), 0);
         assert_eq!(changed.len(), 1);
         assert_eq!(
             Vec::<OwnedObjectPath>::try_from(changed.remove("Items").unwrap()).unwrap(),

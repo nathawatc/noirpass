@@ -303,7 +303,7 @@ pub(in super::super) async fn s13_existing_alias_collection() {
         .deserialize()
         .unwrap();
     assert_eq!(interface, SERVICE_IFACE);
-    assert!(invalidated.is_empty());
+    assert_eq!(invalidated.len(), 0);
     assert_eq!(changed.len(), 1);
     assert!(changed.contains_key("Collections"));
     let after_new_count: Vec<OwnedObjectPath> = service.get_property("Collections").await.unwrap();

@@ -110,7 +110,7 @@ async fn assert_item_notifications(service: &zbus::Proxy<'_>, alias: &zbus::Prox
         .unwrap();
     let (name, value) = next_property_change(changed.as_mut(), COLLECTION_IFACE).await;
     assert_eq!(name, "Items");
-    assert!(Vec::<OwnedObjectPath>::try_from(value).unwrap().is_empty());
+    assert_eq!(Vec::<OwnedObjectPath>::try_from(value).unwrap().len(), 0);
     assert_eq!(
         next_property_change(changed.as_mut(), COLLECTION_IFACE)
             .await

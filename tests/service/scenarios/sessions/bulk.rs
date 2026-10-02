@@ -54,7 +54,7 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
         .unwrap();
     assert_eq!(secrets.len(), expected.len());
     for (path, secret) in &secrets {
-        assert!(secret.parameters.is_empty());
+        assert_eq!(secret.parameters.len(), 0);
         assert_eq!(secret.value.as_slice(), expected[path].as_slice());
         assert_eq!(secret.content_type, "text/plain");
     }
@@ -70,7 +70,7 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
         .call("GetSecrets", &(&mismatched_paths, &plain_session))
         .await
         .unwrap();
-    assert!(mismatched.is_empty());
+    assert_eq!(mismatched.len(), 0);
 
     // DH session: drive the client side with the library's own handshake.
     let client = DhHandshake::generate();

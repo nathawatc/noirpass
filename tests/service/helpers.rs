@@ -41,7 +41,7 @@ where
     let (interface, changed, invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
         message.body().deserialize().unwrap();
     assert_eq!(interface, expected_interface);
-    assert!(invalidated.is_empty());
+    assert_eq!(invalidated.len(), 0);
     assert_eq!(changed.len(), 1);
     changed.into_iter().next().unwrap()
 }
@@ -60,7 +60,7 @@ where
     let (interface, changed, invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
         message.body().deserialize().unwrap();
     assert_eq!(interface, expected_interface);
-    assert!(changed.is_empty());
+    assert_eq!(changed.len(), 0);
     invalidated
 }
 

@@ -95,7 +95,7 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     assert!(String::from_utf8_lossy(&deleted.stdout).contains(&present.id));
 
     let store = Store::open_existing(dir.path()).unwrap();
-    assert!(store.search_items(&HashMap::new()).unwrap().is_empty());
+    assert_eq!(store.search_items(&HashMap::new()).unwrap().len(), 0);
     assert!(store.check_integrity().unwrap().is_healthy());
 }
 

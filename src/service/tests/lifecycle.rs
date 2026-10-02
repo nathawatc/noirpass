@@ -112,7 +112,7 @@ async fn temporary_mutations_remain_available_while_persistent_workers_are_busy(
         .await
         .unwrap();
     let _: zbus::zvariant::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
-    assert!(state.list_session_items().is_empty());
+    assert_eq!(state.list_session_items().len(), 0);
 }
 
 #[tokio::test]

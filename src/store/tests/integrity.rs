@@ -118,7 +118,7 @@ fn integrity_reports_missing_item_owner_and_dangling_alias() {
     txn.commit().unwrap();
 
     let report = store.check_integrity().unwrap();
-    assert!(report.corrupt_items.is_empty());
+    assert_eq!(report.corrupt_items.len(), 0);
     assert_eq!(report.items_with_invalid_collection.len(), 1);
     assert!(
         report.items_with_invalid_collection[0]

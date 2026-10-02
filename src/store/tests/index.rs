@@ -61,7 +61,7 @@ fn indexed_queries_preserve_order_superset_matching_and_attribute_boundaries() {
         )
         .unwrap();
     // A missing collection must still build and validate the complete index.
-    assert!(store.list_items("missing").unwrap().is_empty());
+    assert_eq!(store.list_items("missing").unwrap().len(), 0);
     assert_eq!(
         store.list_items(&first.id).unwrap(),
         sorted(vec![a.clone(), c.clone()])
@@ -94,11 +94,12 @@ fn indexed_queries_preserve_order_superset_matching_and_attribute_boundaries() {
             .unwrap(),
         vec![a]
     );
-    assert!(
+    assert_eq!(
         store
             .search_collection_items(&second.id, &attrs(&[("account", "a")]))
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
 }
 
@@ -109,7 +110,7 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
     let collection = store.ensure_default().unwrap();
     let old = attrs(&[("service", "old")]);
     let new = attrs(&[("service", "new")]);
-    assert!(store.search_items(&old).unwrap().is_empty());
+    assert_eq!(store.search_items(&old).unwrap().len(), 0);
     let a = store
         .create_item(&collection.id, "a", old.clone(), "text/plain", b"a")
         .unwrap();
@@ -120,7 +121,7 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
         .update_item(&a.id, None, Some(new.clone()), None, None)
         .unwrap();
     assert_warm_index(&store);
-    assert!(store.search_items(&old).unwrap().is_empty());
+    assert_eq!(store.search_items(&old).unwrap().len(), 0);
     assert_eq!(store.search_items(&new).unwrap(), vec![a]);
     let (a, replaced) = store
         .create_or_replace_item(
@@ -145,11 +146,11 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
     );
     store.delete_item(&a.id).unwrap();
     assert_warm_index(&store);
-    assert!(store.search_items(&new).unwrap().is_empty());
+    assert_eq!(store.search_items(&new).unwrap().len(), 0);
     assert_eq!(store.list_items(&collection.id).unwrap(), vec![b.clone()]);
     store.delete_item_metadata(&b.id).unwrap();
     assert!(store.item_index.read().unwrap().is_none());
-    assert!(store.search_items(&old).unwrap().is_empty());
+    assert_eq!(store.search_items(&old).unwrap().len(), 0);
     // Metadata-only deletion deliberately leaves ciphertext for integrity tools.
     fs::remove_file(store.secret_path(&b.id).unwrap()).unwrap();
     let survivor = store
@@ -167,9 +168,9 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
     assert_eq!(store.search_items(&old).unwrap(), vec![survivor]);
     store.delete_collection(&collection.id).unwrap();
     assert_warm_index(&store);
-    assert!(store.list_items(&collection.id).unwrap().is_empty());
+    assert_eq!(store.list_items(&collection.id).unwrap().len(), 0);
     assert_warm_index(&store);
-    assert!(store.search_items(&old).unwrap().is_empty());
+    assert_eq!(store.search_items(&old).unwrap().len(), 0);
     assert!(store.check_integrity().unwrap().is_healthy());
 }
 
@@ -209,11 +210,12 @@ fn invalid_metadata_blocks_even_empty_candidates_and_repair_discards_partial_ind
     }
     store.delete_item_metadata("bad-key").unwrap();
     assert_eq!(store.list_items(&collection.id).unwrap(), vec![item]);
-    assert!(
+    assert_eq!(
         store
             .search_items(&attrs(&[("unknown", "unknown")]))
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     store.poison();
     assert!(store.list_items(&collection.id).is_err());

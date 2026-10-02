@@ -117,8 +117,8 @@ fn deleting_item_with_corrupt_parent_preserves_parent_for_integrity_repair() {
     store.delete_item(&item.id).unwrap();
     let report = store.check_integrity().unwrap();
     assert_eq!(report.corrupt_collections.len(), 1);
-    assert!(report.items_with_invalid_collection.is_empty());
-    assert!(report.orphan_secret_files.is_empty());
+    assert_eq!(report.items_with_invalid_collection.len(), 0);
+    assert_eq!(report.orphan_secret_files.len(), 0);
 }
 
 #[test]
@@ -373,11 +373,12 @@ fn collection_search_filters_before_attribute_matching() {
             .unwrap(),
         vec![item]
     );
-    assert!(
+    assert_eq!(
         store
             .search_collection_items(&first.id, &attrs(&[("service", "chat")]))
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     assert_eq!(store.search_items(&query).unwrap().len(), 2);
 }

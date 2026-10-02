@@ -44,7 +44,7 @@ async fn saturated_request_admission_preserves_method_errors_and_property_reads(
             if name.as_str() == "org.freedesktop.DBus.Error.LimitsExceeded"));
     }
     let collections: Vec<OwnedObjectPath> = proxy.get_property("Collections").await.unwrap();
-    assert!(!collections.is_empty());
+    assert_ne!(collections.len(), 0);
     drop(requests);
     let error = proxy
         .call_method("OpenSession", &("plain", Value::from("")))
@@ -62,7 +62,7 @@ async fn vanished_owner_before_registration_and_presence_failure_leave_no_sessio
     let (server_conn, _client_conn) = p2p_pair(state.clone()).await;
     let server = server_conn.object_server();
     let owner = ":1.7";
-    assert!(state.remove_sessions_owned_by(owner).is_empty());
+    assert_eq!(state.remove_sessions_owned_by(owner).len(), 0);
     for presence in [
         Ok(false),
         Err(zbus::fdo::Error::Failed("presence query failed".into())),
@@ -135,7 +135,7 @@ async fn object_registration_error_rolls_back_both_registries() {
             .await
             .unwrap_err();
 
-    assert!(!err.to_string().is_empty());
+    assert_ne!(err.to_string().len(), 0);
     assert_eq!(state.session_count(), 0);
     assert!(matches!(
         server.interface::<_, Session>(&path).await,

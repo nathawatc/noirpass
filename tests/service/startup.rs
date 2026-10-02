@@ -317,9 +317,9 @@ fn daemon_rejects_missing_default_collection_with_item_owner() {
     let report = persisted.check_integrity().unwrap();
     assert_eq!(report.items_with_invalid_collection.len(), 1);
     assert_eq!(report.items_with_invalid_collection[0].table_key, item.id);
-    assert!(report.corrupt_items.is_empty());
-    assert!(report.missing_secret_items.is_empty());
-    assert!(report.ciphertext_mismatches.is_empty());
+    assert_eq!(report.corrupt_items.len(), 0);
+    assert_eq!(report.missing_secret_items.len(), 0);
+    assert_eq!(report.ciphertext_mismatches.len(), 0);
 }
 
 #[test]

@@ -77,12 +77,9 @@ fn deletion_restores_ciphertext_when_commit_fails() {
 
     assert!(err.to_string().contains("injected commit failure"));
     assert_eq!(fs::read(path).unwrap(), b"ciphertext");
-    assert!(
-        store
-            .check_integrity()
-            .unwrap()
-            .recovery_secret_files
-            .is_empty()
+    assert_eq!(
+        store.check_integrity().unwrap().recovery_secret_files.len(),
+        0
     );
 }
 
@@ -116,12 +113,9 @@ fn collection_ciphertexts_restore_when_commit_fails() {
     );
     assert_eq!(fs::read(first).unwrap(), b"first");
     assert_eq!(fs::read(second).unwrap(), b"second");
-    assert!(
-        store
-            .check_integrity()
-            .unwrap()
-            .recovery_secret_files
-            .is_empty()
+    assert_eq!(
+        store.check_integrity().unwrap().recovery_secret_files.len(),
+        0
     );
 }
 

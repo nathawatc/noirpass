@@ -97,7 +97,7 @@ pub(in super::super) async fn s11_lock_semantics() {
         .call("Lock", &(vec![item_path.clone()],))
         .await
         .unwrap();
-    assert!(locked.is_empty());
+    assert_eq!(locked.len(), 0);
     assert_eq!(prompt.as_str(), "/");
     assert!(!locked_property(&item_properties, ITEM_IFACE).await);
 
@@ -106,7 +106,7 @@ pub(in super::super) async fn s11_lock_semantics() {
         .call("Lock", &(vec![collection_path.clone()],))
         .await
         .unwrap();
-    assert!(locked.is_empty());
+    assert_eq!(locked.len(), 0);
     assert_eq!(prompt.as_str(), "/");
     assert!(!locked_property(&collection_properties, COLLECTION_IFACE).await);
 
@@ -114,7 +114,7 @@ pub(in super::super) async fn s11_lock_semantics() {
         .call("Lock", &(vec![collection_path.clone(), item_path.clone()],))
         .await
         .unwrap();
-    assert!(locked.is_empty());
+    assert_eq!(locked.len(), 0);
     assert_eq!(prompt.as_str(), "/");
 
     let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = service_proxy

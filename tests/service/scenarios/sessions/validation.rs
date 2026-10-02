@@ -79,7 +79,7 @@ pub(in super::super) async fn s3_plain_protocol_validation() {
     .await
     .unwrap();
     let (before,): (WireSecret,) = item.call("GetSecret", &(&session,)).await.unwrap();
-    assert!(before.parameters.is_empty());
+    assert_eq!(before.parameters.len(), 0);
     assert_eq!(before.value.as_slice(), b"initial secret");
 
     let rejected_update = WireSecret {

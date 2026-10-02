@@ -227,9 +227,9 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
         .await
         .unwrap();
     let mut initial_items: Vec<OwnedObjectPath> = canonical.get_property("Items").await.unwrap();
-    assert!(initial_items.is_empty());
+    assert_eq!(initial_items.len(), 0);
     initial_items = alias.get_property("Items").await.unwrap();
-    assert!(initial_items.is_empty());
+    assert_eq!(initial_items.len(), 0);
 
     let first_properties = item_properties("s14-first", "s14-first");
     let first_secret = noirpass::service::session::Secret {
@@ -410,7 +410,7 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
     let _: u64 = alias.get_property("Created").await.unwrap();
     let _: u64 = alias.get_property("Modified").await.unwrap();
     let other_items: Vec<OwnedObjectPath> = other.get_property("Items").await.unwrap();
-    assert!(other_items.is_empty());
+    assert_eq!(other_items.len(), 0);
     {
         let mut alias_changes = std::pin::pin!(
             alias_properties
