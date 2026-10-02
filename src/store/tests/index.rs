@@ -3,7 +3,7 @@
 use super::*;
 use redb::ReadableTable;
 
-fn assert_warm_index(store: &Store) {
+pub(super) fn assert_warm_index(store: &Store) {
     let cache = store.item_index.read().unwrap();
     let index = cache
         .as_ref()
@@ -223,7 +223,7 @@ fn invalid_metadata_blocks_even_empty_candidates_and_repair_discards_partial_ind
 }
 
 #[test]
-fn collection_and_alias_writes_preserve_index_but_failed_writes_discard_it() {
+fn collection_and_alias_writes_preserve_index_after_rejected_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let collection = store.ensure_default().unwrap();
@@ -259,7 +259,7 @@ fn collection_and_alias_writes_preserve_index_but_failed_writes_discard_it() {
     assert_warm_index(&store);
     assert_eq!(store.search_items(&item.attributes).unwrap(), vec![updated]);
     assert!(store.set_alias("bad", Some("missing")).is_err());
-    assert!(store.item_index.read().unwrap().is_none());
+    assert_warm_index(&store);
     store.list_items(&collection.id).unwrap();
     assert_warm_index(&store);
     store.recover_interrupted_operations().unwrap();
@@ -324,4 +324,41 @@ fn warm_mutations_use_exact_attributes_and_preserve_other_collections() {
     assert_eq!(store.read_item_secret(&survivor.id).unwrap().1, b"survivor");
     assert_eq!(store.read_alias("other").unwrap(), Some(other.id));
     assert!(store.check_integrity().unwrap().is_healthy());
+}
+
+#[test]
+fn explicit_abort_preserves_index_but_raw_commit_discards_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let item = store
+        .create_item(
+            &collection.id,
+            "item",
+            HashMap::new(),
+            "text/plain",
+            b"item",
+        )
+        .unwrap();
+    store.list_items(&collection.id).unwrap();
+    {
+        let (_guard, txn) = store.begin_write_checked().unwrap();
+        txn.open_table(ITEMS)
+            .unwrap()
+            .remove(item.id.as_str())
+            .unwrap();
+        // Dropping an uncommitted transaction explicitly aborts it before the
+        // checked write guard can preserve the original index.
+    }
+    assert_warm_index(&store);
+    assert_eq!(store.get_item(&item.id).unwrap(), item);
+    let (guard, txn) = store.begin_write_checked().unwrap();
+    txn.open_table(ITEMS)
+        .unwrap()
+        .remove(item.id.as_str())
+        .unwrap();
+    txn.commit().unwrap();
+    drop(guard);
+    assert!(store.item_index.read().unwrap().is_none());
+    assert_eq!(store.list_items(&collection.id).unwrap().len(), 0);
 }

@@ -12,8 +12,9 @@ use redb::ReadableTable;
 use crate::error::{Error, Result};
 
 use super::{
-    COLLECTIONS, CollectionMeta, ITEMS, ItemMeta, PersistError, Store, StoreWriteGuard,
-    ciphertext_sha256, decode_item, definite, is_valid_collection_id, now_secs, random_id,
+    COLLECTIONS, CollectionMeta, ITEMS, ItemMeta, PersistError, Store, StoreTransaction,
+    StoreWriteGuard, ciphertext_sha256, decode_item, definite, is_valid_collection_id, now_secs,
+    random_id,
 };
 
 impl Store {
@@ -217,7 +218,7 @@ impl Store {
 
     fn create_item_locked(
         &self,
-        txn: redb::WriteTransaction,
+        txn: StoreTransaction<'_>,
         collection: &str,
         label: &str,
         attributes: HashMap<String, String>,
@@ -335,7 +336,7 @@ impl Store {
     fn update_item_locked(
         &self,
         mutation_guard: &mut StoreWriteGuard<'_>,
-        txn: redb::WriteTransaction,
+        txn: StoreTransaction<'_>,
         id: &str,
         label: Option<&str>,
         attributes: Option<HashMap<String, String>>,

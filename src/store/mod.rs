@@ -56,6 +56,7 @@ pub struct Store {
     secrets_dir: PathBuf,
     secrets_directory: Directory,
     poisoned: AtomicBool,
+    write_aborted: AtomicBool,
     poison_changed: tokio::sync::Notify,
     transaction_gate: RwLock<()>,
     item_index: RwLock<Option<items::ItemIndex>>,
@@ -64,11 +65,13 @@ pub struct Store {
 }
 
 /// Keep derived lookup state only when the caller has accounted for a successful
-/// mutation. Unhandled failures, repair, recovery and raw writes discard it.
+/// mutation or the transaction has explicitly aborted. Uncertain outcomes,
+/// repair, recovery and raw committed writes discard it.
 struct StoreWriteGuard<'a> {
     index: RwLockWriteGuard<'a, Option<items::ItemIndex>>,
     _gate: RwLockWriteGuard<'a, ()>,
     keep_index: bool,
+    store: &'a Store,
 }
 
 impl StoreWriteGuard<'_> {
@@ -79,8 +82,54 @@ impl StoreWriteGuard<'_> {
 
 impl Drop for StoreWriteGuard<'_> {
     fn drop(&mut self) {
-        if !self.keep_index {
+        if self.store.is_poisoned()
+            || (!self.keep_index && !self.store.write_aborted.load(Ordering::Relaxed))
+        {
             *self.index = None;
+        }
+    }
+}
+
+/// Explicitly verify rollback before the write guard retains a validated index.
+/// A failed abort poisons the Store; no reader may use uncertain metadata.
+struct StoreTransaction<'a> {
+    transaction: Option<redb::WriteTransaction>,
+    store: &'a Store,
+}
+
+impl StoreTransaction<'_> {
+    fn commit(mut self) -> std::result::Result<(), redb::CommitError> {
+        let result = self
+            .transaction
+            .take()
+            .expect("transaction is open")
+            .commit();
+        if result.is_err() {
+            self.store.poison();
+        }
+        result
+    }
+}
+
+impl std::ops::Deref for StoreTransaction<'_> {
+    type Target = redb::WriteTransaction;
+
+    fn deref(&self) -> &Self::Target {
+        self.transaction.as_ref().expect("transaction is open")
+    }
+}
+
+impl Drop for StoreTransaction<'_> {
+    fn drop(&mut self) {
+        if let Some(transaction) = self.transaction.take() {
+            if std::thread::panicking() {
+                self.store.poison();
+                return;
+            }
+            match transaction.abort() {
+                Ok(()) => self.store.write_aborted.store(true, Ordering::Relaxed),
+                Err(_) => self.store.poison(),
+            }
         }
     }
 }
@@ -207,18 +256,24 @@ impl Store {
         Ok(())
     }
 
-    fn begin_write_checked(&self) -> Result<(StoreWriteGuard<'_>, redb::WriteTransaction)> {
+    fn begin_write_checked(&self) -> Result<(StoreWriteGuard<'_>, StoreTransaction<'_>)> {
         self.begin_write_checked_after_initial_check(|| {})
     }
 
     fn begin_write_checked_after_initial_check(
         &self,
         after_initial_check: impl FnOnce(),
-    ) -> Result<(StoreWriteGuard<'_>, redb::WriteTransaction)> {
+    ) -> Result<(StoreWriteGuard<'_>, StoreTransaction<'_>)> {
         let guard = self.write_guard_checked_after_initial_check(after_initial_check)?;
         let txn = self.db.begin_write()?;
         self.ensure_not_poisoned()?;
-        Ok((guard, txn))
+        Ok((
+            guard,
+            StoreTransaction {
+                transaction: Some(txn),
+                store: self,
+            },
+        ))
     }
 
     fn write_guard_checked(&self) -> Result<StoreWriteGuard<'_>> {
@@ -240,7 +295,9 @@ impl Store {
             .item_index
             .write()
             .map_err(|_| Error::Config("item lookup index is poisoned".into()))?;
+        self.write_aborted.store(false, Ordering::Relaxed);
         Ok(StoreWriteGuard {
+            store: self,
             index,
             _gate: guard,
             keep_index: false,
@@ -347,6 +404,7 @@ impl Store {
             secrets_directory,
             secrets_dir,
             poisoned: AtomicBool::new(false),
+            write_aborted: AtomicBool::new(false),
             poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
             item_index: RwLock::new(None),
@@ -399,6 +457,7 @@ impl Store {
             secrets_directory,
             secrets_dir,
             poisoned: AtomicBool::new(false),
+            write_aborted: AtomicBool::new(false),
             poison_changed: tokio::sync::Notify::new(),
             transaction_gate: RwLock::new(()),
             item_index: RwLock::new(None),

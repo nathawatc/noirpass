@@ -50,6 +50,11 @@ fn item_delete_filesystem_failures_preserve_commit_and_recovery_outcomes() {
         assert_injected(&store);
         assert_eq!(store.is_poisoned(), poisoned, "{failures:?}");
         if poisoned {
+            assert!(store.item_index.read().unwrap().is_none());
+        } else {
+            super::index::assert_warm_index(&store);
+        }
+        if poisoned {
             assert!(store.delete_item(&survivor.id).is_err());
         }
         drop(store);
@@ -106,6 +111,11 @@ fn replacement_filesystem_failures_preserve_old_or_committed_ciphertext() {
         );
         assert_injected(&store);
         assert_eq!(store.is_poisoned(), poisoned, "{failures:?}");
+        if poisoned {
+            assert!(store.item_index.read().unwrap().is_none());
+        } else {
+            super::index::assert_warm_index(&store);
+        }
         drop(store);
 
         let store = Store::open_existing(tmp.path()).unwrap();
@@ -168,6 +178,11 @@ fn collection_delete_filesystem_failures_restore_all_or_remove_all() {
         );
         assert_injected(&store);
         assert_eq!(store.is_poisoned(), poisoned, "{failures:?}");
+        if poisoned {
+            assert!(store.item_index.read().unwrap().is_none());
+        } else {
+            super::index::assert_warm_index(&store);
+        }
         drop(store);
 
         let store = Store::open_existing(tmp.path()).unwrap();
