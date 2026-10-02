@@ -132,7 +132,13 @@ pub(super) fn init_store_with(
         None
     };
     let cert = read_recipient()?;
-    let config = init_from_cert_in_with_hooks(data_dir, &root, &cert, || {}, || {})?;
+    let config = init_from_cert_in_with_hooks(
+        data_dir,
+        &root,
+        &cert,
+        |keys, bytes| atomic_write_in(keys, Path::new("recipient.pgp"), bytes, 0o600),
+        || {},
+    )?;
     let store = match store {
         Some(store) => store,
         None => Store::open_in(data_dir, &root)?,
@@ -162,14 +168,20 @@ pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     validate_no_symlink_components(data_dir)?;
     let cert = parse_usable_recipient(bytes)?;
     let root = super::open_lifecycle_directory(data_dir)?;
-    init_from_cert_in_with_hooks(data_dir, &root, &cert, || {}, || {})
+    init_from_cert_in_with_hooks(
+        data_dir,
+        &root,
+        &cert,
+        |keys, bytes| atomic_write_in(keys, Path::new("recipient.pgp"), bytes, 0o600),
+        || {},
+    )
 }
 
 pub(super) fn init_from_cert_in_with_hooks(
     data_dir: &Path,
     root: &Directory,
     cert: &Cert,
-    after_pin: impl FnOnce(),
+    write_certificate: impl FnOnce(&Directory, &[u8]) -> Result<()>,
     after_certificate: impl FnOnce(),
 ) -> Result<Config> {
     let new_fingerprint = cert.fingerprint().to_hex();
@@ -217,10 +229,6 @@ pub(super) fn init_from_cert_in_with_hooks(
     let previous_cert = read_optional_in(&keys, name)?;
     let previous_config = read_optional_in(root, Path::new(super::CONFIG_FILE))?;
     let binary = cert_to_binary(cert)?;
-    after_pin();
-    atomic_write_in(&keys, name, &binary, 0o600)?;
-    after_certificate();
-
     let config = Config {
         version: CONFIG_VERSION,
         recipient_fingerprint: new_fingerprint,
@@ -229,6 +237,8 @@ pub(super) fn init_from_cert_in_with_hooks(
     };
     let mut configuration_attempted = false;
     let write_result = (|| -> Result<()> {
+        write_certificate(&keys, &binary)?;
+        after_certificate();
         let current = root.metadata(Path::new(KEYS_DIR))?;
         let owned = keys.metadata(Path::new("."))?;
         if (current.dev(), current.ino()) != (owned.dev(), owned.ino()) {

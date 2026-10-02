@@ -119,6 +119,16 @@ pub(super) fn atomic_write_in(
     bytes: &[u8],
     mode: u32,
 ) -> Result<()> {
+    atomic_write_in_with_sync(directory, name, bytes, mode, || directory.sync_all())
+}
+
+pub(super) fn atomic_write_in_with_sync(
+    directory: &Directory,
+    name: &Path,
+    bytes: &[u8],
+    mode: u32,
+    sync_directory: impl FnOnce() -> io::Result<()>,
+) -> Result<()> {
     validate_regular_in(directory, name)?;
     for _ in 0..16 {
         let tmp = PathBuf::from(format!(".noirpass-tmp-{:016x}", rand::random::<u64>()));
@@ -137,7 +147,7 @@ pub(super) fn atomic_write_in(
                     let _ = directory.remove(&tmp);
                     return Err(Error::Io(err));
                 }
-                directory.sync_all()?;
+                sync_directory()?;
                 return Ok(());
             }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}

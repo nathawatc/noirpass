@@ -4,6 +4,7 @@ use std::path::Path;
 
 use sequoia_openpgp::serialize::Serialize;
 
+use super::super::format::{atomic_write_in, atomic_write_in_with_sync};
 use super::super::init::{init_from_cert_in_with_hooks, init_store_with};
 use super::super::{CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, init_from_bytes};
 use super::support::generated_recipient;
@@ -98,10 +99,11 @@ fn refresh_rolls_back_on_pinned_keys_after_directory_replacement() {
                 &selected,
                 &root,
                 &cert,
-                || {
+                |keys, bytes| {
                     if !after_write {
                         replace();
                     }
+                    atomic_write_in(keys, Path::new("recipient.pgp"), bytes, 0o600)
                 },
                 || {
                     if after_write {
@@ -145,7 +147,7 @@ fn config_failure_after_certificate_publication_restores_previous_bytes() {
         tmp.path(),
         &root,
         &cert,
-        || {},
+        |keys, bytes| atomic_write_in(keys, Path::new("recipient.pgp"), bytes, 0o600),
         || {
             assert_ne!(
                 root.read_regular(Path::new(RECIPIENT_REL)).unwrap(),
@@ -159,4 +161,52 @@ fn config_failure_after_certificate_publication_restores_previous_bytes() {
     assert!(err.to_string().contains("not a regular file"));
     assert_eq!(fs::read(tmp.path().join(RECIPIENT_REL)).unwrap(), previous);
     assert!(tmp.path().join(CONFIG_FILE).is_dir());
+}
+
+#[test]
+fn certificate_sync_failure_rolls_back_fresh_and_existing_initialization() {
+    let (bytes, _) = generated_recipient();
+    let cert = parse_recipient_cert(&bytes).unwrap();
+    for existing in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let previous = if existing {
+            init_from_bytes(tmp.path(), &bytes).unwrap();
+            drop(Store::open(tmp.path()).unwrap());
+            let mut armored = Vec::new();
+            cert.armored().serialize(&mut armored).unwrap();
+            fs::write(tmp.path().join(RECIPIENT_REL), &armored).unwrap();
+            Some(armored)
+        } else {
+            None
+        };
+        let previous_config = fs::read(tmp.path().join(CONFIG_FILE)).ok();
+        let root = Directory::open(tmp.path()).unwrap();
+        let err = init_from_cert_in_with_hooks(
+            tmp.path(),
+            &root,
+            &cert,
+            |keys, bytes| {
+                atomic_write_in_with_sync(keys, Path::new("recipient.pgp"), bytes, 0o600, || {
+                    assert_eq!(
+                        keys.read_regular(Path::new("recipient.pgp")).unwrap(),
+                        bytes
+                    );
+                    Err(std::io::Error::from_raw_os_error(libc::EIO))
+                })
+            },
+            || panic!("certificate sync failure must stop config publication"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Io(ref err) if err.raw_os_error() == Some(libc::EIO))
+        );
+        assert_eq!(fs::read(tmp.path().join(RECIPIENT_REL)).ok(), previous);
+        assert_eq!(fs::read(tmp.path().join(CONFIG_FILE)).ok(), previous_config);
+        assert_eq!(
+            fs::read_dir(tmp.path().join(KEYS_DIR)).unwrap().count(),
+            usize::from(existing)
+        );
+        // A failed fresh initialization must remain retryable.
+        init_store_with(tmp.path(), || Ok(cert.clone())).unwrap();
+    }
 }
