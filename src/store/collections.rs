@@ -1,5 +1,7 @@
 //! Collection and alias metadata operations.
 
+use std::collections::HashMap;
+
 use redb::{ReadableDatabase, ReadableTable};
 
 use super::{
@@ -88,7 +90,7 @@ impl Store {
         if !is_valid_collection_id(id) {
             return Err(Error::NotFound(format!("collection {id}")));
         }
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
         {
             let collections = txn.open_table(COLLECTIONS)?;
             let metadata: CollectionMeta = collections
@@ -104,25 +106,12 @@ impl Store {
             }
         }
 
-        let mut item_ids = Vec::new();
-        {
-            let items = txn.open_table(ITEMS)?;
-            for entry in items.iter()? {
-                let (key, value) = entry?;
-                let metadata: ItemMeta = serde_json::from_slice(value.value())?;
-                if metadata.collection == id {
-                    let item_id = key.value().to_string();
-                    self.secret_path(&item_id)?;
-                    if metadata.id != item_id {
-                        return Err(Error::Config(format!(
-                            "item metadata id {} does not match table key {item_id}",
-                            metadata.id
-                        )));
-                    }
-                    item_ids.push(item_id);
-                }
-            }
-        }
+        let metadata_to_remove =
+            self.collection_items_locked(&txn, mutation_guard.index.as_ref(), id)?;
+        let item_ids: Vec<_> = metadata_to_remove
+            .iter()
+            .map(|meta| meta.id.clone())
+            .collect();
         let paths = item_ids
             .iter()
             .map(|item_id| self.secret_path(item_id))
@@ -160,7 +149,57 @@ impl Store {
                 .map_err(|err| PersistError::Indeterminate(err.into()))
         };
         self.quarantine_many_then_commit(&paths, commit)?;
+        if let Some(index) = mutation_guard.index.as_mut() {
+            for metadata in &metadata_to_remove {
+                index.remove(metadata);
+            }
+        }
+        mutation_guard.preserve_index();
         Ok(DeletedCollection { item_ids, aliases })
+    }
+
+    fn collection_items_locked(
+        &self,
+        txn: &redb::WriteTransaction,
+        index: Option<&super::items::ItemIndex>,
+        id: &str,
+    ) -> Result<Vec<ItemMeta>> {
+        let mut metadata_to_remove = Vec::new();
+        {
+            let items = txn.open_table(ITEMS)?;
+            let mut collect = |table_key: &str, bytes: &[u8]| -> Result<()> {
+                let metadata: ItemMeta = serde_json::from_slice(bytes)?;
+                if metadata.collection == id {
+                    self.secret_path(table_key)?;
+                    if metadata.id != table_key {
+                        return Err(Error::Config(format!(
+                            "item metadata id {} does not match table key {table_key}",
+                            metadata.id
+                        )));
+                    }
+                    metadata_to_remove.push(metadata);
+                }
+                Ok(())
+            };
+            if let Some(candidates) =
+                index.and_then(|index| index.selective_candidates(Some(id), &HashMap::new()))
+            {
+                for item_id in candidates {
+                    let value = items.get(item_id.as_str())?.ok_or_else(|| {
+                        Error::Config(format!(
+                            "item lookup index references missing item {item_id}"
+                        ))
+                    })?;
+                    collect(item_id, value.value())?;
+                }
+            } else {
+                for entry in items.iter()? {
+                    let (key, value) = entry?;
+                    collect(key.value(), value.value())?;
+                }
+            }
+        }
+        Ok(metadata_to_remove)
     }
 
     /// Ensure the well-known `default` collection exists and bootstrap its

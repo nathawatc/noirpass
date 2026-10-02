@@ -3,7 +3,7 @@
 //! Run: `nix develop -c cargo test --release metadata_scan_benchmark -- --ignored --nocapture`.
 //! Seeds only isolated metadata; ciphertext is not read by these queries.
 //! Reports warmed median and maximum of nine samples, excluding fixture setup.
-//! Also measures the first lookup and a lookup after writer admission.
+//! Also measures the first lookup and a lookup after an alias write.
 
 use std::time::{Duration, Instant};
 
@@ -131,9 +131,9 @@ fn metadata_scan_benchmark() {
             .unwrap();
         let start = Instant::now();
         assert_eq!(store.search_items(&selective).unwrap().len(), 1);
-        let rebuild = start.elapsed();
+        let after_alias = start.elapsed();
         println!(
-            "items={count}; cold={cold:?}; rebuild={rebuild:?}; median/max: indexed list={list:?}/{list_max:?} (scan={list_scan:?}); indexed selective search={search:?}/{search_max:?} (scan={search_scan:?}); broad search={broad:?}/{broad_max:?} (scan={broad_scan:?}); all items={all:?}/{all_max:?}"
+            "items={count}; cold={cold:?}; after alias={after_alias:?}; median/max: indexed list={list:?}/{list_max:?} (scan={list_scan:?}); indexed selective search={search:?}/{search_max:?} (scan={search_scan:?}); broad search={broad:?}/{broad_max:?} (scan={broad_scan:?}); all items={all:?}/{all_max:?}"
         );
     }
 }

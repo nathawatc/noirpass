@@ -90,7 +90,12 @@ impl Store {
             self.begin_write_checked_after_initial_check(after_initial_check)?;
         Self::validate_item_collection(&txn, collection)?;
         let existing = if replace {
-            Self::find_item_by_attrs_exact_locked(&txn, collection, &attributes)?
+            Self::find_item_by_attrs_exact_locked(
+                &txn,
+                mutation_guard.index.as_ref(),
+                collection,
+                &attributes,
+            )?
         } else {
             None
         };
@@ -182,10 +187,24 @@ impl Store {
 
     fn find_item_by_attrs_exact_locked(
         txn: &redb::WriteTransaction,
+        index: Option<&ItemIndex>,
         collection: &str,
         attrs: &HashMap<String, String>,
     ) -> Result<Option<ItemMeta>> {
         let items = txn.open_table(ITEMS)?;
+        if let Some(candidates) = index.and_then(|index| index.candidates(Some(collection), attrs))
+        {
+            for id in candidates {
+                let value = items.get(id.as_str())?.ok_or_else(|| {
+                    Error::Config(format!("item lookup index references missing item {id}"))
+                })?;
+                let metadata = decode_item(id, value.value())?;
+                if metadata.collection == collection && &metadata.attributes == attrs {
+                    return Ok(Some(metadata));
+                }
+            }
+            return Ok(None);
+        }
         for entry in items.iter()? {
             let (key, value) = entry?;
             let metadata = decode_item(key.value(), value.value())?;

@@ -166,6 +166,7 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
     let store = Store::open_existing(tmp.path()).unwrap();
     assert_eq!(store.search_items(&old).unwrap(), vec![survivor]);
     store.delete_collection(&collection.id).unwrap();
+    assert_warm_index(&store);
     assert!(store.list_items(&collection.id).unwrap().is_empty());
     assert_warm_index(&store);
     assert!(store.search_items(&old).unwrap().is_empty());
@@ -261,4 +262,64 @@ fn collection_and_alias_writes_preserve_index_but_failed_writes_discard_it() {
     assert_warm_index(&store);
     store.recover_interrupted_operations().unwrap();
     assert!(store.item_index.read().unwrap().is_none());
+}
+
+#[test]
+fn warm_mutations_use_exact_attributes_and_preserve_other_collections() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let other = store.create_collection("other", Some("other")).unwrap();
+    let exact = attrs(&[("service", "mail")]);
+    let extra = attrs(&[("service", "mail"), ("account", "extra")]);
+    let survivor = store
+        .create_item(
+            &other.id,
+            "survivor",
+            exact.clone(),
+            "text/plain",
+            b"survivor",
+        )
+        .unwrap();
+    let superset = store
+        .create_item(&collection.id, "superset", extra, "text/plain", b"superset")
+        .unwrap();
+    store.search_items(&exact).unwrap();
+    let (created, replaced) = store
+        .create_or_replace_item(
+            &collection.id,
+            "exact",
+            exact.clone(),
+            "text/plain",
+            b"exact",
+            true,
+        )
+        .unwrap();
+    assert!(!replaced);
+    assert_warm_index(&store);
+    let (updated, replaced) = store
+        .create_or_replace_item(
+            &collection.id,
+            "updated",
+            exact,
+            "text/plain",
+            b"updated",
+            true,
+        )
+        .unwrap();
+    assert!(replaced);
+    assert_eq!(updated.id, created.id);
+    assert_warm_index(&store);
+    let deleted = store.delete_collection(&collection.id).unwrap();
+    let mut expected = vec![updated.id, superset.id];
+    expected.sort();
+    assert_eq!(deleted.item_ids, expected);
+    assert_warm_index(&store);
+    assert_eq!(
+        store.search_items(&HashMap::new()).unwrap(),
+        vec![survivor.clone()]
+    );
+    assert_eq!(store.read_item_secret(&survivor.id).unwrap().1, b"survivor");
+    assert_eq!(store.read_alias("other").unwrap(), Some(other.id));
+    assert!(store.check_integrity().unwrap().is_healthy());
 }

@@ -119,10 +119,7 @@ impl Store {
         let index = cache
             .as_ref()
             .expect("shared transaction gate prevents invalidation");
-        let Some(candidates) = index
-            .candidates(collection, attrs)
-            .filter(|candidates| candidates.len() < index.len)
-        else {
+        let Some(candidates) = index.selective_candidates(collection, attrs) else {
             // A query covering every candidate gains nothing from individual
             // B-tree lookups. Keep sequential traversal for broad queries.
             let mut out = Vec::new();
@@ -202,6 +199,15 @@ impl ItemIndex {
                 }
             }
         }
+    }
+
+    pub(in crate::store) fn selective_candidates(
+        &self,
+        collection: Option<&str>,
+        attrs: &HashMap<String, String>,
+    ) -> Option<&BTreeSet<String>> {
+        self.candidates(collection, attrs)
+            .filter(|ids| ids.len() < self.len)
     }
 
     /// Start from the smallest candidate set, then verify all filters against
