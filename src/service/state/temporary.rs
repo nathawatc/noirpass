@@ -188,8 +188,8 @@ impl ServiceState {
 
         let previous_bytes = existing_id
             .as_ref()
-            .map_or(0, |id| collection.items[id].bytes());
-        collection.check_capacity(previous_bytes, replacement_bytes)?;
+            .map_or(0, |id| collection.items[id].bytes);
+        let retained_bytes = collection.check_capacity(previous_bytes, replacement_bytes)?;
         if existing_id.is_none() && collection.items.len() >= MAX_SESSION_ITEMS {
             return Err(crate::Error::Config(
                 "temporary collection exceeds item limit".into(),
@@ -204,8 +204,10 @@ impl ServiceState {
                 item.metadata.content_type = content_type.to_string();
                 item.metadata.modified = now;
                 item.secret = secret;
+                item.bytes = replacement_bytes;
                 item.metadata.clone()
             };
+            collection.retained_bytes = retained_bytes;
             collection.metadata.modified = now;
             return Ok((metadata, true));
         }
@@ -233,8 +235,10 @@ impl ServiceState {
             SessionItem {
                 metadata: metadata.clone(),
                 secret,
+                bytes: replacement_bytes,
             },
         );
+        collection.retained_bytes = retained_bytes;
         collection.metadata.modified = now;
         Ok((metadata, false))
     }
@@ -264,7 +268,7 @@ impl ServiceState {
                 .as_ref()
                 .map_or(item.secret.len(), |secret| secret.len()),
         )?;
-        collection.check_capacity(item.bytes(), replacement_bytes)?;
+        let retained_bytes = collection.check_capacity(item.bytes, replacement_bytes)?;
         let now = now_secs();
         let metadata = {
             let item = collection
@@ -284,8 +288,10 @@ impl ServiceState {
                 item.secret = secret;
             }
             item.metadata.modified = now;
+            item.bytes = replacement_bytes;
             item.metadata.clone()
         };
+        collection.retained_bytes = retained_bytes;
         collection.metadata.modified = now;
         Ok(metadata)
     }
@@ -296,9 +302,14 @@ impl ServiceState {
             .session_collection
             .lock()
             .expect("session collection lock poisoned");
-        if collection.items.remove(id).is_none() {
-            return Err(crate::Error::NotFound(format!("item {id}")));
-        }
+        let previous = collection
+            .items
+            .get(id)
+            .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))?
+            .bytes;
+        let retained_bytes = collection.check_capacity(previous, 0)?;
+        collection.items.remove(id);
+        collection.retained_bytes = retained_bytes;
         collection.metadata.modified = now_secs();
         Ok(())
     }
@@ -312,5 +323,102 @@ impl ServiceState {
             .expect("session collection lock poisoned")
             .items
             .len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpg::test_support::TestGnupg;
+    use crate::service::state::MAX_SESSION_SECRET_BYTES;
+    use crate::service::tests::test_state;
+
+    fn assert_accounting(state: &ServiceState) -> usize {
+        let collection = state.session_collection.lock().unwrap();
+        let expected: usize = collection
+            .items
+            .values()
+            .map(|item| {
+                let bytes = session_item_bytes(
+                    &item.metadata.label,
+                    &item.metadata.attributes,
+                    &item.metadata.content_type,
+                    item.secret.len(),
+                )
+                .unwrap();
+                assert_eq!(item.bytes, bytes);
+                bytes
+            })
+            .sum();
+        assert_eq!(collection.retained_bytes, expected);
+        expected
+    }
+
+    #[test]
+    fn retained_bytes_follow_mutations_and_rejected_changes() {
+        let gnupg = TestGnupg::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&gnupg, tmp.path());
+        assert_eq!(assert_accounting(&state), 0);
+        let attrs = HashMap::from([("user".into(), "猫".into())]);
+        let (first, _) = state
+            .create_or_replace_session_item(
+                "first",
+                attrs.clone(),
+                "text/plain",
+                Zeroizing::new(vec![1; 12]),
+                false,
+            )
+            .unwrap();
+        assert_accounting(&state);
+        let (other, _) = state
+            .create_or_replace_session_item(
+                "other",
+                HashMap::new(),
+                "text/plain",
+                Zeroizing::new(vec![2; 15]),
+                false,
+            )
+            .unwrap();
+        assert_accounting(&state);
+        let (replacement, replaced) = state
+            .create_or_replace_session_item(
+                "replacement",
+                attrs,
+                "",
+                Zeroizing::new(vec![3; 3]),
+                true,
+            )
+            .unwrap();
+        assert!(replaced);
+        assert_eq!(replacement.id, first.id);
+        assert_accounting(&state);
+        state
+            .update_session_item(
+                &first.id,
+                Some(""),
+                Some(HashMap::new()),
+                Some(""),
+                Some(Zeroizing::new(Vec::new())),
+            )
+            .unwrap();
+        let before = assert_accounting(&state);
+        assert!(
+            state
+                .update_session_item(
+                    &first.id,
+                    None,
+                    None,
+                    None,
+                    Some(Zeroizing::new(vec![0; MAX_SESSION_SECRET_BYTES + 1]))
+                )
+                .is_err()
+        );
+        assert!(state.delete_session_item("missing").is_err());
+        assert_eq!(assert_accounting(&state), before);
+        state.delete_session_item(&other.id).unwrap();
+        assert_eq!(assert_accounting(&state), 0);
+        state.delete_session_item(&first.id).unwrap();
+        assert_eq!(assert_accounting(&state), 0);
     }
 }

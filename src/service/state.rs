@@ -113,38 +113,23 @@ struct ActivityState {
 struct SessionItem {
     metadata: ItemMeta,
     secret: Zeroizing<Vec<u8>>,
-}
-
-impl SessionItem {
-    fn bytes(&self) -> usize {
-        self.secret.len()
-            + self.metadata.label.len()
-            + self.metadata.content_type.len()
-            + self
-                .metadata
-                .attributes
-                .iter()
-                .map(|(key, value)| key.len() + value.len())
-                .sum::<usize>()
-    }
+    bytes: usize,
 }
 
 struct SessionCollectionState {
     metadata: CollectionMeta,
     items: HashMap<String, SessionItem>,
     aliases: HashSet<String>,
+    retained_bytes: usize,
 }
 
 impl SessionCollectionState {
-    fn check_capacity(&self, previous: usize, replacement: usize) -> crate::Result<()> {
-        // ponytail: at most 256 items; scan instead of maintaining a second mutable counter.
-        let retained: usize = self.items.values().map(SessionItem::bytes).sum();
-        if retained - previous + replacement > MAX_SESSION_BYTES {
-            return Err(crate::Error::Config(
-                "temporary collection exceeds memory limit".into(),
-            ));
-        }
-        Ok(())
+    fn check_capacity(&self, previous: usize, replacement: usize) -> crate::Result<usize> {
+        self.retained_bytes
+            .checked_sub(previous)
+            .and_then(|retained| retained.checked_add(replacement))
+            .filter(|retained| *retained <= MAX_SESSION_BYTES)
+            .ok_or_else(|| crate::Error::Config("temporary collection exceeds memory limit".into()))
     }
 
     fn new() -> Self {
@@ -158,6 +143,7 @@ impl SessionCollectionState {
             },
             items: HashMap::new(),
             aliases: HashSet::new(),
+            retained_bytes: 0,
         }
     }
 }
