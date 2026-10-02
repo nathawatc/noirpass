@@ -19,6 +19,8 @@ fn deinit_refuses_legacy_redb_lock_before_lifecycle_mutation() {
         .open(&index_path)
         .unwrap();
     index.try_lock().unwrap();
+    // Model an open description inherited during another fixture's fork/exec.
+    let _inherited_index = index.try_clone().unwrap();
     let before = fs::read(&index_path).unwrap();
 
     let err = crate::config::deinit(tmp.path()).unwrap_err();
@@ -26,6 +28,9 @@ fn deinit_refuses_legacy_redb_lock_before_lifecycle_mutation() {
     assert_eq!(fs::read(&index_path).unwrap(), before);
     assert!(tmp.path().join(CONFIG_FILE).exists());
     assert!(!tmp.path().join(".noirpass-lifecycle.lock").exists());
+    // Concurrent fixture fork/exec can briefly inherit the open description.
+    // Explicitly release its flock before closing and retrying deinitialization.
+    index.unlock().unwrap();
     drop(index);
     crate::config::deinit(tmp.path()).unwrap();
     assert!(!index_path.exists());
