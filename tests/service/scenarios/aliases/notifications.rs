@@ -36,7 +36,16 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
     assert_eq!(prompt.as_str(), "/");
 
     let alias_path = noirpass::service::alias_path("s14_alias").unwrap();
-    let canonical = zbus::Proxy::new(&conn, SERVICE_NAME, a_path.clone(), COLLECTION_IFACE)
+    // Assert current server state; raw signals can precede updates to the proxy cache.
+    let canonical = zbus::proxy::Builder::<zbus::Proxy<'_>>::new(&conn)
+        .destination(SERVICE_NAME)
+        .unwrap()
+        .path(a_path.clone())
+        .unwrap()
+        .interface(COLLECTION_IFACE)
+        .unwrap()
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
         .await
         .unwrap();
     let alias = zbus::Proxy::new(&conn, SERVICE_NAME, alias_path.clone(), COLLECTION_IFACE)
