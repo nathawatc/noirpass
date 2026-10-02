@@ -16,7 +16,7 @@ impl Store {
         reason = "linear recovery branches preserve durable create/update/quarantine/backup ordering"
     )]
     pub fn recover_interrupted_operations(&self) -> Result<()> {
-        let _recovery_guard = self.write_guard_checked()?;
+        let mut recovery_guard = self.write_guard_checked()?;
         let mut recovery_files = self
             .secrets_directory
             .read_dir()?
@@ -161,6 +161,10 @@ impl Store {
                 Err(err) => return Err(err.into()),
             }
         }
-        self.sync_secrets_dir()
+        self.sync_secrets_dir()?;
+        // Recovery changes only ciphertext files; validated metadata and its
+        // derived lookup index still describe the same committed transaction.
+        recovery_guard.preserve_index();
+        Ok(())
     }
 }

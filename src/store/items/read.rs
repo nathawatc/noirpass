@@ -56,8 +56,9 @@ impl Store {
     ///
     /// An item matches when every `(k, v)` in `attrs` is present with the same
     /// value; an empty query therefore matches every item. Collection and
-    /// attribute indexes are derived in memory from validated metadata. The
-    /// successful mutations update them; nothing changes on disk.
+    /// attribute indexes are derived in memory during startup validation or the
+    /// first lookup. Successful mutations update them; verified aborts and
+    /// filesystem recovery retain them. Nothing changes on disk.
     pub fn search_items(&self, attrs: &HashMap<String, String>) -> Result<Vec<ItemMeta>> {
         self.search_items_matching(None, attrs)
     }
@@ -148,7 +149,8 @@ impl Store {
 
 /// Sorted candidate sets retain only ids, collection names and attribute pairs.
 /// Labels, ciphertext and secret values never enter this index. The Store gate
-/// protects readers and post-commit updates; failed mutations discard the index.
+/// protects readers and post-commit updates. Verified aborts preserve it;
+/// uncertain mutations and raw committed writes discard it.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::store) struct ItemIndex {
     len: usize,

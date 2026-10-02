@@ -17,10 +17,35 @@ use super::{
 impl Store {
     /// Refuse daemon startup while unresolved integrity problems exist.
     pub fn ensure_safe_to_serve(&self) -> Result<()> {
-        let report = self.check_integrity()?;
+        let _read_guard = self.read_guard_checked_after_initial_check(|| {})?;
+        let mut index = self
+            .item_index
+            .read()
+            .map_err(|_| Error::Config("item lookup index is poisoned".into()))?
+            .is_none()
+            .then(super::items::ItemIndex::default);
+        // Reuse mandatory startup validation instead of decoding every item
+        // again when the first lookup arrives. The shared gate pins this snapshot.
+        let report = scan_integrity(
+            &self.db,
+            &self.secrets_dir,
+            &self.secrets_directory,
+            index.as_mut(),
+        )?;
         if report.is_healthy() {
+            if let Some(index) = index {
+                *self
+                    .item_index
+                    .write()
+                    .map_err(|_| Error::Config("item lookup index is poisoned".into()))? =
+                    Some(index);
+            }
             return Ok(());
         }
+        *self
+            .item_index
+            .write()
+            .map_err(|_| Error::Config("item lookup index is poisoned".into()))? = None;
         Err(Error::Config(
             "store integrity check failed; run `noirpass check` before starting daemon".into(),
         ))
@@ -28,7 +53,7 @@ impl Store {
 
     /// Cross-check every redb item against ciphertext files on disk.
     pub fn check_integrity(&self) -> Result<IntegrityReport> {
-        scan_integrity(&self.db, &self.secrets_dir, &self.secrets_directory)
+        scan_integrity(&self.db, &self.secrets_dir, &self.secrets_directory, None)
     }
 
     /// Cross-check an existing store without acquiring its writer lock.
@@ -43,7 +68,7 @@ impl Store {
             }
             Err(err) => return Err(err.into()),
         };
-        scan_integrity(&db, &secrets_dir, &Directory::open(&secrets_dir)?)
+        scan_integrity(&db, &secrets_dir, &Directory::open(&secrets_dir)?, None)
     }
 }
 
@@ -55,6 +80,7 @@ fn scan_integrity<D: ReadableDatabase>(
     db: &D,
     secrets_dir: &Path,
     directory: &Directory,
+    mut index: Option<&mut super::items::ItemIndex>,
 ) -> Result<IntegrityReport> {
     let txn = db.begin_read()?;
     let mut collection_ids = HashSet::new();
@@ -150,6 +176,9 @@ fn scan_integrity<D: ReadableDatabase>(
                 continue;
             }
         };
+        if let Some(index) = index.as_mut() {
+            index.insert(&metadata);
+        }
         let path = super::secret_path(secrets_dir, &table_key)?;
         match directory.metadata(Path::new(path.file_name().expect("canonical filename"))) {
             Ok(file_metadata) if file_metadata.file_type().is_file() => {

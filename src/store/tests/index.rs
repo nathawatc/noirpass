@@ -263,7 +263,7 @@ fn collection_and_alias_writes_preserve_index_after_rejected_writes() {
     store.list_items(&collection.id).unwrap();
     assert_warm_index(&store);
     store.recover_interrupted_operations().unwrap();
-    assert!(store.item_index.read().unwrap().is_none());
+    assert_warm_index(&store);
 }
 
 #[test]
@@ -361,4 +361,55 @@ fn explicit_abort_preserves_index_but_raw_commit_discards_it() {
     drop(guard);
     assert!(store.item_index.read().unwrap().is_none());
     assert_eq!(store.list_items(&collection.id).unwrap().len(), 0);
+}
+
+#[test]
+fn startup_validation_populates_index_and_recovery_retains_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let item = store
+        .create_item(
+            &collection.id,
+            "item",
+            attrs(&[("key", "value")]),
+            "text/plain",
+            b"ciphertext",
+        )
+        .unwrap();
+    drop(store);
+    let store = Store::open_existing(tmp.path()).unwrap();
+    assert!(store.item_index.read().unwrap().is_none());
+    store.recover_interrupted_operations().unwrap();
+    store.ensure_safe_to_serve().unwrap();
+    assert_warm_index(&store);
+    store.ensure_default().unwrap();
+    assert_warm_index(&store);
+    assert_eq!(
+        store.search_items(&item.attributes).unwrap(),
+        vec![item.clone()]
+    );
+    let quarantine = store.secrets_dir.join(format!(
+        ".noirpass-quarantine-{}-0123456789abcdef.gpg",
+        item.id
+    ));
+    fs::rename(store.secret_path(&item.id).unwrap(), &quarantine).unwrap();
+    store.recover_interrupted_operations().unwrap();
+    assert_warm_index(&store);
+    assert!(store.check_integrity().unwrap().is_healthy());
+    let (guard, txn) = store.begin_write_checked().unwrap();
+    txn.open_table(ITEMS)
+        .unwrap()
+        .insert("bad-key", b"corrupt".as_slice())
+        .unwrap();
+    txn.commit().unwrap();
+    drop(guard);
+    assert!(store.ensure_safe_to_serve().is_err());
+    assert!(store.item_index.read().unwrap().is_none());
+    store.delete_item_metadata("bad-key").unwrap();
+    store.ensure_safe_to_serve().unwrap();
+    assert_warm_index(&store);
+    fs::remove_file(store.secret_path(&item.id).unwrap()).unwrap();
+    assert!(store.ensure_safe_to_serve().is_err());
+    assert!(store.item_index.read().unwrap().is_none());
 }
