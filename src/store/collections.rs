@@ -19,7 +19,7 @@ impl Store {
             modified: now,
         };
 
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
         {
             let mut table = txn.open_table(COLLECTIONS)?;
             let bytes = serde_json::to_vec(&meta)?;
@@ -30,6 +30,7 @@ impl Store {
             aliases.insert(alias, meta.id.as_str())?;
         }
         self.finish_metadata_commit(txn.commit())?;
+        mutation_guard.preserve_index();
         Ok(meta)
     }
 
@@ -165,7 +166,7 @@ impl Store {
     /// Ensure the well-known `default` collection exists and bootstrap its
     /// `default` alias when absent. Returns the collection metadata.
     pub fn ensure_default(&self) -> Result<CollectionMeta> {
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
         let meta = {
             let mut collections = txn.open_table(COLLECTIONS)?;
             let existing = collections
@@ -199,6 +200,7 @@ impl Store {
             meta
         };
         self.finish_metadata_commit(txn.commit())?;
+        mutation_guard.preserve_index();
         Ok(meta)
     }
 
@@ -207,7 +209,7 @@ impl Store {
         if !is_valid_collection_id(id) {
             return Err(Error::NotFound(format!("collection {id}")));
         }
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
         let meta = {
             let mut collections = txn.open_table(COLLECTIONS)?;
             let bytes = collections
@@ -228,12 +230,13 @@ impl Store {
             meta
         };
         self.finish_metadata_commit(txn.commit())?;
+        mutation_guard.preserve_index();
         Ok(meta)
     }
 
     /// Set (`Some`) or remove (`None`) the alias `name`.
     pub fn set_alias(&self, name: &str, collection_id: Option<&str>) -> Result<()> {
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
         if let Some(id) = collection_id {
             if !is_valid_collection_id(id) {
                 return Err(Error::NotFound(format!("collection {id}")));
@@ -263,6 +266,7 @@ impl Store {
             }
         }
         self.finish_metadata_commit(txn.commit())?;
+        mutation_guard.preserve_index();
         Ok(())
     }
 

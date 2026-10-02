@@ -1,6 +1,21 @@
 //! Derived lookup indexes must agree with persistent state through all mutations.
 
 use super::*;
+use redb::ReadableTable;
+
+fn assert_warm_index(store: &Store) {
+    let cache = store.item_index.read().unwrap();
+    let index = cache
+        .as_ref()
+        .expect("successful mutation preserves the warm index");
+    let txn = store.db.begin_read().unwrap();
+    let mut expected = crate::store::items::ItemIndex::default();
+    for entry in txn.open_table(ITEMS).unwrap().iter().unwrap() {
+        let (key, value) = entry.unwrap();
+        expected.insert(&decode_item(key.value(), value.value()).unwrap());
+    }
+    assert_eq!(index, &expected);
+}
 
 fn sorted(mut items: Vec<ItemMeta>) -> Vec<ItemMeta> {
     items.sort_by(|a, b| a.id.cmp(&b.id));
@@ -98,11 +113,13 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
     let a = store
         .create_item(&collection.id, "a", old.clone(), "text/plain", b"a")
         .unwrap();
+    assert_warm_index(&store);
     assert_eq!(store.search_items(&old).unwrap(), vec![a.clone()]);
     assert_eq!(store.list_items(&collection.id).unwrap(), vec![a.clone()]);
     let a = store
         .update_item(&a.id, None, Some(new.clone()), None, None)
         .unwrap();
+    assert_warm_index(&store);
     assert!(store.search_items(&old).unwrap().is_empty());
     assert_eq!(store.search_items(&new).unwrap(), vec![a]);
     let (a, replaced) = store
@@ -115,19 +132,23 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
             true,
         )
         .unwrap();
+    assert_warm_index(&store);
     assert!(replaced);
     assert_eq!(store.search_items(&new).unwrap(), vec![a.clone()]);
     let b = store
         .create_item(&collection.id, "b", old.clone(), "text/plain", b"b")
         .unwrap();
+    assert_warm_index(&store);
     assert_eq!(
         store.list_items(&collection.id).unwrap(),
         sorted(vec![a.clone(), b.clone()])
     );
     store.delete_item(&a.id).unwrap();
+    assert_warm_index(&store);
     assert!(store.search_items(&new).unwrap().is_empty());
     assert_eq!(store.list_items(&collection.id).unwrap(), vec![b.clone()]);
     store.delete_item_metadata(&b.id).unwrap();
+    assert!(store.item_index.read().unwrap().is_none());
     assert!(store.search_items(&old).unwrap().is_empty());
     // Metadata-only deletion deliberately leaves ciphertext for integrity tools.
     fs::remove_file(store.secret_path(&b.id).unwrap()).unwrap();
@@ -146,6 +167,7 @@ fn warm_index_follows_create_update_replace_delete_and_reopen() {
     assert_eq!(store.search_items(&old).unwrap(), vec![survivor]);
     store.delete_collection(&collection.id).unwrap();
     assert!(store.list_items(&collection.id).unwrap().is_empty());
+    assert_warm_index(&store);
     assert!(store.search_items(&old).unwrap().is_empty());
     assert!(store.check_integrity().unwrap().is_healthy());
 }
@@ -195,4 +217,48 @@ fn invalid_metadata_blocks_even_empty_candidates_and_repair_discards_partial_ind
     store.poison();
     assert!(store.list_items(&collection.id).is_err());
     assert!(store.search_items(&HashMap::new()).is_err());
+}
+
+#[test]
+fn collection_and_alias_writes_preserve_index_but_failed_writes_discard_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let item = store
+        .create_item(
+            &collection.id,
+            "item",
+            attrs(&[("key", "value")]),
+            "text/plain",
+            b"item",
+        )
+        .unwrap();
+    store.list_items(&collection.id).unwrap();
+    store.ensure_default().unwrap();
+    assert_warm_index(&store);
+    let other = store.create_collection("other", Some("other")).unwrap();
+    assert_warm_index(&store);
+    store.set_collection_label(&other.id, "renamed").unwrap();
+    assert_warm_index(&store);
+    store.set_alias("other", Some(&collection.id)).unwrap();
+    assert_warm_index(&store);
+    store.set_alias("other", None).unwrap();
+    assert_warm_index(&store);
+    let updated = store
+        .update_item(
+            &item.id,
+            Some("renamed"),
+            None,
+            Some("application/octet-stream"),
+            Some(b"updated"),
+        )
+        .unwrap();
+    assert_warm_index(&store);
+    assert_eq!(store.search_items(&item.attributes).unwrap(), vec![updated]);
+    assert!(store.set_alias("bad", Some("missing")).is_err());
+    assert!(store.item_index.read().unwrap().is_none());
+    store.list_items(&collection.id).unwrap();
+    assert_warm_index(&store);
+    store.recover_interrupted_operations().unwrap();
+    assert!(store.item_index.read().unwrap().is_none());
 }

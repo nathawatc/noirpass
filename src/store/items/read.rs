@@ -1,6 +1,6 @@
 //! Item metadata lookup, listing, and attribute searches.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use redb::{ReadableDatabase, ReadableTable};
 
@@ -57,7 +57,7 @@ impl Store {
     /// An item matches when every `(k, v)` in `attrs` is present with the same
     /// value; an empty query therefore matches every item. Collection and
     /// attribute indexes are derived in memory from validated metadata. The
-    /// first query after a write rebuilds them; nothing changes on disk.
+    /// successful mutations update them; nothing changes on disk.
     pub fn search_items(&self, attrs: &HashMap<String, String>) -> Result<Vec<ItemMeta>> {
         self.search_items_matching(None, attrs)
     }
@@ -121,7 +121,7 @@ impl Store {
             .expect("shared transaction gate prevents invalidation");
         let Some(candidates) = index
             .candidates(collection, attrs)
-            .filter(|candidates| candidates.len() < index.ids.len())
+            .filter(|candidates| candidates.len() < index.len)
         else {
             // A query covering every candidate gains nothing from individual
             // B-tree lookups. Keep sequential traversal for broad queries.
@@ -136,8 +136,7 @@ impl Store {
             return Ok(out);
         };
         let mut out = Vec::new();
-        for &position in candidates {
-            let id = &index.ids[position];
+        for id in candidates {
             let value = items.get(id.as_str())?.ok_or_else(|| {
                 Error::Config(format!("item lookup index references missing item {id}"))
             })?;
@@ -150,50 +149,75 @@ impl Store {
     }
 }
 
-/// Derived candidate lists contain positions in the authoritative table's id
-/// order. Only ids, collection names and attribute pairs are retained; labels,
-/// ciphertext and secret values never enter this index. The Store transaction
-/// gate protects its lifetime, and writer admission invalidates it centrally.
-#[derive(Debug, Default)]
+/// Sorted candidate sets retain only ids, collection names and attribute pairs.
+/// Labels, ciphertext and secret values never enter this index. The Store gate
+/// protects readers and post-commit updates; failed mutations discard the index.
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::store) struct ItemIndex {
-    ids: Vec<String>,
-    collections: HashMap<String, Vec<usize>>,
-    attributes: HashMap<String, HashMap<String, Vec<usize>>>,
+    len: usize,
+    collections: HashMap<String, BTreeSet<String>>,
+    attributes: HashMap<String, HashMap<String, BTreeSet<String>>>,
+    empty: BTreeSet<String>,
 }
 
 impl ItemIndex {
-    fn insert(&mut self, metadata: &ItemMeta) {
-        let position = self.ids.len();
-        self.ids.push(metadata.id.clone());
-        self.collections
+    pub(in crate::store) fn insert(&mut self, metadata: &ItemMeta) {
+        if self
+            .collections
             .entry(metadata.collection.clone())
             .or_default()
-            .push(position);
+            .insert(metadata.id.clone())
+        {
+            self.len += 1;
+        }
         for (name, value) in &metadata.attributes {
             self.attributes
                 .entry(name.clone())
                 .or_default()
                 .entry(value.clone())
                 .or_default()
-                .push(position);
+                .insert(metadata.id.clone());
         }
     }
 
-    /// Start from the smallest candidate list, then verify all filters against
-    /// current redb metadata. Missing keys/values yield an empty candidate list.
-    fn candidates(
+    pub(in crate::store) fn remove(&mut self, metadata: &ItemMeta) {
+        if let Some(ids) = self.collections.get_mut(&metadata.collection) {
+            if ids.remove(&metadata.id) {
+                self.len -= 1;
+            }
+            if ids.is_empty() {
+                self.collections.remove(&metadata.collection);
+            }
+        }
+        for (name, value) in &metadata.attributes {
+            if let Some(values) = self.attributes.get_mut(name) {
+                if let Some(ids) = values.get_mut(value) {
+                    ids.remove(&metadata.id);
+                    if ids.is_empty() {
+                        values.remove(value);
+                    }
+                }
+                if values.is_empty() {
+                    self.attributes.remove(name);
+                }
+            }
+        }
+    }
+
+    /// Start from the smallest candidate set, then verify all filters against
+    /// current redb metadata. Missing keys/values yield an empty candidate set.
+    pub(in crate::store) fn candidates(
         &self,
         collection: Option<&str>,
         attrs: &HashMap<String, String>,
-    ) -> Option<&[usize]> {
-        let mut smallest =
-            collection.map(|id| self.collections.get(id).map_or(&[][..], Vec::as_slice));
+    ) -> Option<&BTreeSet<String>> {
+        let mut smallest = collection.map(|id| self.collections.get(id).unwrap_or(&self.empty));
         for (name, value) in attrs {
             let candidates = self
                 .attributes
                 .get(name)
                 .and_then(|values| values.get(value))
-                .map_or(&[][..], Vec::as_slice);
+                .unwrap_or(&self.empty);
             if smallest.is_none_or(|current| candidates.len() < current.len()) {
                 smallest = Some(candidates);
             }

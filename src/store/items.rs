@@ -12,8 +12,8 @@ use redb::ReadableTable;
 use crate::error::{Error, Result};
 
 use super::{
-    COLLECTIONS, CollectionMeta, ITEMS, ItemMeta, PersistError, Store, ciphertext_sha256,
-    decode_item, definite, is_valid_collection_id, now_secs, random_id,
+    COLLECTIONS, CollectionMeta, ITEMS, ItemMeta, PersistError, Store, StoreWriteGuard,
+    ciphertext_sha256, decode_item, definite, is_valid_collection_id, now_secs, random_id,
 };
 
 impl Store {
@@ -31,16 +31,21 @@ impl Store {
         if !is_valid_collection_id(collection) {
             return Err(Error::NotFound(format!("collection {collection}")));
         }
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
         Self::validate_item_collection(&txn, collection)?;
-        self.create_item_locked(
+        let metadata = self.create_item_locked(
             txn,
             collection,
             label,
             attributes,
             content_type,
             secret_ciphertext,
-        )
+        )?;
+        if let Some(index) = mutation_guard.index.as_mut() {
+            index.insert(&metadata);
+        }
+        mutation_guard.preserve_index();
+        Ok(metadata)
     }
 
     /// Create an item or atomically replace an exact attribute match.
@@ -81,7 +86,7 @@ impl Store {
         if !is_valid_collection_id(collection) {
             return Err(Error::NotFound(format!("collection {collection}")));
         }
-        let (_mutation_guard, txn) =
+        let (mut mutation_guard, txn) =
             self.begin_write_checked_after_initial_check(after_initial_check)?;
         Self::validate_item_collection(&txn, collection)?;
         let existing = if replace {
@@ -89,9 +94,10 @@ impl Store {
         } else {
             None
         };
-        match existing {
+        let result = match existing {
             Some(metadata) => self
                 .update_item_locked(
+                    &mut mutation_guard,
                     txn,
                     &metadata.id,
                     Some(label),
@@ -110,7 +116,14 @@ impl Store {
                     secret_ciphertext,
                 )
                 .map(|metadata| (metadata, false)),
+        }?;
+        if !result.1
+            && let Some(index) = mutation_guard.index.as_mut()
+        {
+            index.insert(&result.0);
         }
+        mutation_guard.preserve_index();
+        Ok(result)
     }
 
     fn validate_item_collection(txn: &redb::WriteTransaction, collection: &str) -> Result<()> {
@@ -282,12 +295,27 @@ impl Store {
         secret_ciphertext: Option<&[u8]>,
     ) -> Result<ItemMeta> {
         self.secret_path(id)?;
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
-        self.update_item_locked(txn, id, label, attributes, content_type, secret_ciphertext)
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
+        let metadata = self.update_item_locked(
+            &mut mutation_guard,
+            txn,
+            id,
+            label,
+            attributes,
+            content_type,
+            secret_ciphertext,
+        )?;
+        mutation_guard.preserve_index();
+        Ok(metadata)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the write guard owns post-commit lookup updates"
+    )]
     fn update_item_locked(
         &self,
+        mutation_guard: &mut StoreWriteGuard<'_>,
         txn: redb::WriteTransaction,
         id: &str,
         label: Option<&str>,
@@ -303,6 +331,7 @@ impl Store {
                 .ok_or_else(|| Error::NotFound(format!("item {id}")))?;
             decode_item(id, &bytes)?
         };
+        let previous = meta.clone();
         if let Some(label) = label {
             meta.label = label.to_string();
         }
@@ -343,6 +372,12 @@ impl Store {
                 }
             }
         }
+        if let Some(index) = mutation_guard.index.as_mut()
+            && previous.attributes != meta.attributes
+        {
+            index.remove(&previous);
+            index.insert(&meta);
+        }
         Ok(meta)
     }
 
@@ -350,19 +385,29 @@ impl Store {
     /// item does not exist.
     pub fn delete_item(&self, id: &str) -> Result<()> {
         let path = self.secret_path(id)?;
-        let (_mutation_guard, txn) = self.begin_write_checked()?;
-        {
+        let (mut mutation_guard, txn) = self.begin_write_checked()?;
+        let previous = {
             let items = txn.open_table(ITEMS)?;
-            if items.get(id)?.is_none() {
-                return Err(Error::NotFound(format!("item {id}")));
-            }
-        }
+            let value = items
+                .get(id)?
+                .ok_or_else(|| Error::NotFound(format!("item {id}")))?;
+            // Integrity repair also deletes malformed records. A warm index can
+            // only contain validated metadata; otherwise leave it invalidated.
+            decode_item(id, value.value()).ok()
+        };
         let commit = || -> std::result::Result<(), PersistError> {
             Self::remove_item_metadata_locked(&txn, id).map_err(definite)?;
             txn.commit()
                 .map_err(|err| PersistError::Indeterminate(err.into()))
         };
-        self.quarantine_then_commit(&path, commit)
+        self.quarantine_then_commit(&path, commit)?;
+        if let Some(previous) = previous {
+            if let Some(index) = mutation_guard.index.as_mut() {
+                index.remove(&previous);
+            }
+            mutation_guard.preserve_index();
+        }
+        Ok(())
     }
 
     /// Delete only an item metadata record using its authoritative redb key.

@@ -63,6 +63,28 @@ pub struct Store {
     file_failures: std::sync::Mutex<std::collections::VecDeque<(files::FileOperation, usize)>>,
 }
 
+/// Keep derived lookup state only when the caller has accounted for a successful
+/// mutation. Unhandled failures, repair, recovery and raw writes discard it.
+struct StoreWriteGuard<'a> {
+    index: RwLockWriteGuard<'a, Option<items::ItemIndex>>,
+    _gate: RwLockWriteGuard<'a, ()>,
+    keep_index: bool,
+}
+
+impl StoreWriteGuard<'_> {
+    fn preserve_index(&mut self) {
+        self.keep_index = true;
+    }
+}
+
+impl Drop for StoreWriteGuard<'_> {
+    fn drop(&mut self) {
+        if !self.keep_index {
+            *self.index = None;
+        }
+    }
+}
+
 enum PersistError {
     Definite(Error),
     Indeterminate(Error),
@@ -185,28 +207,28 @@ impl Store {
         Ok(())
     }
 
-    fn begin_write_checked(&self) -> Result<(RwLockWriteGuard<'_, ()>, redb::WriteTransaction)> {
+    fn begin_write_checked(&self) -> Result<(StoreWriteGuard<'_>, redb::WriteTransaction)> {
         self.begin_write_checked_after_initial_check(|| {})
     }
 
     fn begin_write_checked_after_initial_check(
         &self,
         after_initial_check: impl FnOnce(),
-    ) -> Result<(RwLockWriteGuard<'_, ()>, redb::WriteTransaction)> {
+    ) -> Result<(StoreWriteGuard<'_>, redb::WriteTransaction)> {
         let guard = self.write_guard_checked_after_initial_check(after_initial_check)?;
         let txn = self.db.begin_write()?;
         self.ensure_not_poisoned()?;
         Ok((guard, txn))
     }
 
-    fn write_guard_checked(&self) -> Result<RwLockWriteGuard<'_, ()>> {
+    fn write_guard_checked(&self) -> Result<StoreWriteGuard<'_>> {
         self.write_guard_checked_after_initial_check(|| {})
     }
 
     fn write_guard_checked_after_initial_check(
         &self,
         after_initial_check: impl FnOnce(),
-    ) -> Result<RwLockWriteGuard<'_, ()>> {
+    ) -> Result<StoreWriteGuard<'_>> {
         self.ensure_not_poisoned()?;
         after_initial_check();
         let guard = self
@@ -214,15 +236,15 @@ impl Store {
             .write()
             .map_err(|_| Error::Config("store transaction gate is poisoned".into()))?;
         self.ensure_not_poisoned()?;
-        // ponytail: rebuild after writer admission; maintain indexes incrementally only if mixed-workload profiling justifies it.
-        // Discard derived lookup state before any mutation, including repair,
-        // recovery and rejected writes. Readers hold the shared gate throughout
-        // index construction and lookup, so no stale index can cross a writer.
-        *self
+        let index = self
             .item_index
             .write()
-            .map_err(|_| Error::Config("item lookup index is poisoned".into()))? = None;
-        Ok(guard)
+            .map_err(|_| Error::Config("item lookup index is poisoned".into()))?;
+        Ok(StoreWriteGuard {
+            index,
+            _gate: guard,
+            keep_index: false,
+        })
     }
 
     fn read_guard_checked_after_initial_check(
