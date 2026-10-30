@@ -6,7 +6,7 @@ use super::super::*;
 fn cleanup_failure_keeps_recoverable_file_and_reports_path() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let file = ".noirpass-quarantine-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1.gpg";
+    let file = ".noirpass-quarantine-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0000000000000001.gpg";
     let path = store.secrets_dir.join(file);
     fs::write(&path, b"ciphertext").unwrap();
 

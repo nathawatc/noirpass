@@ -12,7 +12,7 @@ use crate::filesystem::Directory;
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, ITEMS, IndexedItem,
     IntegrityReport, ItemMeta, Store, ciphertext_sha256, is_valid_collection_id, is_valid_item_id,
-    recovery_kind,
+    parse_recovery_secret_name, recovery_kind,
 };
 
 impl Store {
@@ -250,7 +250,7 @@ fn scan_integrity<D: ReadableDatabase>(
         let entry = entry?;
         let path = secrets_dir.join(entry.file_name());
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        if recovery_kind(&file_name).is_some() {
+        if parse_recovery_secret_name(&file_name).is_some() {
             if !directory.metadata(Path::new(&entry.file_name()))?.is_file() {
                 return Err(Error::Config(format!(
                     "recovery path is not a regular file: {}",
@@ -259,6 +259,12 @@ fn scan_integrity<D: ReadableDatabase>(
             }
             recovery_secret_files.push(file_name);
             continue;
+        }
+        if recovery_kind(&file_name).is_some() {
+            return Err(Error::Config(format!(
+                "invalid recovery file: {}",
+                path.display()
+            )));
         }
         if path.extension().is_none_or(|extension| extension != "gpg") {
             continue;

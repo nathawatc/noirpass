@@ -186,7 +186,10 @@ pub(crate) fn parse_recovery_secret_name(file_name: &str) -> Option<(&'static st
     let rest = &file_name[".noirpass-".len() + kind.len() + 1..];
     let (id, suffix) = rest.split_once('-')?;
     let valid_token = suffix.strip_suffix(".gpg").is_some_and(|token| {
-        token.len() == 16 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        token.len() == 16
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     });
     (is_valid_item_id(id) && valid_token).then_some((kind, id))
 }

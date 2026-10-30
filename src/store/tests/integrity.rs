@@ -291,12 +291,23 @@ fn integrity_blocks_ciphertext_digest_mismatch() {
 fn integrity_reports_recoverable_quarantine_files() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let file = ".noirpass-quarantine-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1.gpg";
+    let file = ".noirpass-quarantine-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0000000000000001.gpg";
     fs::write(store.secrets_dir.join(file), b"ciphertext").unwrap();
 
     let report = store.check_integrity().unwrap();
     assert_eq!(report.recovery_secret_files, vec![file.to_string()]);
     assert!(!report.is_healthy());
+}
+
+#[test]
+fn integrity_rejects_lookalike_recovery_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let file = ".noirpass-quarantine-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1.gpg";
+    fs::write(store.secrets_dir.join(file), b"ciphertext").unwrap();
+
+    let err = store.check_integrity().unwrap_err();
+    assert!(err.to_string().contains("invalid recovery file"));
 }
 
 #[test]
