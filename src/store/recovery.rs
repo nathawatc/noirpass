@@ -7,7 +7,7 @@ use redb::ReadableDatabase;
 
 use crate::error::{Error, Result};
 
-use super::{ITEMS, Store, ciphertext_sha256, is_valid_item_id};
+use super::{ITEMS, Store, ciphertext_sha256, parse_recovery_secret_name, recovery_kind};
 
 impl Store {
     /// Reconcile interrupted update/delete filesystem transactions at startup.
@@ -27,12 +27,10 @@ impl Store {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            if name.starts_with(".noirpass-create-") || name.starts_with(".noirpass-update-") {
-                0
-            } else if name.starts_with(".noirpass-quarantine-") {
-                1
-            } else {
-                2
+            match recovery_kind(name) {
+                Some("create" | "update") => 0,
+                Some("quarantine") => 1,
+                _ => 2,
             }
         });
 
@@ -40,31 +38,17 @@ impl Store {
             let Some(file_name) = recovery.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            let kind = if file_name.starts_with(".noirpass-create-") {
-                "create"
-            } else if file_name.starts_with(".noirpass-update-") {
-                "update"
-            } else if file_name.starts_with(".noirpass-quarantine-") {
-                "quarantine"
-            } else if file_name.starts_with(".noirpass-backup-") {
-                "backup"
-            } else {
+            if recovery_kind(file_name).is_none() {
                 continue;
-            };
-            let prefix = format!(".noirpass-{kind}-");
-            let rest = file_name
-                .strip_prefix(&prefix)
-                .ok_or_else(|| Error::Config(format!("invalid recovery filename: {file_name}")))?;
-            let Some((id, suffix)) = rest.split_once('-') else {
+            }
+            let file_metadata = self.secret_metadata(&recovery)?;
+            let Some((kind, id)) = parse_recovery_secret_name(file_name) else {
                 return Err(Error::Config(format!(
-                    "invalid recovery filename: {file_name}"
+                    "invalid recovery file: {}",
+                    recovery.display()
                 )));
             };
-            let file_metadata = self.secret_metadata(&recovery)?;
-            let valid_suffix = suffix.strip_suffix(".gpg").is_some_and(|token| {
-                token.len() == 16 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
-            });
-            if !is_valid_item_id(id) || !valid_suffix || !file_metadata.file_type().is_file() {
+            if !file_metadata.file_type().is_file() {
                 return Err(Error::Config(format!(
                     "invalid recovery file: {}",
                     recovery.display()

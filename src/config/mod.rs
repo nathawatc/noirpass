@@ -17,7 +17,6 @@ const KEYS_DIR: &str = "keys";
 const RECIPIENT_REL: &str = "keys/recipient.pgp";
 const SECRETS_DIR: &str = "secrets";
 const CONFIG_VERSION: i64 = 1;
-const RECOVERY_KINDS: [&str; 4] = ["create", "update", "quarantine", "backup"];
 /// Default daemon inactivity timeout in seconds.
 pub const DEFAULT_IDLE_EXIT_SECONDS: i64 = 300;
 const INIT_HINT: &str = "run noirpass init --recipient ...";
@@ -90,8 +89,11 @@ mod startup;
 mod status;
 
 pub use deinit::deinit;
-pub use format::{config_path, recipient_cert_path};
-pub use init::{init_from_bytes, init_from_path, init_from_reader, init_store_from_path};
+#[cfg(test)]
+use format::{config_path, recipient_cert_path};
+#[cfg(test)]
+use init::init_from_bytes;
+pub use init::init_store_from_path;
 pub use startup::open_startup_store;
 pub use status::{load_recipient, status};
 

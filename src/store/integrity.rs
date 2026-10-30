@@ -12,6 +12,7 @@ use crate::filesystem::Directory;
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, ITEMS, IndexedItem,
     IntegrityReport, ItemMeta, Store, ciphertext_sha256, is_valid_collection_id, is_valid_item_id,
+    recovery_kind,
 };
 
 impl Store {
@@ -57,9 +58,12 @@ impl Store {
     }
 
     /// Cross-check an existing store without acquiring its writer lock.
-    pub(crate) fn probe_integrity(dir: &Path) -> Result<IntegrityReport> {
-        let (secrets_dir, index_path) = super::existing_store_paths(dir)?;
-        let db = match super::open_readonly_database_nofollow(&index_path) {
+    pub(crate) fn probe_integrity_in(dir: &Path, root: &Directory) -> Result<IntegrityReport> {
+        let (secrets_dir, secrets_directory) = super::open_existing_secrets(dir, root)?;
+        let index = root
+            .open_regular(Path::new("index.redb"), libc::O_RDONLY, 0)
+            .map_err(DatabaseError::from)?;
+        let db = match super::open_readonly_database_file(&index) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => {
                 // The running daemon already passed startup integrity admission. Preserve the
@@ -68,7 +72,13 @@ impl Store {
             }
             Err(err) => return Err(err.into()),
         };
-        scan_integrity(&db, &secrets_dir, &Directory::open(&secrets_dir)?, None)
+        scan_integrity(&db, &secrets_dir, &secrets_directory, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_integrity(dir: &Path) -> Result<IntegrityReport> {
+        let root = super::open_existing_root(dir)?;
+        Self::probe_integrity_in(dir, &root)
     }
 }
 
@@ -240,11 +250,7 @@ fn scan_integrity<D: ReadableDatabase>(
         let entry = entry?;
         let path = secrets_dir.join(entry.file_name());
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        if file_name.starts_with(".noirpass-backup-")
-            || file_name.starts_with(".noirpass-quarantine-")
-            || file_name.starts_with(".noirpass-create-")
-            || file_name.starts_with(".noirpass-update-")
-        {
+        if recovery_kind(&file_name).is_some() {
             if !directory.metadata(Path::new(&entry.file_name()))?.is_file() {
                 return Err(Error::Config(format!(
                     "recovery path is not a regular file: {}",

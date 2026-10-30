@@ -6,10 +6,25 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, DEFAULT_COLLECTION_ID, DeletedCollection, Error, ITEMS,
-    ItemMeta, PersistError, Result, Store, definite, is_valid_collection_id, now_secs, random_id,
+    ItemMeta, PersistError, Result, Store, decode_collection, decode_item, definite,
+    is_valid_collection_id, now_secs, random_id,
 };
 
 impl Store {
+    pub(super) fn validate_collection_in_txn(
+        txn: &redb::WriteTransaction,
+        id: &str,
+    ) -> Result<CollectionMeta> {
+        if !is_valid_collection_id(id) {
+            return Err(Error::NotFound(format!("collection {id}")));
+        }
+        let collections = txn.open_table(COLLECTIONS)?;
+        let value = collections
+            .get(id)?
+            .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
+        decode_collection(id, value.value())
+    }
+
     /// Create a new collection with the given label, optionally registering an
     /// alias that points at it.
     pub fn create_collection(&self, label: &str, alias: Option<&str>) -> Result<CollectionMeta> {
@@ -44,17 +59,10 @@ impl Store {
         }
         let txn = self.db.begin_read()?;
         let table = txn.open_table(COLLECTIONS)?;
-        let metadata: CollectionMeta = match table.get(id)? {
-            Some(value) => serde_json::from_slice(value.value())?,
-            None => return Err(Error::NotFound(format!("collection {id}"))),
-        };
-        if metadata.id != id {
-            return Err(Error::Config(format!(
-                "collection metadata id {} does not match table key {id}",
-                metadata.id
-            )));
-        }
-        Ok(metadata)
+        let value = table
+            .get(id)?
+            .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
+        decode_collection(id, value.value())
     }
 
     /// List every collection, in id order.
@@ -65,20 +73,7 @@ impl Store {
         let mut out = Vec::new();
         for entry in table.iter()? {
             let (key, value) = entry?;
-            let table_key = key.value();
-            if !is_valid_collection_id(table_key) {
-                return Err(Error::Config(format!(
-                    "invalid collection id in store: {table_key}"
-                )));
-            }
-            let metadata: CollectionMeta = serde_json::from_slice(value.value())?;
-            if metadata.id != table_key {
-                return Err(Error::Config(format!(
-                    "collection metadata id {} does not match table key {table_key}",
-                    metadata.id
-                )));
-            }
-            out.push(metadata);
+            out.push(decode_collection(key.value(), value.value())?);
         }
         Ok(out)
     }
@@ -91,23 +86,10 @@ impl Store {
             return Err(Error::NotFound(format!("collection {id}")));
         }
         let (mut mutation_guard, txn) = self.begin_write_checked()?;
-        {
-            let collections = txn.open_table(COLLECTIONS)?;
-            let metadata: CollectionMeta = collections
-                .get(id)?
-                .map(|value| serde_json::from_slice(value.value()))
-                .transpose()?
-                .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
-            if metadata.id != id {
-                return Err(Error::Config(format!(
-                    "collection metadata id {} does not match table key {id}",
-                    metadata.id
-                )));
-            }
-        }
+        Self::validate_collection_in_txn(&txn, id)?;
 
         let metadata_to_remove =
-            self.collection_items_locked(&txn, mutation_guard.index.as_ref(), id)?;
+            Self::collection_items_locked(&txn, mutation_guard.index.as_ref(), id)?;
         let item_ids: Vec<_> = metadata_to_remove
             .iter()
             .map(|meta| meta.id.clone())
@@ -159,7 +141,6 @@ impl Store {
     }
 
     fn collection_items_locked(
-        &self,
         txn: &redb::WriteTransaction,
         index: Option<&super::items::ItemIndex>,
         id: &str,
@@ -170,14 +151,7 @@ impl Store {
             let mut collect = |table_key: &str, bytes: &[u8]| -> Result<()> {
                 let metadata: ItemMeta = serde_json::from_slice(bytes)?;
                 if metadata.collection == id {
-                    self.secret_path(table_key)?;
-                    if metadata.id != table_key {
-                        return Err(Error::Config(format!(
-                            "item metadata id {} does not match table key {table_key}",
-                            metadata.id
-                        )));
-                    }
-                    metadata_to_remove.push(metadata);
+                    metadata_to_remove.push(decode_item(table_key, bytes)?);
                 }
                 Ok(())
             };
@@ -212,14 +186,7 @@ impl Store {
                 .get(DEFAULT_COLLECTION_ID)?
                 .map(|value| value.value().to_vec());
             let meta = if let Some(bytes) = existing {
-                let metadata: CollectionMeta = serde_json::from_slice(&bytes)?;
-                if metadata.id != DEFAULT_COLLECTION_ID {
-                    return Err(Error::Config(format!(
-                        "collection metadata id {} does not match table key {DEFAULT_COLLECTION_ID}",
-                        metadata.id
-                    )));
-                }
-                metadata
+                decode_collection(DEFAULT_COLLECTION_ID, &bytes)?
             } else {
                 let now = now_secs();
                 let meta = CollectionMeta {
@@ -249,25 +216,14 @@ impl Store {
             return Err(Error::NotFound(format!("collection {id}")));
         }
         let (mut mutation_guard, txn) = self.begin_write_checked()?;
-        let meta = {
+        let mut meta = Self::validate_collection_in_txn(&txn, id)?;
+        meta.label = label.to_string();
+        meta.modified = now_secs();
+        {
             let mut collections = txn.open_table(COLLECTIONS)?;
-            let bytes = collections
-                .get(id)?
-                .map(|value| value.value().to_vec())
-                .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
-            let mut meta: CollectionMeta = serde_json::from_slice(&bytes)?;
-            if meta.id != id {
-                return Err(Error::Config(format!(
-                    "collection metadata id {} does not match table key {id}",
-                    meta.id
-                )));
-            }
-            meta.label = label.to_string();
-            meta.modified = now_secs();
             let bytes = serde_json::to_vec(&meta)?;
             collections.insert(id, bytes.as_slice())?;
-            meta
-        };
+        }
         self.finish_metadata_commit(txn.commit())?;
         mutation_guard.preserve_index();
         Ok(meta)
@@ -277,21 +233,7 @@ impl Store {
     pub fn set_alias(&self, name: &str, collection_id: Option<&str>) -> Result<()> {
         let (mut mutation_guard, txn) = self.begin_write_checked()?;
         if let Some(id) = collection_id {
-            if !is_valid_collection_id(id) {
-                return Err(Error::NotFound(format!("collection {id}")));
-            }
-            let collections = txn.open_table(COLLECTIONS)?;
-            let metadata: CollectionMeta = collections
-                .get(id)?
-                .map(|value| serde_json::from_slice(value.value()))
-                .transpose()?
-                .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
-            if metadata.id != id {
-                return Err(Error::Config(format!(
-                    "collection metadata id {} does not match table key {id}",
-                    metadata.id
-                )));
-            }
+            Self::validate_collection_in_txn(&txn, id)?;
         }
         {
             let mut aliases = txn.open_table(ALIASES)?;

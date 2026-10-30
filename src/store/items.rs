@@ -33,7 +33,7 @@ impl Store {
             return Err(Error::NotFound(format!("collection {collection}")));
         }
         let (mut mutation_guard, txn) = self.begin_write_checked()?;
-        Self::validate_item_collection(&txn, collection)?;
+        Self::validate_collection_in_txn(&txn, collection)?;
         let metadata = self.create_item_locked(
             txn,
             collection,
@@ -89,7 +89,7 @@ impl Store {
         }
         let (mut mutation_guard, txn) =
             self.begin_write_checked_after_initial_check(after_initial_check)?;
-        Self::validate_item_collection(&txn, collection)?;
+        Self::validate_collection_in_txn(&txn, collection)?;
         let existing = if replace {
             Self::find_item_by_attrs_exact_locked(
                 &txn,
@@ -130,22 +130,6 @@ impl Store {
         }
         mutation_guard.preserve_index();
         Ok(result)
-    }
-
-    fn validate_item_collection(txn: &redb::WriteTransaction, collection: &str) -> Result<()> {
-        let collections = txn.open_table(COLLECTIONS)?;
-        let metadata: CollectionMeta = collections
-            .get(collection)?
-            .map(|value| serde_json::from_slice(value.value()))
-            .transpose()?
-            .ok_or_else(|| Error::NotFound(format!("collection {collection}")))?;
-        if metadata.id != collection {
-            return Err(Error::Config(format!(
-                "collection metadata id {} does not match table key {collection}",
-                metadata.id
-            )));
-        }
-        Ok(())
     }
 
     fn touch_item_collection(

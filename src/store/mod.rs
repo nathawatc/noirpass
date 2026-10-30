@@ -20,10 +20,7 @@ use redb::{Database, DatabaseError, ReadOnlyDatabase, ReadableDatabase, TableDef
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{
-    Directory, create_directory_all_nofollow, open_regular_read_nofollow, open_regular_rw_nofollow,
-    validate_no_symlink_components,
-};
+use crate::filesystem::{Directory, create_directory_all_nofollow, validate_no_symlink_components};
 use crate::now_secs;
 
 mod collections;
@@ -143,25 +140,20 @@ fn definite<E: Into<Error>>(error: E) -> PersistError {
     PersistError::Definite(error.into())
 }
 
-/// Lowercase hex encoding of a byte slice.
-fn to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
+/// Lowercase hex SHA-256 digest of `ciphertext`.
+fn ciphertext_sha256(ciphertext: &[u8]) -> String {
+    use std::fmt::Write as _;
+    Sha256::digest(ciphertext)
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 /// A fresh random 128-bit identifier rendered as 32 hex characters.
-fn ciphertext_sha256(ciphertext: &[u8]) -> String {
-    to_hex(&Sha256::digest(ciphertext))
-}
-
 fn random_id() -> String {
-    let bytes: [u8; 16] = rand::random();
-    to_hex(&bytes)
+    format!("{:032x}", rand::random::<u128>())
 }
 
 /// Whether `id` is a canonical item identifier safe for use as a filename.
@@ -169,11 +161,34 @@ fn is_valid_collection_id(id: &str) -> bool {
     id == DEFAULT_COLLECTION_ID || is_valid_item_id(id)
 }
 
-fn is_valid_item_id(id: &str) -> bool {
+const RECOVERY_KINDS: [&str; 4] = ["create", "update", "quarantine", "backup"];
+
+/// Whether `id` is a canonical 32-character lowercase hexadecimal item id.
+#[must_use]
+pub fn is_valid_item_id(id: &str) -> bool {
     id.len() == 32
         && id
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub(crate) fn recovery_kind(file_name: &str) -> Option<&'static str> {
+    RECOVERY_KINDS.into_iter().find(|kind| {
+        file_name
+            .strip_prefix(".noirpass-")
+            .and_then(|rest| rest.strip_prefix(kind))
+            .is_some_and(|rest| rest.starts_with('-'))
+    })
+}
+
+pub(crate) fn parse_recovery_secret_name(file_name: &str) -> Option<(&'static str, &str)> {
+    let kind = recovery_kind(file_name)?;
+    let rest = &file_name[".noirpass-".len() + kind.len() + 1..];
+    let (id, suffix) = rest.split_once('-')?;
+    let valid_token = suffix.strip_suffix(".gpg").is_some_and(|token| {
+        token.len() == 16 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    (is_valid_item_id(id) && valid_token).then_some((kind, id))
 }
 
 fn secret_path(secrets_dir: &Path, id: &str) -> Result<PathBuf> {
@@ -181,6 +196,22 @@ fn secret_path(secrets_dir: &Path, id: &str) -> Result<PathBuf> {
         return Err(Error::Config(format!("invalid item id in store: {id}")));
     }
     Ok(secrets_dir.join(format!("{id}.gpg")))
+}
+
+fn decode_collection(table_key: &str, value: &[u8]) -> Result<CollectionMeta> {
+    if !is_valid_collection_id(table_key) {
+        return Err(Error::Config(format!(
+            "invalid collection id in store: {table_key}"
+        )));
+    }
+    let metadata: CollectionMeta = serde_json::from_slice(value)?;
+    if metadata.id != table_key {
+        return Err(Error::Config(format!(
+            "collection metadata id {} does not match table key {table_key}",
+            metadata.id
+        )));
+    }
+    Ok(metadata)
 }
 
 fn decode_item(table_key: &str, value: &[u8]) -> Result<ItemMeta> {
@@ -199,13 +230,6 @@ fn decode_item(table_key: &str, value: &[u8]) -> Result<ItemMeta> {
     Ok(metadata)
 }
 
-/// Open redb through a verified no-follow descriptor.
-fn open_readonly_database_nofollow(
-    path: &Path,
-) -> std::result::Result<ReadOnlyDatabase, DatabaseError> {
-    open_readonly_database_file(&open_regular_read_nofollow(path).map_err(DatabaseError::from)?)
-}
-
 fn open_readonly_database_file(
     file: &fs::File,
 ) -> std::result::Result<ReadOnlyDatabase, DatabaseError> {
@@ -214,34 +238,47 @@ fn open_readonly_database_file(
     ReadOnlyDatabase::open(proc_path)
 }
 
-/// Validate store paths without opening redb.
-fn existing_store_paths(dir: &Path) -> Result<(PathBuf, PathBuf)> {
+fn open_existing_root(dir: &Path) -> Result<Directory> {
     validate_no_symlink_components(dir)?;
-    let store_metadata = fs::symlink_metadata(dir)?;
-    if !store_metadata.is_dir() {
+    if !fs::symlink_metadata(dir)?.is_dir() {
         return Err(Error::Config(format!(
             "store path is not a directory: {}",
             dir.display()
         )));
     }
+    Ok(Directory::open(dir)?)
+}
 
+fn open_existing_secrets(dir: &Path, root: &Directory) -> Result<(PathBuf, Directory)> {
     let secrets_dir = dir.join("secrets");
-    let secrets_meta = fs::symlink_metadata(&secrets_dir)?;
-    if !secrets_meta.is_dir() {
+    if !root.metadata(Path::new("secrets"))?.is_dir() {
         return Err(Error::Config(format!(
             "store secrets path is not a directory: {}",
             secrets_dir.display()
         )));
     }
-    let _ = fs::read_dir(&secrets_dir)?;
-
-    let index_path = dir.join("index.redb");
-    let _ = open_regular_rw_nofollow(&index_path)?;
-
-    Ok((secrets_dir, index_path))
+    let secrets_directory = root.child(Path::new("secrets"))?;
+    let _ = secrets_directory.read_dir()?;
+    let _ = root.open_regular(Path::new("index.redb"), libc::O_RDWR, 0)?;
+    Ok((secrets_dir, secrets_directory))
 }
 
 impl Store {
+    fn from_parts(db: Database, secrets_dir: PathBuf, secrets_directory: Directory) -> Self {
+        Self {
+            db,
+            secrets_dir,
+            secrets_directory,
+            poisoned: AtomicBool::new(false),
+            write_aborted: AtomicBool::new(false),
+            poison_changed: tokio::sync::Notify::new(),
+            transaction_gate: RwLock::new(()),
+            item_index: RwLock::new(None),
+            #[cfg(test)]
+            file_failures: std::sync::Mutex::default(),
+        }
+    }
+
     fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
         self.poison_changed.notify_waiters();
@@ -399,18 +436,7 @@ impl Store {
         // redb syncs index contents; persist the index and secrets directory entries too.
         sync_root(&db)?;
 
-        Ok(Self {
-            db,
-            secrets_directory,
-            secrets_dir,
-            poisoned: AtomicBool::new(false),
-            write_aborted: AtomicBool::new(false),
-            poison_changed: tokio::sync::Notify::new(),
-            transaction_gate: RwLock::new(()),
-            item_index: RwLock::new(None),
-            #[cfg(test)]
-            file_failures: std::sync::Mutex::default(),
-        })
+        Ok(Self::from_parts(db, secrets_dir, secrets_directory))
     }
 
     /// Open an already initialized store without creating files or directories.
@@ -419,8 +445,8 @@ impl Store {
     /// second empty store. The redb writer lock also prevents offline mutation
     /// while the daemon is using the same index.
     pub fn open_existing(dir: &Path) -> Result<Self> {
-        existing_store_paths(dir)?;
-        let root = Directory::open(dir)?;
+        let root = open_existing_root(dir)?;
+        let _ = open_existing_secrets(dir, &root)?;
         Self::open_existing_in(dir, &root)
     }
 
@@ -452,24 +478,15 @@ impl Store {
             txn.open_table(ITEMS)?;
             txn.open_table(ALIASES)?;
         }
-        Ok(Self {
-            db,
-            secrets_directory,
-            secrets_dir,
-            poisoned: AtomicBool::new(false),
-            write_aborted: AtomicBool::new(false),
-            poison_changed: tokio::sync::Notify::new(),
-            transaction_gate: RwLock::new(()),
-            item_index: RwLock::new(None),
-            #[cfg(test)]
-            file_failures: std::sync::Mutex::default(),
-        })
+        Ok(Self::from_parts(db, secrets_dir, secrets_directory))
     }
 
     /// Check whether an existing store is usable without mutating it.
-    pub fn probe_health(dir: &Path) -> Result<()> {
-        existing_store_paths(dir)?;
-        Self::probe_health_in(&Directory::open(dir)?)
+    #[cfg(test)]
+    pub(super) fn probe_health(dir: &Path) -> Result<()> {
+        let root = open_existing_root(dir)?;
+        let _ = open_existing_secrets(dir, &root)?;
+        Self::probe_health_in(&root)
     }
 
     pub(crate) fn probe_health_in(root: &Directory) -> Result<()> {

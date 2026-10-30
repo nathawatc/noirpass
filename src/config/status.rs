@@ -6,14 +6,11 @@ use std::path::Path;
 use sequoia_openpgp::Cert;
 
 use crate::error::{Error, Result};
-use crate::filesystem::{
-    Directory, path_entry_exists, read_regular_file_nofollow, validate_no_symlink_components,
-};
+use crate::filesystem::{Directory, validate_no_symlink_components};
 use crate::gpg::{has_usable_encryption_key, parse_recipient_cert};
 use crate::store::Store;
 
-use super::format::{config_path, recipient_cert_path_from_config};
-use super::{CONFIG_VERSION, Config, INIT_HINT, Recipient, Status};
+use super::{CONFIG_FILE, CONFIG_VERSION, Config, INIT_HINT, Recipient, Status};
 
 pub(super) fn load_configured_recipient_in(
     data_dir: &Path,
@@ -87,9 +84,16 @@ pub fn status(data_dir: &Path) -> Status {
         out.errors.push(format!("store path is unsafe: {err}"));
         return out;
     }
-    out.config_present = path_entry_exists(&config_path(data_dir)).unwrap_or(false);
+    let root = match Directory::open(data_dir).map_err(super::format::uninitialized_or_io) {
+        Ok(root) => root,
+        Err(err) => {
+            out.errors.push(err.to_string());
+            return out;
+        }
+    };
+    out.config_present = root.entry_exists(Path::new(CONFIG_FILE)).unwrap_or(false);
 
-    let config = match Config::load(data_dir) {
+    let config = match Config::load_in(&root) {
         Ok(config) => {
             out.config_valid = true;
             out.configured_fingerprint = Some(config.recipient_fingerprint.clone());
@@ -108,10 +112,12 @@ pub fn status(data_dir: &Path) -> Status {
     };
 
     if let Some(config) = config {
-        match recipient_cert_path_from_config(data_dir, &config.recipient_cert) {
-            Ok(cert_path) => {
-                out.recipient_cert_present = path_entry_exists(&cert_path).unwrap_or(false);
-                match read_regular_file_nofollow(&cert_path) {
+        let cert_path = data_dir.join(&config.recipient_cert);
+        match super::format::validate_regular_in(&root, &config.recipient_cert) {
+            Ok(()) => {
+                out.recipient_cert_present =
+                    root.entry_exists(&config.recipient_cert).unwrap_or(false);
+                match root.read_regular(&config.recipient_cert) {
                     Ok(bytes) => match parse_recipient_cert(&bytes) {
                         Ok(cert) => {
                             let actual = cert.fingerprint().to_hex();
@@ -150,7 +156,7 @@ pub fn status(data_dir: &Path) -> Status {
         && out.fingerprint_matches == Some(true)
         && out.cert_has_encryption_key == Some(true)
     {
-        match Store::probe_integrity(data_dir) {
+        match Store::probe_integrity_in(data_dir, &root) {
             Ok(report) if report.is_healthy() => {}
             Ok(_) => out.errors.push(
                 "store integrity check failed; run `noirpass check` before starting daemon".into(),

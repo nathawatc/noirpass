@@ -15,13 +15,15 @@ use crate::service::session_path;
 
 impl ServiceState {
     /// Number of currently open sessions.
+    #[cfg(test)]
     #[must_use]
-    pub fn session_count(&self) -> usize {
+    pub(in crate::service) fn session_count(&self) -> usize {
         self.sessions.lock().expect("session lock poisoned").len()
     }
 
     /// Register a session cipher for the opening client's unique bus name.
-    pub fn register_session(
+    #[cfg(test)]
+    pub(in crate::service) fn register_session(
         &self,
         cipher: SessionCipher,
         owner: String,

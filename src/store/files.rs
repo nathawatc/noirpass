@@ -4,7 +4,7 @@ mod artifacts;
 mod transactions;
 
 use std::fs::{File, Metadata};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -79,18 +79,8 @@ impl Store {
     }
 
     pub(super) fn read_secret_path(&self, path: &Path) -> io::Result<Vec<u8>> {
-        let mut file =
-            self.secrets_directory
-                .open_file(self.secret_entry(path)?, libc::O_RDONLY, 0)?;
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "secret path is not a regular file",
-            ));
-        }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        self.secrets_directory
+            .read_regular(self.secret_entry(path)?)
     }
 
     pub(super) fn remove_secret_file(&self, path: &Path) -> io::Result<()> {

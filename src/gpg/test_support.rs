@@ -21,18 +21,7 @@ pub struct TestGnupg {
 
 impl TestGnupg {
     pub fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
-
-        // Allow loopback pinentry so key generation with an empty
-        // passphrase works headlessly.
-        fs::write(
-            dir.path().join("gpg-agent.conf"),
-            "allow-loopback-pinentry\n",
-        )
-        .unwrap();
-
-        Self::from_dir_with(dir, |path| {
+        Self::from_dir_with(|path| {
             let status = Command::new("gpg")
                 .args(["--batch", "--no-tty", "--homedir"])
                 .arg(path)
@@ -54,16 +43,7 @@ impl TestGnupg {
     }
 
     pub fn import(cert: &Cert) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
-
-        fs::write(
-            dir.path().join("gpg-agent.conf"),
-            "allow-loopback-pinentry\n",
-        )
-        .unwrap();
-
-        Self::from_dir_with(dir, |path| {
+        Self::from_dir_with(|path| {
             let mut tsk = Vec::new();
             cert.as_tsk().serialize(&mut tsk).unwrap();
             let mut child = Command::new("gpg")
@@ -79,7 +59,16 @@ impl TestGnupg {
         })
     }
 
-    fn from_dir_with(dir: tempfile::TempDir, init: impl FnOnce(&Path)) -> Self {
+    fn from_dir_with(init: impl FnOnce(&Path)) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        // Allow loopback pinentry so key generation with an empty
+        // passphrase works headlessly.
+        fs::write(
+            dir.path().join("gpg-agent.conf"),
+            "allow-loopback-pinentry\n",
+        )
+        .unwrap();
         init(dir.path());
         let status = Command::new("gpg")
             .args(["--batch", "--no-tty", "--homedir"])
@@ -144,21 +133,14 @@ fn secret_fingerprint(homedir: &Path) -> String {
         .expect("gpg list secret keys");
     assert!(output.status.success(), "gpg --list-secret-keys failed");
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut seen_sec = false;
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        match fields.first().copied() {
-            Some("sec") => seen_sec = true,
-            Some("fpr") if seen_sec => {
-                if let Some(fpr) = fields.get(9)
-                    && !fpr.is_empty()
-                {
-                    return (*fpr).to_string();
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("test gpg key has no fingerprint")
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip_while(|line| !line.starts_with("sec:"))
+        .find_map(|line| {
+            line.strip_prefix("fpr:")
+                .and_then(|rest| rest.split(':').nth(8))
+        })
+        .filter(|fpr| !fpr.is_empty())
+        .expect("test gpg key has no fingerprint")
+        .to_string()
 }

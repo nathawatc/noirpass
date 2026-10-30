@@ -248,8 +248,9 @@ impl ServiceState {
     }
 
     /// The `OpenPGP` encryption handle.
+    #[cfg(test)]
     #[must_use]
-    pub fn gpg(&self) -> &Gpg {
+    pub(in crate::service) fn gpg(&self) -> &Gpg {
         &self.gpg
     }
 }

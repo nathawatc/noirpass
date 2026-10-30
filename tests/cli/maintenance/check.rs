@@ -158,7 +158,7 @@ fn cli_rejects_mismatched_item_id_without_deleting_valid_item() {
     let store = Store::open_existing(dir.path()).unwrap();
     assert_eq!(store.get_item(&valid_b.id).unwrap(), valid_b);
     assert_eq!(
-        store.read_secret_file(&valid_b.id).unwrap(),
+        store.read_item_secret(&valid_b.id).unwrap().1,
         b"ciphertext-b"
     );
     assert_eq!(store.check_integrity().unwrap().corrupt_items.len(), 1);
@@ -250,7 +250,7 @@ fn cli_check_recovers_quarantined_ciphertext_before_repair() {
     let store = Store::open_existing(dir.path()).unwrap();
     assert_eq!(store.get_item(&item.id).unwrap(), item);
     assert_eq!(
-        store.read_secret_file(&item.id).unwrap(),
+        store.read_item_secret(&item.id).unwrap().1,
         b"recoverable-ciphertext"
     );
     assert!(!quarantine.exists());

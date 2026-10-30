@@ -1,7 +1,8 @@
-use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use noirpass::config::deinit;
+
+use super::confirm_terminal;
 
 pub(super) fn run(store_dir: &Path) -> noirpass::Result<()> {
     eprintln!(
@@ -25,20 +26,8 @@ pub(super) fn run(store_dir: &Path) -> noirpass::Result<()> {
 }
 
 fn confirm_interactive(prompt: &str) -> noirpass::Result<bool> {
-    let stdin = io::stdin();
-    if !stdin.is_terminal() {
-        return Err(noirpass::Error::Config(
-            "deinitialization requires an interactive terminal; piped confirmation is not accepted"
-                .into(),
-        ));
-    }
-
-    eprint!("{prompt} [y/N] ");
-    io::stderr().flush()?;
-    let mut answer = String::new();
-    stdin.read_line(&mut answer)?;
-    Ok(matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    confirm_terminal(
+        prompt,
+        "deinitialization requires an interactive terminal; piped confirmation is not accepted",
+    )
 }

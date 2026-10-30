@@ -22,6 +22,23 @@ pub(super) fn encryption_key_flags() -> KeyFlags {
         .set_transport_encryption()
 }
 
+pub(super) fn usable_encryption_keys<'a>(
+    cert: &'a Cert,
+    policy: &'a StandardPolicy,
+) -> impl Iterator<
+    Item = openpgp::cert::amalgamation::key::ValidErasedKeyAmalgamation<
+        'a,
+        openpgp::packet::key::PublicParts,
+    >,
+> {
+    cert.keys()
+        .with_policy(policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .key_flags(encryption_key_flags())
+}
+
 /// Parse an armored or binary `OpenPGP` recipient certificate.
 pub fn parse_recipient_cert(bytes: &[u8]) -> Result<Cert> {
     Cert::from_bytes(bytes).map_err(pgp_err)
@@ -38,12 +55,5 @@ pub fn cert_to_binary(cert: &Cert) -> Result<Vec<u8>> {
 #[must_use]
 pub fn has_usable_encryption_key(cert: &Cert) -> bool {
     let policy = StandardPolicy::new();
-    cert.keys()
-        .with_policy(&policy, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .key_flags(encryption_key_flags())
-        .next()
-        .is_some()
+    usable_encryption_keys(cert, &policy).next().is_some()
 }

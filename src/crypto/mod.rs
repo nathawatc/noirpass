@@ -91,9 +91,7 @@ impl DhHandshake {
             // 128 random bytes; the group order is ~2^1024 so this is a valid
             // exponent with overwhelming probability.
             let mut buf = Zeroizing::new([0u8; GROUP_BYTES]);
-            for b in &mut *buf {
-                *b = rand::random();
-            }
+            rand::fill(&mut *buf);
             buf
         };
         Self::from_private_bytes(&private_bytes[..])
@@ -167,13 +165,7 @@ impl SessionCipher {
         match self {
             SessionCipher::Plain => (Vec::new(), Zeroizing::new(plaintext.to_vec())),
             SessionCipher::Dh(dh) => {
-                let iv: [u8; 16] = {
-                    let mut buf = [0u8; 16];
-                    for b in &mut buf {
-                        *b = rand::random();
-                    }
-                    buf
-                };
+                let iv: [u8; 16] = rand::random();
                 // Exact padded length: always at least one full padding block.
                 let padded_len = (plaintext.len() / 16 + 1) * 16;
                 let mut buf = Zeroizing::new(vec![0u8; padded_len]);

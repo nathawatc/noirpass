@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 use zbus::export::futures_core::Stream;
 
+use noirpass::config::{init_store_from_path, open_startup_store};
 use noirpass::gpg::Gpg;
 use noirpass::service::session::Session;
 use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
@@ -30,9 +31,7 @@ const CLI_STYLES: Styles = Styles::styled()
 mod check;
 mod deinit;
 mod delete;
-mod init;
 mod list;
-mod startup;
 mod status;
 
 /// Minimal on-demand GPG-backed freedesktop Secret Service.
@@ -113,7 +112,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Some(Command::Init { recipient }) => {
-            return init::run(&store_dir, &recipient).map_err(Into::into);
+            let config = init_store_from_path(&store_dir, &recipient)?;
+            println!("initialized: yes");
+            println!("data directory: {}", store_dir.display());
+            println!("recipient fingerprint: {}", config.recipient_fingerprint);
+            return Ok(());
         }
         Some(Command::Deinit) => return deinit::run(&store_dir).map_err(Into::into),
         Some(Command::Status) => return status::run(&store_dir).await.map_err(Into::into),
@@ -129,7 +132,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(store = %store_dir.display(), "opening store");
 
-    let (store, recipient, idle_exit) = startup::open_store(&store_dir, cli.idle_exit)?;
+    let (store, recipient, config) = open_startup_store(&store_dir)?;
+    let idle_exit = cli.idle_exit.unwrap_or(config.idle_exit);
     store.recover_interrupted_operations()?;
     store.ensure_safe_to_serve()?;
     store.ensure_default()?;
@@ -167,12 +171,16 @@ fn confirm(prompt: &str, assume_yes: bool) -> noirpass::Result<bool> {
     if assume_yes {
         return Ok(true);
     }
+    confirm_terminal(
+        prompt,
+        "interactive confirmation requires a terminal; pass --yes for unattended maintenance",
+    )
+}
+
+fn confirm_terminal(prompt: &str, non_tty_error: &str) -> noirpass::Result<bool> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
-        return Err(noirpass::Error::Config(
-            "interactive confirmation requires a terminal; pass --yes for unattended maintenance"
-                .into(),
-        ));
+        return Err(noirpass::Error::Config(non_tty_error.into()));
     }
 
     eprint!("{prompt} [y/N] ");

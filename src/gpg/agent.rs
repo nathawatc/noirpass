@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 
-use super::cert::{encryption_key_flags, pgp_err};
+use super::cert::{encryption_key_flags, pgp_err, usable_encryption_keys};
 
 pub(super) async fn ensure_recipient_secret_available(
     homedir: Option<&Path>,
@@ -33,14 +33,7 @@ pub(super) async fn ensure_recipient_secret_available(
     let mut agent = Agent::connect_to_agent(&socket).await.map_err(pgp_err)?;
     let policy = StandardPolicy::new();
     let mut checked = 0usize;
-    for ka in cert
-        .keys()
-        .with_policy(&policy, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .key_flags(encryption_key_flags())
-    {
+    for ka in usable_encryption_keys(cert, &policy) {
         checked += 1;
         if agent
             .has_key(ka.key().role_as_unspecified())

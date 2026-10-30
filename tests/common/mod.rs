@@ -1,9 +1,21 @@
 //! Shared child-process and private-bus fixtures for integration tests.
 
 use std::io::{BufRead, BufReader, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+pub struct GnupgAgentGuard(PathBuf);
+
+impl Drop for GnupgAgentGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("gpgconf")
+            .arg("--homedir")
+            .arg(&self.0)
+            .args(["--kill", "gpg-agent"])
+            .status();
+    }
+}
 
 /// Start every Noirpass child with ambient store selection removed.
 pub fn noirpass_command() -> Command {
@@ -13,7 +25,7 @@ pub fn noirpass_command() -> Command {
 }
 
 /// Generate an empty-passphrase key in a fresh, hermetic `GNUPGHOME`.
-pub fn setup_gnupg(dir: &Path) {
+pub fn setup_gnupg(dir: &Path) -> GnupgAgentGuard {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(dir.join("gpg-agent.conf"), "allow-loopback-pinentry\n").unwrap();
@@ -34,6 +46,7 @@ pub fn setup_gnupg(dir: &Path) {
         .status()
         .expect("spawn gpg");
     assert!(status.success(), "gpg --quick-gen-key failed");
+    GnupgAgentGuard(dir.to_path_buf())
 }
 
 fn secret_fingerprint(dir: &Path) -> String {
@@ -44,23 +57,16 @@ fn secret_fingerprint(dir: &Path) -> String {
         .output()
         .expect("spawn gpg --list-secret-keys");
     assert!(output.status.success(), "gpg --list-secret-keys failed");
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut seen_sec = false;
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        match fields.first().copied() {
-            Some("sec") => seen_sec = true,
-            Some("fpr") if seen_sec => {
-                if let Some(fpr) = fields.get(9)
-                    && !fpr.is_empty()
-                {
-                    return (*fpr).to_string();
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("no test secret key fingerprint")
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip_while(|line| !line.starts_with("sec:"))
+        .find_map(|line| {
+            line.strip_prefix("fpr:")
+                .and_then(|rest| rest.split(':').nth(8))
+        })
+        .filter(|fpr| !fpr.is_empty())
+        .expect("no test secret key fingerprint")
+        .to_string()
 }
 
 /// Export the public certificate from an isolated `GnuPG` home.

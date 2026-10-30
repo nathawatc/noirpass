@@ -14,17 +14,10 @@ impl Store {
         self.secret_path(id)?;
         let txn = self.db.begin_read()?;
         let items = txn.open_table(ITEMS)?;
-        let metadata: ItemMeta = match items.get(id)? {
-            Some(value) => serde_json::from_slice(value.value())?,
-            None => return Err(Error::NotFound(format!("item {id}"))),
-        };
-        if metadata.id != id {
-            return Err(Error::Config(format!(
-                "item metadata id {} does not match table key {id}",
-                metadata.id
-            )));
-        }
-        Ok(metadata)
+        let value = items
+            .get(id)?
+            .ok_or_else(|| Error::NotFound(format!("item {id}")))?;
+        decode_item(id, value.value())
     }
 
     /// List every item in `collection`, in id order.

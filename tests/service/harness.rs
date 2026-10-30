@@ -29,7 +29,7 @@ pub(super) fn harness() -> &'static Harness {
 impl Harness {
     fn init() -> Self {
         let gnupg_tmp = tempfile::tempdir().unwrap();
-        setup_gnupg(gnupg_tmp.path());
+        std::mem::forget(setup_gnupg(gnupg_tmp.path()));
         let recipient = export_public_cert(gnupg_tmp.path());
 
         let (dbus, bus_address) = spawn_dbus_daemon();

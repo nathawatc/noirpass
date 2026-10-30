@@ -195,12 +195,17 @@ fn daemon_rejects_path_unsafe_collection_identity() {
     let _ = dbus.wait();
 }
 
-fn startup_test_material() -> (tempfile::TempDir, Vec<u8>, tempfile::TempDir) {
+fn startup_test_material() -> (
+    super::super::common::GnupgAgentGuard,
+    tempfile::TempDir,
+    Vec<u8>,
+    tempfile::TempDir,
+) {
     let gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(gnupg.path());
+    let agent = setup_gnupg(gnupg.path());
     let cert = export_public_cert(gnupg.path());
     let (fake_gpg, _) = super::super::common::fake_gpg_dir();
-    (gnupg, cert, fake_gpg)
+    (agent, gnupg, cert, fake_gpg)
 }
 
 fn remove_default_collection(store_dir: &Path, preserve_alias: bool) {
@@ -236,7 +241,7 @@ fn wait_for_startup_exit(daemon: &mut Child) -> std::process::ExitStatus {
 
 #[test]
 fn daemon_rejects_missing_default_collection_with_dangling_default_alias() {
-    let (gnupg, cert, fake_gpg) = startup_test_material();
+    let (_agent, gnupg, cert, fake_gpg) = startup_test_material();
     let (mut dbus, address) = spawn_dbus_daemon();
     let store = tempfile::tempdir().unwrap();
     init_noirpass_store(store.path(), &cert);
@@ -272,7 +277,7 @@ fn daemon_rejects_missing_default_collection_with_dangling_default_alias() {
 
 #[test]
 fn daemon_rejects_missing_default_collection_with_item_owner() {
-    let (gnupg, cert, fake_gpg) = startup_test_material();
+    let (_agent, gnupg, cert, fake_gpg) = startup_test_material();
     let (mut dbus, address) = spawn_dbus_daemon();
     let store = tempfile::tempdir().unwrap();
     init_noirpass_store(store.path(), &cert);
@@ -311,7 +316,7 @@ fn daemon_rejects_missing_default_collection_with_item_owner() {
     assert!(persisted.get_collection("default").is_err());
     assert_eq!(persisted.get_item(&item.id).unwrap().collection, "default");
     assert_eq!(
-        persisted.read_secret_file(&item.id).unwrap(),
+        persisted.read_item_secret(&item.id).unwrap().1,
         b"valid-ciphertext"
     );
     let report = persisted.check_integrity().unwrap();
@@ -324,7 +329,7 @@ fn daemon_rejects_missing_default_collection_with_item_owner() {
 
 #[test]
 fn daemon_bootstraps_default_collection_after_safe_admission() {
-    let (gnupg, cert, fake_gpg) = startup_test_material();
+    let (_agent, gnupg, cert, fake_gpg) = startup_test_material();
     let (mut dbus, address) = spawn_dbus_daemon();
     let store = tempfile::tempdir().unwrap();
     init_noirpass_store(store.path(), &cert);
@@ -380,7 +385,7 @@ fn daemon_rejects_store_with_missing_index() {
 fn daemon_rejects_recipient_without_matching_secret_key() {
     let h = harness();
     let other_gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(other_gnupg.path());
+    let _other_agent = setup_gnupg(other_gnupg.path());
     let other_cert = export_public_cert(other_gnupg.path());
     let (mut dbus, address) = spawn_dbus_daemon();
     let store = tempfile::tempdir().unwrap();

@@ -59,10 +59,10 @@ fn spawn_init(store: &Path, recipient: &Path) -> Child {
 #[test]
 fn cli_serializes_concurrent_fresh_init_before_writing() {
     let first_gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(first_gnupg.path());
+    let _first_agent = setup_gnupg(first_gnupg.path());
     let first_cert = export_public_cert(first_gnupg.path());
     let second_gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(second_gnupg.path());
+    let _second_agent = setup_gnupg(second_gnupg.path());
     let second_cert = export_public_cert(second_gnupg.path());
 
     let recipients = tempfile::tempdir().unwrap();
@@ -137,7 +137,7 @@ fn cli_serializes_concurrent_fresh_init_before_writing() {
 #[test]
 fn cli_init_rejects_busy_existing_store_before_writing() {
     let gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(gnupg.path());
+    let _agent = setup_gnupg(gnupg.path());
     let initial_cert = export_public_cert(gnupg.path());
     let store = tempfile::tempdir().unwrap();
     init_noirpass_store(store.path(), &initial_cert);
@@ -202,7 +202,7 @@ fn cli_init_rejects_busy_existing_store_before_writing() {
 #[test]
 fn cli_init_refreshes_unlocked_existing_store() {
     let gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(gnupg.path());
+    let _agent = setup_gnupg(gnupg.path());
     let initial_cert = export_public_cert(gnupg.path());
     let store = tempfile::tempdir().unwrap();
     init_noirpass_store(store.path(), &initial_cert);
@@ -236,9 +236,9 @@ fn cli_init_refreshes_unlocked_existing_store() {
 #[test]
 fn cli_init_rejects_different_primary_without_writing() {
     let first_gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(first_gnupg.path());
+    let _first_agent = setup_gnupg(first_gnupg.path());
     let second_gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(second_gnupg.path());
+    let _second_agent = setup_gnupg(second_gnupg.path());
     let store = tempfile::tempdir().unwrap();
     init_noirpass_store(store.path(), &export_public_cert(first_gnupg.path()));
     let config_before = fs::read(store.path().join("config.toml")).unwrap();
@@ -270,7 +270,7 @@ fn cli_init_rejects_different_primary_without_writing() {
 #[test]
 fn cli_init_rejects_store_with_missing_index() {
     let gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(gnupg.path());
+    let _agent = setup_gnupg(gnupg.path());
     let store = tempfile::tempdir().unwrap();
     let cert = export_public_cert(gnupg.path());
     init_noirpass_store(store.path(), &cert);
@@ -342,7 +342,7 @@ fn cli_init_invalid_recipient_does_not_create_store() {
 #[test]
 fn cli_init_stdin_and_status_exit_codes() {
     let gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(gnupg.path());
+    let _agent = setup_gnupg(gnupg.path());
     let cert = export_public_cert(gnupg.path());
     let store = tempfile::tempdir().unwrap();
 

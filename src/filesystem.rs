@@ -247,22 +247,6 @@ fn open_path(path: &Path, flags: i32, mode: u32) -> io::Result<File> {
     open_beneath(&base, relative, flags, mode)
 }
 
-pub(crate) fn open_regular_read_nofollow(path: &Path) -> io::Result<File> {
-    regular_file(open_path(path, libc::O_RDONLY, 0)?, path)
-}
-
-pub(crate) fn open_regular_rw_nofollow(path: &Path) -> io::Result<File> {
-    regular_file(open_path(path, libc::O_RDWR, 0)?, path)
-}
-
-/// Read one regular file through a no-follow descriptor.
-pub(crate) fn read_regular_file_nofollow(path: &Path) -> io::Result<Vec<u8>> {
-    let mut file = open_regular_read_nofollow(path)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
 /// Reject symlink components already present in `path`.
 pub(crate) fn validate_no_symlink_components(path: &Path) -> io::Result<()> {
     let mut current = PathBuf::new();
@@ -288,29 +272,6 @@ pub(crate) fn validate_no_symlink_components(path: &Path) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Validate an existing regular file, or an absent path, without following symlinks.
-pub(crate) fn validate_existing_regular_or_absent(path: &Path) -> io::Result<()> {
-    validate_no_symlink_components(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(()),
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path is not a regular file: {}", path.display()),
-        )),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-/// Whether an entry exists, inspecting its final component without following it.
-pub(crate) fn path_entry_exists(path: &Path) -> io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
-    }
 }
 
 /// Create each component relative to its opened parent, without symlink traversal.
@@ -406,10 +367,14 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("value"), b"untouched").unwrap();
         symlink(&outside, owned.join("link")).unwrap();
-        assert!(open_regular_read_nofollow(&owned.join("link/value")).is_err());
         assert!(create_directory_all_nofollow(&owned.join("link/new"), 0o700).is_err());
         assert!(create_directory_all_nofollow(&owned.join("../outside/new"), 0o700).is_err());
         let directory = Directory::open(&owned).unwrap();
+        assert!(
+            directory
+                .open_regular(Path::new("link/value"), libc::O_RDONLY, 0)
+                .is_err()
+        );
         assert!(
             directory
                 .open_file(Path::new("../outside/value"), libc::O_RDONLY, 0)
@@ -433,7 +398,11 @@ mod tests {
                 .hard_link(Path::new("../outside/value"), Path::new("copy"))
                 .is_err()
         );
-        assert!(open_regular_read_nofollow(&owned).is_err());
+        assert!(
+            directory
+                .open_regular(Path::new("."), libc::O_RDONLY, 0)
+                .is_err()
+        );
         assert_eq!(fs::read(outside.join("value")).unwrap(), b"untouched");
         assert!(!outside.join("new").exists());
     }

@@ -6,7 +6,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{Directory, validate_no_symlink_components};
+use crate::filesystem::Directory;
+#[cfg(test)]
+use crate::filesystem::validate_no_symlink_components;
 use crate::gpg::{cert_to_binary, has_usable_encryption_key, parse_recipient_cert};
 use crate::store::Store;
 use sequoia_openpgp::Cert;
@@ -147,24 +149,9 @@ pub(super) fn init_store_with(
     Ok(config)
 }
 
-/// Import an armored or binary recipient cert from `reader`.
-pub fn init_from_reader(data_dir: &Path, mut reader: impl Read) -> Result<Config> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    init_from_bytes(data_dir, &bytes)
-}
-
-/// Import an armored or binary recipient cert from `path`, or stdin for `-`.
-pub fn init_from_path(data_dir: &Path, path: &str) -> Result<Config> {
-    if path == "-" {
-        init_from_reader(data_dir, io::stdin().lock())
-    } else {
-        init_from_reader(data_dir, fs::File::open(path)?)
-    }
-}
-
 /// Import an armored or binary recipient cert from bytes.
-pub fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
+#[cfg(test)]
+pub(super) fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     validate_no_symlink_components(data_dir)?;
     let cert = parse_usable_recipient(bytes)?;
     let root = super::open_lifecycle_directory(data_dir)?;

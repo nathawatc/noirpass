@@ -9,17 +9,6 @@ use crate::common::{export_public_cert, init_noirpass_store, noirpass_command, s
 
 #[test]
 fn cli_status_finds_agent_for_gnupg_home_spellings() {
-    struct AgentHome(PathBuf);
-    impl Drop for AgentHome {
-        fn drop(&mut self) {
-            let _ = Command::new("gpgconf")
-                .arg("--homedir")
-                .arg(&self.0)
-                .args(["--kill", "gpg-agent"])
-                .status();
-        }
-    }
-
     for spelling in ["plain", "slash", "dot", "tilde"] {
         // Each spelling starts its own agent; an agent for the plain spelling
         // must not hide a wrong hash for the absolute /. spelling.
@@ -32,16 +21,16 @@ fn cli_status_finds_agent_for_gnupg_home_spellings() {
             "dot" => agent_home.push("/."),
             _ => {}
         }
-        let agent = AgentHome(PathBuf::from(agent_home));
-        setup_gnupg(&agent.0);
-        let cert = export_public_cert(&agent.0);
+        let agent_home = PathBuf::from(agent_home);
+        let _agent = setup_gnupg(&agent_home);
+        let cert = export_public_cert(&agent_home);
         let store = fixture.path().join("store");
         fs::create_dir(&store).unwrap();
         init_noirpass_store(&store, &cert);
         let selected = if spelling == "tilde" {
             PathBuf::from("~/gnupg")
         } else {
-            agent.0.clone()
+            agent_home
         };
         let output = noirpass_command()
             .arg("--store-dir")
@@ -62,7 +51,7 @@ fn cli_status_finds_agent_for_gnupg_home_spellings() {
 #[test]
 fn cli_status_rejects_missing_ciphertext_without_repairing() {
     let gnupg = tempfile::tempdir().unwrap();
-    setup_gnupg(gnupg.path());
+    let _agent = setup_gnupg(gnupg.path());
     let cert = export_public_cert(gnupg.path());
     let dir = tempfile::tempdir().unwrap();
     init_noirpass_store(dir.path(), &cert);

@@ -10,19 +10,12 @@ use openpgp::serialize::stream::{Encryptor, LiteralWriter, Message};
 
 use crate::error::{Error, Result};
 
-use super::cert::{encryption_key_flags, pgp_err};
+use super::cert::{pgp_err, usable_encryption_keys};
 
 pub(super) fn encrypt(cert: &Cert, fingerprint: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
     let policy = StandardPolicy::new();
 
-    let recipients: Vec<_> = cert
-        .keys()
-        .with_policy(&policy, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .key_flags(encryption_key_flags())
-        .collect();
+    let recipients: Vec<_> = usable_encryption_keys(cert, &policy).collect();
 
     if recipients.is_empty() {
         return Err(Error::OpenPgp(format!(

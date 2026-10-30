@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use noirpass::store::Store;
+use noirpass::store::{Store, is_valid_item_id};
 
 use super::confirm;
 
@@ -98,12 +98,7 @@ fn check_and_repair(store: &Store, assume_yes: bool) -> noirpass::Result<bool> {
             &format!("delete corrupt redb entry {}?", item.table_key),
             assume_yes,
         )? {
-            if item.table_key.len() == 32
-                && item
-                    .table_key
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
+            if is_valid_item_id(&item.table_key) {
                 store.delete_item(&item.table_key)?;
             } else {
                 store.delete_item_metadata(&item.table_key)?;

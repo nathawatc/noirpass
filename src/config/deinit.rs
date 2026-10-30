@@ -7,40 +7,18 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::format::{parse_config, validate_recipient_cert_path};
-use super::{
-    CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, RECOVERY_KINDS, SECRETS_DIR,
-};
+use super::{CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, SECRETS_DIR};
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
+use crate::store::{is_valid_item_id, parse_recovery_secret_name};
 use redb::{StorageBackend, backends::FileBackend};
 
-fn is_lower_hex(bytes: &[u8]) -> bool {
-    bytes
-        .iter()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-}
-
 fn is_canonical_secret_name(name: &str) -> bool {
-    name.strip_suffix(".gpg")
-        .is_some_and(|id| id.len() == 32 && is_lower_hex(id.as_bytes()))
+    name.strip_suffix(".gpg").is_some_and(is_valid_item_id)
 }
 
 fn is_recovery_secret_name(name: &str) -> bool {
-    RECOVERY_KINDS.iter().any(|kind| {
-        let prefix = format!(".noirpass-{kind}-");
-        let Some(rest) = name.strip_prefix(&prefix) else {
-            return false;
-        };
-        let Some((id, suffix)) = rest.split_once('-') else {
-            return false;
-        };
-        suffix.strip_suffix(".gpg").is_some_and(|token| {
-            id.len() == 32
-                && is_lower_hex(id.as_bytes())
-                && token.len() == 16
-                && token.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-    })
+    parse_recovery_secret_name(name).is_some()
 }
 
 fn is_config_temporary_name(name: &str) -> bool {

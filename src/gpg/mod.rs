@@ -92,12 +92,8 @@ impl Gpg {
 
     /// Decrypt `ciphertext` produced by `encrypt` via the
     /// running `gpg-agent`.
-    ///
-    /// The blocking Sequoia/agent pipeline is run on a blocking thread so this
-    /// is safe to call from an async context. The agent must be running for the
-    /// configured `GnuPG` home; unlocking the key follows the user's pinentry
-    /// policy (an empty-passphrase key needs no interaction).
-    pub async fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    #[cfg(test)]
+    pub(crate) async fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let cert = self.cert.clone();
         let homedir = self.homedir.clone();
         let ct = ciphertext.to_vec();

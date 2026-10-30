@@ -6,14 +6,17 @@ use std::path::{Component, Path, PathBuf};
 use toml_edit::{DocumentMut, value};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{
-    Directory, create_directory_all_nofollow, validate_existing_regular_or_absent,
-    validate_no_symlink_components,
-};
+#[cfg(test)]
+use crate::filesystem::create_directory_all_nofollow;
+use crate::filesystem::{Directory, validate_no_symlink_components};
+#[cfg(test)]
 use std::fs::Permissions;
+#[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 
-use super::{CONFIG_FILE, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT, RECIPIENT_REL};
+#[cfg(test)]
+use super::RECIPIENT_REL;
+use super::{CONFIG_FILE, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT};
 
 impl Config {
     /// Load `config.toml`.
@@ -35,10 +38,11 @@ impl Config {
     }
 
     /// Write `config.toml`.
-    pub fn write(&self, data_dir: &Path) -> Result<()> {
+    #[cfg(test)]
+    pub(super) fn write(&self, data_dir: &Path) -> Result<()> {
         validate_recipient_cert_path(&self.recipient_cert)?;
         validate_idle_exit(self.idle_exit)?;
-        let _ = recipient_cert_path_from_config(data_dir, &self.recipient_cert)?;
+        validate_no_symlink_components(data_dir)?;
         let directory = create_directory_all_nofollow(data_dir, 0o700)?;
         directory.set_permissions(Permissions::from_mode(0o700))?;
         self.write_in(&directory)
@@ -68,14 +72,16 @@ pub(super) fn uninitialized_or_io(error: io::Error) -> Error {
 }
 
 /// Path to `config.toml`.
+#[cfg(test)]
 #[must_use]
-pub fn config_path(data_dir: &Path) -> PathBuf {
+pub(super) fn config_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CONFIG_FILE)
 }
 
 /// Path to stored recipient certificate.
+#[cfg(test)]
 #[must_use]
-pub fn recipient_cert_path(data_dir: &Path) -> PathBuf {
+pub(super) fn recipient_cert_path(data_dir: &Path) -> PathBuf {
     data_dir.join(RECIPIENT_REL)
 }
 
@@ -92,24 +98,6 @@ pub(super) fn validate_recipient_cert_path(path: &Path) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-pub(super) fn recipient_cert_path_from_config(data_dir: &Path, path: &Path) -> Result<PathBuf> {
-    validate_recipient_cert_path(path)?;
-    let full_path = data_dir.join(path);
-    validate_no_symlink_components(&full_path).map_err(|err| {
-        Error::Config(format!(
-            "configured recipient certificate path is unsafe at {}; refusing to follow symlink: {err}",
-            full_path.display()
-        ))
-    })?;
-    validate_existing_regular_or_absent(&full_path).map_err(|err| {
-        Error::Config(format!(
-            "configured recipient certificate path is not a regular file at {}: {err}",
-            full_path.display()
-        ))
-    })?;
-    Ok(full_path)
 }
 
 // Keep creation, cleanup, publication, and durability on the same opened directory.
