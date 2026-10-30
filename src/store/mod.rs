@@ -166,9 +166,13 @@ const RECOVERY_KINDS: [&str; 4] = ["create", "update", "quarantine", "backup"];
 /// Whether `id` is a canonical 32-character lowercase hexadecimal item id.
 #[must_use]
 pub fn is_valid_item_id(id: &str) -> bool {
-    id.len() == 32
-        && id
-            .bytes()
+    is_lower_hex(id, 32)
+}
+
+/// Whether `s` is exactly `len` lowercase hexadecimal characters.
+pub(crate) fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
@@ -185,12 +189,9 @@ pub(crate) fn parse_recovery_secret_name(file_name: &str) -> Option<(&'static st
     let kind = recovery_kind(file_name)?;
     let rest = &file_name[".noirpass-".len() + kind.len() + 1..];
     let (id, suffix) = rest.split_once('-')?;
-    let valid_token = suffix.strip_suffix(".gpg").is_some_and(|token| {
-        token.len() == 16
-            && token
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    });
+    let valid_token = suffix
+        .strip_suffix(".gpg")
+        .is_some_and(|token| is_lower_hex(token, 16));
     (is_valid_item_id(id) && valid_token).then_some((kind, id))
 }
 

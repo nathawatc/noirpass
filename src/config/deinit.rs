@@ -10,7 +10,7 @@ use super::format::{parse_config, validate_recipient_cert_path};
 use super::{CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, SECRETS_DIR};
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
-use crate::store::{is_valid_item_id, parse_recovery_secret_name};
+use crate::store::{is_lower_hex, is_valid_item_id, parse_recovery_secret_name};
 use redb::{StorageBackend, backends::FileBackend};
 
 fn is_canonical_secret_name(name: &str) -> bool {
@@ -22,9 +22,8 @@ fn is_recovery_secret_name(name: &str) -> bool {
 }
 
 fn is_config_temporary_name(name: &str) -> bool {
-    name.strip_prefix(".noirpass-tmp-").is_some_and(|token| {
-        token.len() == 16 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
+    name.strip_prefix(".noirpass-tmp-")
+        .is_some_and(|token| is_lower_hex(token, 16))
 }
 
 fn existing_directory(path: &Path, description: &str) -> Result<bool> {
