@@ -69,6 +69,11 @@ impl ServiceState {
         self.activity_complete.notified().await;
     }
 
+    /// Wake shutdown selection after background cleanup completes (e.g. session reaping).
+    pub fn notify_activity_completion(&self) {
+        self.activity_complete.notify_one();
+    }
+
     /// Wait until every already-admitted application handler has returned.
     pub async fn wait_for_active_calls(&self) {
         loop {

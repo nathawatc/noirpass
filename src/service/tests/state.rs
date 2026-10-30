@@ -139,6 +139,26 @@ fn zero_idle_exit_waits_for_first_completed_handler() {
 }
 
 #[tokio::test]
+async fn notify_activity_completion_wakes_wait_for_activity_completion() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+
+    let waiting = state.wait_for_activity_completion();
+    tokio::pin!(waiting);
+    std::future::poll_fn(|context| {
+        assert!(waiting.as_mut().poll(context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+
+    state.notify_activity_completion();
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .expect("notify_activity_completion must wake activity completion waiter");
+}
+
+#[tokio::test]
 async fn blocking_work_bounds_decryption_and_rechecks_queued_session() {
     let gnupg = TestGnupg::new();
     let tmp = tempfile::tempdir().unwrap();

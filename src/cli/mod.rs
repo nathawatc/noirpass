@@ -211,9 +211,13 @@ async fn reap_vanished_clients(
             let Ok(args) = signal.args() else { continue };
             // A unique name (":x.y") with no new owner means the client is gone.
             if args.new_owner().is_none() && args.name().starts_with(':') {
-                for path in state.remove_sessions_owned_by(args.name().as_str()) {
-                    debug!(%path, owner = %args.name(), "reaping session of vanished client");
-                    let _ = connection.object_server().remove::<Session, _>(&path).await;
+                let paths = state.remove_sessions_owned_by(args.name().as_str());
+                if !paths.is_empty() {
+                    for path in &paths {
+                        debug!(%path, owner = %args.name(), "reaping session of vanished client");
+                        let _ = connection.object_server().remove::<Session, _>(path).await;
+                    }
+                    state.notify_activity_completion();
                 }
             }
         }

@@ -81,9 +81,6 @@ impl ServiceState {
         for path in &paths {
             sessions.remove(path);
         }
-        if !paths.is_empty() {
-            self.activity_complete.notify_one();
-        }
         paths
     }
 
