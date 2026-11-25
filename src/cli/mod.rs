@@ -71,9 +71,9 @@ enum Command {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Check redb item records against `.gpg` files and offer safe repair.
+    /// Check redb metadata against `.gpg` files and offer safe repair.
     Check {
-        /// Delete every stale redb item record without prompting.
+        /// Delete stale/corrupt entries (including canonical ciphertext) and corrupt aliases without prompting.
         #[arg(short, long)]
         yes: bool,
     },
@@ -105,6 +105,12 @@ pub(crate) async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
+    if cli.command.is_some() && cli.idle_exit.is_some() {
+        return Err(noirpass::Error::Config(
+            "--idle-exit applies only to the daemon and cannot be used with subcommands".into(),
+        )
+        .into());
+    }
     let store_dir = match cli.store_dir {
         Some(dir) => dir,
         None => default_store_dir()?,

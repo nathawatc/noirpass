@@ -180,3 +180,17 @@ fn cli_default_store_dir_precedence_and_fail_closed() {
         assert!(!fixture.path().join(".local").exists());
     }
 }
+
+#[test]
+fn cli_rejects_idle_exit_with_subcommand() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = noirpass_command()
+        .arg("--store-dir")
+        .arg(dir.path())
+        .args(["--idle-exit", "60", "status"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--idle-exit"));
+}
