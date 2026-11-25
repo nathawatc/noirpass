@@ -38,9 +38,9 @@ pub(crate) use integrity::INTEGRITY_CHECK_FAILED_ERROR;
 #[cfg(test)]
 use open::open_existing_root;
 use open::{open_existing_secrets, open_readonly_database_file};
+pub(crate) use records::DeletedCollection;
 pub use records::{
-    CollectionMeta, CorruptCollection, CorruptItem, DeletedCollection, IndexedItem,
-    IntegrityReport, ItemMeta,
+    CollectionMeta, CorruptCollection, CorruptItem, IndexedItem, IntegrityReport, ItemMeta,
 };
 
 pub(crate) fn store_in_use_error(index_path: &Path) -> Error {
@@ -287,7 +287,7 @@ impl Store {
 
     /// Whether an indeterminate database commit requires daemon shutdown.
     #[must_use]
-    pub fn is_poisoned(&self) -> bool {
+    fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
     }
 

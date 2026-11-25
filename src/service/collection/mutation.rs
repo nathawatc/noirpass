@@ -13,8 +13,8 @@ use super::{
 use crate::service::session::Secret;
 use crate::service::{
     ITEM_ATTRIBUTES_PROPERTY, ITEM_INTERFACE, ITEM_LABEL_PROPERTY, SERVICE_PATH,
-    SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError, Service, alias_path,
-    collection_path, emit_property_changed, item_path, object_removed_or_absent, register_item,
+    SESSION_COLLECTION_ID, SecretError, Service, collection_path, emit_property_changed, item_path,
+    object_removed_or_absent, register_item, unregister_alias,
 };
 use zbus::Variant;
 
@@ -173,11 +173,7 @@ impl Collection {
             cleanup_error = Some(err);
         }
         for name in deleted.aliases {
-            if name == SESSION_COLLECTION_ALIAS {
-                continue;
-            }
-            if let Ok(path) = alias_path(&name)
-                && let Err(err) = object_removed_or_absent(server.remove::<Self, _>(&path).await)
+            if let Err(err) = unregister_alias(server, &name).await
                 && cleanup_error.is_none()
             {
                 cleanup_error = Some(err);

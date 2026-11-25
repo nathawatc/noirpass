@@ -93,7 +93,7 @@ impl Directory {
     /// True when the current directory entry `name` refers to the same inode as `other`.
     pub(crate) fn same_entry_as(&self, name: &Path, other: &Self) -> io::Result<bool> {
         let current = self.metadata(name)?;
-        let owned = other.metadata(Path::new("."))?;
+        let owned = other.0.metadata()?;
         Ok((current.dev(), current.ino()) == (owned.dev(), owned.ino()))
     }
 

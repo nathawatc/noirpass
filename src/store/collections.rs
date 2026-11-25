@@ -35,7 +35,11 @@ impl Store {
 
     /// Create a new collection with the given label, optionally registering an
     /// alias that points at it.
-    pub fn create_collection(&self, label: &str, alias: Option<&str>) -> Result<CollectionMeta> {
+    pub(crate) fn create_collection(
+        &self,
+        label: &str,
+        alias: Option<&str>,
+    ) -> Result<CollectionMeta> {
         let now = now_secs();
         let meta = CollectionMeta {
             id: random_hex_id(),
@@ -83,7 +87,7 @@ impl Store {
     /// Delete a collection together with all its items, their `.gpg` files and
     /// any aliases pointing at it. Returns [`Error::NotFound`] if the
     /// collection does not exist.
-    pub fn delete_collection(&self, id: &str) -> Result<DeletedCollection> {
+    pub(crate) fn delete_collection(&self, id: &str) -> Result<DeletedCollection> {
         if !is_valid_collection_id(id) {
             return Err(Error::NotFound(format!("collection {id}")));
         }
@@ -213,7 +217,7 @@ impl Store {
     }
 
     /// Change a collection's label and bump its modified timestamp.
-    pub fn set_collection_label(&self, id: &str, label: &str) -> Result<CollectionMeta> {
+    pub(crate) fn set_collection_label(&self, id: &str, label: &str) -> Result<CollectionMeta> {
         if !is_valid_collection_id(id) {
             return Err(Error::NotFound(format!("collection {id}")));
         }
@@ -262,7 +266,7 @@ impl Store {
     }
 
     /// List every alias as `(name, collection_id)` pairs.
-    pub fn list_aliases(&self) -> Result<Vec<(String, String)>> {
+    pub(crate) fn list_aliases(&self) -> Result<Vec<(String, String)>> {
         self.ensure_not_poisoned()?;
         let txn = self.db.begin_read()?;
         let aliases = txn.open_table(ALIASES)?;

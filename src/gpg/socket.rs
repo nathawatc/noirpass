@@ -151,16 +151,21 @@ pub(super) fn agent_socket(homedir: Option<&Path>) -> Result<PathBuf> {
     };
     // GnuPG deliberately ignores XDG_RUNTIME_DIR. Only probe sockets belonging
     // to this home; never enumerate or connect to other homes' agents.
+    // SAFETY: getuid is thread-safe and always succeeds.
     let uid = unsafe { libc::getuid() };
     for base in ["/run/gnupg", "/run", "/var/run/gnupg", "/var/run"] {
         let mut directory = PathBuf::from(base).join(format!("user/{uid}/gnupg"));
         if let Some(suffix) = &suffix {
             directory.push(suffix);
         }
+        #[allow(
+            clippy::verbose_bit_mask,
+            reason = "0o077 mask expresses group/other permission bits directly"
+        )]
         if let Ok(metadata) = std::fs::metadata(&directory)
             && metadata.is_dir()
             && metadata.uid() == uid
-            && metadata.mode().trailing_zeros() >= 6
+            && metadata.mode() & 0o077 == 0
         {
             let socket = directory.join("S.gpg-agent");
             if std::fs::metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {

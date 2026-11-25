@@ -47,7 +47,7 @@ impl Gpg {
 
     /// Construct a `Gpg` from a cert and explicit `GNUPGHOME` for tests.
     #[must_use]
-    pub fn from_cert_with_homedir(cert: Cert, homedir: Option<PathBuf>) -> Self {
+    pub(crate) fn from_cert_with_homedir(cert: Cert, homedir: Option<PathBuf>) -> Self {
         let fingerprint = cert.fingerprint().to_hex();
         Self {
             cert,

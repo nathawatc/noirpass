@@ -51,7 +51,7 @@ impl Store {
     }
 
     /// List every item in `collection`, in id order.
-    pub fn list_items(&self, collection: &str) -> Result<Vec<ItemMeta>> {
+    pub(crate) fn list_items(&self, collection: &str) -> Result<Vec<ItemMeta>> {
         self.search_items_matching(Some(collection), &HashMap::new(), false)
     }
 

@@ -50,11 +50,11 @@ pub struct IndexedItem {
 
 /// Object identities removed by one collection deletion transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeletedCollection {
+pub(crate) struct DeletedCollection {
     /// Item table keys removed with the collection.
-    pub item_ids: Vec<String>,
+    pub(crate) item_ids: Vec<String>,
     /// Alias names removed because they targeted the collection.
-    pub aliases: Vec<String>,
+    pub(crate) aliases: Vec<String>,
 }
 
 /// Corrupt collection record that cannot safely be served over D-Bus.

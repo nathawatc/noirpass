@@ -282,7 +282,7 @@ impl Store {
     /// Update an item's label, attributes, content type and/or secret and bump
     /// its modified timestamp. `None` fields are left unchanged; a `Some`
     /// secret rewrites the `.gpg` file.
-    pub fn update_item(
+    pub(crate) fn update_item(
         &self,
         id: &str,
         label: Option<&str>,
