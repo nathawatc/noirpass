@@ -8,7 +8,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use crate::error::{Error, Result};
 
-use super::{ITEMS, RecoveryKind, Store, parse_recovery_secret_name};
+use super::{ITEMS, RecoveryKind, Store, decode_item, parse_recovery_secret_name};
 
 impl Store {
     /// Reconcile interrupted update/delete filesystem transactions at startup.
@@ -74,17 +74,40 @@ impl Store {
                 self.remove_secret_file(recovery)?;
                 Ok(true)
             }
-            RecoveryKind::Quarantine => {
-                let txn = self.db.begin_read()?;
-                let items = txn.open_table(ITEMS)?;
-                if items.get(id)?.is_some() {
-                    self.rename_secret_file(recovery, &canonical)?;
-                } else {
+            RecoveryKind::Quarantine => self.recover_quarantine(recovery, id, &canonical),
+            RecoveryKind::Backup => self.recover_backup(recovery, id, &canonical),
+        }
+    }
+
+    fn recover_quarantine(&self, recovery: &Path, id: &str, canonical: &Path) -> Result<bool> {
+        let item_bytes = {
+            let txn = self.db.begin_read()?;
+            let items = txn.open_table(ITEMS)?;
+            items.get(id)?.map(|value| value.value().to_vec())
+        };
+        let Some(bytes) = item_bytes else {
+            self.remove_secret_file(recovery)?;
+            return Ok(true);
+        };
+        match self.secret_metadata(canonical) {
+            Ok(_) => {
+                let metadata = decode_item(id, &bytes).ok();
+                if let Some(expected_hash) = metadata.and_then(|meta| meta.ciphertext_sha256)
+                    && self.secret_file_sha256(canonical)? == expected_hash
+                {
                     self.remove_secret_file(recovery)?;
+                    return Ok(true);
                 }
+                Err(Error::Config(format!(
+                    "quarantine recovery file conflicts with existing ciphertext: {}",
+                    recovery.display()
+                )))
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                self.rename_secret_file(recovery, canonical)?;
                 Ok(true)
             }
-            RecoveryKind::Backup => self.recover_backup(recovery, id, &canonical),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -149,15 +172,32 @@ impl Store {
             Err(err) => return Err(err),
         };
         let Some(expected_hash) = metadata.ciphertext_sha256 else {
+            return match self.secret_metadata(canonical) {
+                Ok(_) => Err(Error::Config(format!(
+                    "backup recovery file conflicts with existing ciphertext without digest: {}",
+                    recovery.display()
+                ))),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    self.rename_secret_file(recovery, canonical)?;
+                    Ok(true)
+                }
+                Err(err) => Err(err.into()),
+            };
+        };
+        let restore_backup = || -> Result<()> {
+            if self.secret_file_sha256(recovery)? != expected_hash {
+                return Err(Error::Config(format!(
+                    "backup recovery file does not match committed metadata digest: {}",
+                    recovery.display()
+                )));
+            }
             self.rename_secret_file(recovery, canonical)?;
-            return Ok(true);
+            Ok(())
         };
         match self.secret_file_sha256(canonical) {
             Ok(digest) if digest == expected_hash => self.remove_secret_file(recovery)?,
-            Ok(_) => self.rename_secret_file(recovery, canonical)?,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                self.rename_secret_file(recovery, canonical)?;
-            }
+            Ok(_) => restore_backup()?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => restore_backup()?,
             Err(err) => return Err(err.into()),
         }
         Ok(true)

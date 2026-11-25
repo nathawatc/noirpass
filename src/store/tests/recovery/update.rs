@@ -81,3 +81,28 @@ fn indeterminate_update_without_metadata_commit_restores_old_ciphertext() {
     assert_eq!(fs::read(&path).unwrap(), b"old");
     assert!(reopened.check_integrity().unwrap().is_healthy());
 }
+
+#[test]
+fn backup_recovery_refuses_to_overwrite_when_backup_digest_also_mismatches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.create_collection("c", None).unwrap();
+    let item = store
+        .create_item(&collection.id, "item", HashMap::new(), "text/plain", b"old")
+        .unwrap();
+    let canonical = store.secret_path(&item.id).unwrap();
+    fs::write(&canonical, b"corrupt canonical").unwrap();
+    let backup = store.secrets_dir.join(format!(
+        ".noirpass-backup-{}-0000000000000001.gpg",
+        item.id
+    ));
+    fs::write(&backup, b"corrupt backup").unwrap();
+
+    let err = store.recover_interrupted_operations().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("does not match committed metadata digest")
+    );
+    assert_eq!(fs::read(&canonical).unwrap(), b"corrupt canonical");
+    assert_eq!(fs::read(&backup).unwrap(), b"corrupt backup");
+}
