@@ -95,7 +95,7 @@ use format::{config_path, recipient_cert_path};
 use init::init_from_bytes;
 pub use init::init_store_from_path;
 pub use startup::open_startup_store;
-pub use status::{load_recipient, status};
+pub use status::{load_recipient, status, status_with_cert};
 
 /// Minimal persisted config.
 #[derive(Debug, Clone, PartialEq, Eq)]
