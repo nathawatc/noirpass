@@ -80,13 +80,22 @@ enum Command {
 }
 
 /// `$XDG_DATA_HOME/noirpass`, falling back to `~/.local/share/noirpass`.
-fn default_store_dir() -> PathBuf {
+fn default_store_dir() -> noirpass::Result<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("noirpass")
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|home| home.join(".local/share"))
+        })
+        .map(|base| base.join("noirpass"))
+        .ok_or_else(|| {
+            noirpass::Error::Config(
+                "cannot determine default store directory: set an absolute XDG_DATA_HOME or HOME, or pass --store-dir / NOIRPASS_STORE".into(),
+            )
+        })
 }
 
 pub(crate) async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -96,7 +105,10 @@ pub(crate) async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let store_dir = cli.store_dir.unwrap_or_else(default_store_dir);
+    let store_dir = match cli.store_dir {
+        Some(dir) => dir,
+        None => default_store_dir()?,
+    };
 
     match cli.command {
         Some(Command::Init { recipient }) => {

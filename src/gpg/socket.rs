@@ -84,7 +84,7 @@ fn normalize_home(home: &Path, user_home: Option<&OsStr>) -> Result<PathBuf> {
             .position(|byte| *byte == b'/')
             .unwrap_or(home.len());
         let directory = if end == 1 {
-            match user_home {
+            match user_home.filter(|home| !home.is_empty()) {
                 Some(home) => Some(home.to_os_string()),
                 None => account_home(None)?,
             }
@@ -244,6 +244,7 @@ mod tests {
                 Some(OsStr::new("/ignored")),
             ),
             (Path::new("~/gnupg/."), None),
+            (Path::new("~/gnupg/."), Some(OsStr::new(""))),
         ] {
             let actual = normalize_home(input, home).unwrap();
             assert_eq!(actual.as_os_str().as_bytes(), expected);
