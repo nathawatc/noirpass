@@ -25,7 +25,7 @@ pub(super) fn load_configured_recipient_in(
     }
 
     super::format::validate_recipient_cert_path(&config.recipient_cert)?;
-    super::format::validate_regular_in(root, &config.recipient_cert)?;
+    root.validate_regular_or_absent(&config.recipient_cert)?;
     let path = data_dir.join(&config.recipient_cert);
     let bytes = root.read_regular(&config.recipient_cert).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
@@ -113,7 +113,7 @@ pub fn status(data_dir: &Path) -> Status {
 
     if let Some(config) = config {
         let cert_path = data_dir.join(&config.recipient_cert);
-        match super::format::validate_regular_in(&root, &config.recipient_cert) {
+        match root.validate_regular_or_absent(&config.recipient_cert) {
             Ok(()) => {
                 out.recipient_cert_present =
                     root.entry_exists(&config.recipient_cert).unwrap_or(false);

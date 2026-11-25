@@ -64,11 +64,16 @@ impl Service {
 }
 
 /// Require message-bus sender identity before accessing client-owned state.
-pub(crate) fn message_sender(header: &zbus::message::Header<'_>) -> Result<String, SecretError> {
+fn message_sender_fdo(header: &zbus::message::Header<'_>) -> fdo::Result<String> {
     header
         .sender()
         .map(ToString::to_string)
-        .ok_or_else(|| fdo::Error::AccessDenied("missing D-Bus sender identity".into()).into())
+        .ok_or_else(|| fdo::Error::AccessDenied("missing D-Bus sender identity".into()))
+}
+
+/// Require message-bus sender identity before accessing client-owned state.
+pub(crate) fn message_sender(header: &zbus::message::Header<'_>) -> Result<String, SecretError> {
+    message_sender_fdo(header).map_err(Into::into)
 }
 
 #[interface(name = "org.freedesktop.Secret.Service")]
@@ -89,7 +94,7 @@ impl Service {
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<(OwnedVariant, OwnedObjectPath)> {
         let activity = self.state.request(&(algorithm, &input))?;
-        let (output, cipher) = match algorithm {
+        let (owner, output, cipher) = match algorithm {
             ALGORITHM_PLAIN => {
                 let input = String::try_from(input).map_err(|_| {
                     fdo::Error::InvalidArgs("plain session input must be an empty string".into())
@@ -99,7 +104,9 @@ impl Service {
                         "plain session input must be an empty string".into(),
                     ));
                 }
+                let owner = message_sender_fdo(&header)?;
                 (
+                    owner,
                     Variant::from("")
                         .try_to_owned()
                         .map_err(|e| fdo::Error::Failed(e.to_string()))?,
@@ -110,12 +117,14 @@ impl Service {
                 let client_pub = Vec::<u8>::try_from(input).map_err(|_| {
                     fdo::Error::InvalidArgs("expected client public key as byte array".into())
                 })?;
+                let owner = message_sender_fdo(&header)?;
                 let handshake = DhHandshake::generate();
                 let server_pub = handshake.public_bytes();
                 let cipher = handshake
                     .derive(&client_pub)
                     .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
                 (
+                    owner,
                     Variant::from(server_pub)
                         .try_to_owned()
                         .map_err(|e| fdo::Error::Failed(e.to_string()))?,
@@ -128,11 +137,6 @@ impl Service {
                 )));
             }
         };
-
-        let owner = header
-            .sender()
-            .map(ToString::to_string)
-            .ok_or_else(|| fdo::Error::AccessDenied("missing D-Bus sender identity".into()))?;
         let state = self.state.clone();
         let server = server.clone();
         let connection = connection.clone();

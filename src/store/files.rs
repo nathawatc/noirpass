@@ -59,15 +59,8 @@ impl Store {
     }
 
     pub(super) fn validate_secret_regular_or_absent(&self, path: &Path) -> io::Result<()> {
-        match self.secret_metadata(path) {
-            Ok(metadata) if metadata.is_file() => Ok(()),
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "secret path is not a regular file",
-            )),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
-        }
+        self.secrets_directory
+            .validate_regular_or_absent(self.secret_entry(path)?)
     }
 
     /// Whether item `id` currently has a regular ciphertext file on disk.

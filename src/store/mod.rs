@@ -48,6 +48,8 @@ const ALIASES: TableDefinition<&str, &str> = TableDefinition::new("aliases");
 
 /// The well-known id, label and alias of the default collection.
 pub const DEFAULT_COLLECTION_ID: &str = "default";
+pub(crate) const INDEX_FILE: &str = "index.redb";
+pub(crate) const SECRETS_DIR: &str = "secrets";
 
 /// A handle to the persistent metadata index and secret files.
 #[derive(Debug)]
@@ -174,11 +176,6 @@ fn ciphertext_file_sha256(file: &mut fs::File) -> std::io::Result<String> {
     Ok(format_sha256(hasher.finalize()))
 }
 
-/// A fresh random 128-bit identifier rendered as 32 hex characters.
-fn random_id() -> String {
-    format!("{:032x}", rand::random::<u128>())
-}
-
 /// Whether `id` is a canonical item identifier safe for use as a filename.
 fn is_valid_collection_id(id: &str) -> bool {
     id == DEFAULT_COLLECTION_ID || is_valid_item_id(id)
@@ -277,14 +274,14 @@ fn open_existing_root(dir: &Path) -> Result<Directory> {
 }
 
 fn open_existing_secrets(dir: &Path, root: &Directory) -> Result<(PathBuf, Directory)> {
-    let secrets_dir = dir.join("secrets");
-    if !root.metadata(Path::new("secrets"))?.is_dir() {
+    let secrets_dir = dir.join(SECRETS_DIR);
+    if !root.metadata(Path::new(SECRETS_DIR))?.is_dir() {
         return Err(Error::Config(format!(
             "store secrets path is not a directory: {}",
             secrets_dir.display()
         )));
     }
-    let secrets_directory = root.child(Path::new("secrets"))?;
+    let secrets_directory = root.child(Path::new(SECRETS_DIR))?;
     let _ = secrets_directory.read_dir()?;
     Ok((secrets_dir, secrets_directory))
 }
@@ -444,11 +441,11 @@ impl Store {
     ) -> Result<Self> {
         use std::os::unix::fs::PermissionsExt;
         root.set_permissions(fs::Permissions::from_mode(0o700))?;
-        let secrets_dir = dir.join("secrets");
-        let secrets_directory = root.create_child(Path::new("secrets"), 0o700)?;
+        let secrets_dir = dir.join(SECRETS_DIR);
+        let secrets_directory = root.create_child(Path::new(SECRETS_DIR), 0o700)?;
         secrets_directory.set_permissions(fs::Permissions::from_mode(0o700))?;
         let index =
-            root.open_regular(Path::new("index.redb"), libc::O_RDWR | libc::O_CREAT, 0o600)?;
+            root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR | libc::O_CREAT, 0o600)?;
         let db = Database::builder().create_with_backend(FileBackend::new(index))?;
         // Ensure all tables exist so read-only transactions never fail on a
         // brand-new database.
@@ -478,8 +475,8 @@ impl Store {
     /// Share a pinned root with configuration lifecycle operations.
     pub(crate) fn open_existing_in(dir: &Path, root: &Directory) -> Result<Self> {
         let (secrets_dir, secrets_directory) = open_existing_secrets(dir, root)?;
-        let index_path = dir.join("index.redb");
-        let index = root.open_regular(Path::new("index.redb"), libc::O_RDWR, 0)?;
+        let index_path = dir.join(INDEX_FILE);
+        let index = root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR, 0)?;
         if index.metadata()?.len() == 0 {
             return Err(Error::Config(format!(
                 "metadata database is empty: {}",
@@ -514,8 +511,8 @@ impl Store {
     }
 
     pub(crate) fn probe_health_in(root: &Directory) -> Result<()> {
-        root.child(Path::new("secrets"))?;
-        let index = root.open_regular(Path::new("index.redb"), libc::O_RDONLY, 0)?;
+        root.child(Path::new(SECRETS_DIR))?;
+        let index = root.open_regular(Path::new(INDEX_FILE), libc::O_RDONLY, 0)?;
         let db = match open_readonly_database_file(&index) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => return Ok(()),

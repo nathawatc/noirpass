@@ -10,12 +10,12 @@ use sequoia_openpgp::Cert;
 
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, create_directory_all_nofollow, validate_no_symlink_components};
+use crate::store::{INDEX_FILE, SECRETS_DIR};
 
 const CONFIG_FILE: &str = "config.toml";
-const INDEX_FILE: &str = "index.redb";
+const CONFIG_TMP_PREFIX: &str = ".noirpass-tmp-";
 const KEYS_DIR: &str = "keys";
 const RECIPIENT_REL: &str = "keys/recipient.pgp";
-const SECRETS_DIR: &str = "secrets";
 const CONFIG_VERSION: i64 = 1;
 /// Default daemon inactivity timeout in seconds.
 pub const DEFAULT_IDLE_EXIT_SECONDS: i64 = 300;

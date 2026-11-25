@@ -16,7 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(test)]
 use super::RECIPIENT_REL;
-use super::{CONFIG_FILE, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT};
+use super::{CONFIG_FILE, CONFIG_TMP_PREFIX, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT};
 
 impl Config {
     /// Load `config.toml`.
@@ -51,7 +51,7 @@ impl Config {
     pub(super) fn write_in(&self, directory: &Directory) -> Result<()> {
         validate_recipient_cert_path(&self.recipient_cert)?;
         validate_idle_exit(self.idle_exit)?;
-        validate_regular_in(directory, &self.recipient_cert)?;
+        directory.validate_regular_or_absent(&self.recipient_cert)?;
         let mut doc = DocumentMut::new();
         doc["version"] = value(self.version);
         doc["recipient_fingerprint"] = value(self.recipient_fingerprint.as_str());
@@ -117,9 +117,9 @@ pub(super) fn atomic_write_in_with_sync(
     mode: u32,
     sync_directory: impl FnOnce() -> io::Result<()>,
 ) -> Result<()> {
-    validate_regular_in(directory, name)?;
+    directory.validate_regular_or_absent(name)?;
     for _ in 0..16 {
-        let tmp = PathBuf::from(format!(".noirpass-tmp-{:016x}", rand::random::<u64>()));
+        let tmp = PathBuf::from(format!("{CONFIG_TMP_PREFIX}{:016x}", rand::random::<u64>()));
         match directory.open_regular(&tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode) {
             Ok(mut file) => {
                 let write_result = (|| -> io::Result<()> {
@@ -148,22 +148,6 @@ pub(super) fn atomic_write_in_with_sync(
     )))
 }
 
-pub(super) fn validate_regular_in(directory: &Directory, name: &Path) -> io::Result<()> {
-    match directory.metadata(name) {
-        Ok(metadata) if metadata.is_file() => Ok(()),
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains symlink",
-        )),
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path is not a regular file",
-        )),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
 pub(super) fn read_optional_in(directory: &Directory, name: &Path) -> Result<Option<Vec<u8>>> {
     match directory.read_regular(name) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -177,7 +161,7 @@ pub(super) fn restore_optional_in(
     name: &Path,
     previous: Option<&[u8]>,
 ) -> Result<()> {
-    validate_regular_in(directory, name)?;
+    directory.validate_regular_or_absent(name)?;
     if let Some(bytes) = previous {
         atomic_write_in(directory, name, bytes, 0o600)
     } else {

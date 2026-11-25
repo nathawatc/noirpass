@@ -1,13 +1,15 @@
 //! Safe removal of Noirpass-owned configuration and store files.
 
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::ops::Bound;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::format::{parse_config, validate_recipient_cert_path};
-use super::{CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, SECRETS_DIR};
+use super::{
+    CONFIG_FILE, CONFIG_TMP_PREFIX, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, SECRETS_DIR,
+};
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
 use crate::store::{is_lower_hex, is_valid_item_id, parse_recovery_secret_name};
@@ -22,7 +24,7 @@ fn is_recovery_secret_name(name: &str) -> bool {
 }
 
 fn is_config_temporary_name(name: &str) -> bool {
-    name.strip_prefix(".noirpass-tmp-")
+    name.strip_prefix(CONFIG_TMP_PREFIX)
         .is_some_and(|token| is_lower_hex(token, 16))
 }
 
@@ -149,9 +151,7 @@ fn load_deinit_config(root: &Directory) -> Result<Option<Config>> {
     if !checked_owned_file(root, Path::new(CONFIG_FILE), "the configuration")? {
         return Ok(None);
     }
-    let mut bytes = Vec::new();
-    root.open_regular(Path::new(CONFIG_FILE), libc::O_RDONLY, 0)?
-        .read_to_end(&mut bytes)?;
+    let bytes = root.read_regular(Path::new(CONFIG_FILE))?;
     let text =
         String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     Ok(Some(parse_config(&text)?))

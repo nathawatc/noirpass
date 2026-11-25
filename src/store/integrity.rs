@@ -10,8 +10,8 @@ use crate::error::{Error, Result};
 use crate::filesystem::Directory;
 
 use super::{
-    ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, ITEMS, IndexedItem,
-    IntegrityReport, ItemMeta, Store, ciphertext_file_sha256, is_valid_collection_id,
+    ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, INDEX_FILE, ITEMS,
+    IndexedItem, IntegrityReport, ItemMeta, Store, ciphertext_file_sha256, is_valid_collection_id,
     is_valid_item_id, parse_recovery_secret_name, recovery_kind,
 };
 
@@ -61,7 +61,7 @@ impl Store {
     pub(crate) fn probe_integrity_in(dir: &Path, root: &Directory) -> Result<IntegrityReport> {
         let (secrets_dir, secrets_directory) = super::open_existing_secrets(dir, root)?;
         let index = root
-            .open_regular(Path::new("index.redb"), libc::O_RDONLY, 0)
+            .open_regular(Path::new(INDEX_FILE), libc::O_RDONLY, 0)
             .map_err(DatabaseError::from)?;
         let db = match super::open_readonly_database_file(&index) {
             Ok(db) => db,

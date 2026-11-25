@@ -92,10 +92,6 @@ pub(super) fn session_item_bytes(
     Ok(metadata_bytes + secret_len)
 }
 
-fn session_item_id() -> String {
-    format!("{:032x}", rand::random::<u128>())
-}
-
 /// A registered session: its transport cipher and the unique bus name of the
 /// client that opened it (used to reap sessions of vanished clients).
 struct SessionEntry {

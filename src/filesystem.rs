@@ -90,6 +90,22 @@ impl Directory {
             .metadata()
     }
 
+    pub(crate) fn validate_regular_or_absent(&self, name: &Path) -> io::Result<()> {
+        match self.metadata(name) {
+            Ok(metadata) if metadata.is_file() => Ok(()),
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains symlink",
+            )),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path is not a regular file",
+            )),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     pub(crate) fn read_dir(&self) -> io::Result<fs::ReadDir> {
         self.ensure_linked()?;
         // This deliberate procfs magic link refers to our live, owned descriptor.

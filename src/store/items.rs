@@ -10,11 +10,11 @@ use std::path::Path;
 use redb::ReadableTable;
 
 use crate::error::{Error, Result};
+use crate::random_hex_id;
 
 use super::{
     COLLECTIONS, CollectionMeta, ITEMS, ItemMeta, PersistError, Store, StoreTransaction,
     StoreWriteGuard, ciphertext_sha256, decode_item, definite, is_valid_collection_id, now_secs,
-    random_id,
 };
 
 impl Store {
@@ -211,7 +211,7 @@ impl Store {
     ) -> Result<ItemMeta> {
         let now = now_secs();
         let meta = ItemMeta {
-            id: random_id(),
+            id: random_hex_id(),
             collection: collection.to_string(),
             label: label.to_string(),
             attributes,

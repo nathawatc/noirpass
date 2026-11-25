@@ -7,8 +7,8 @@ use zeroize::Zeroizing;
 use super::{
     MAX_SESSION_ALIAS_BYTES, MAX_SESSION_ALIASES, MAX_SESSION_ITEMS, MAX_SESSION_STRING_BYTES,
     SESSION_ITEM_ALLOCATION_ATTEMPTS, ServiceState, SessionItem, now_secs, session_item_bytes,
-    session_item_id,
 };
+use crate::random_hex_id;
 use crate::service::{SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID};
 use crate::store::{CollectionMeta, ItemMeta};
 
@@ -213,7 +213,7 @@ impl ServiceState {
         }
 
         let id = (0..SESSION_ITEM_ALLOCATION_ATTEMPTS)
-            .map(|_| session_item_id())
+            .map(|_| random_hex_id())
             .find(|candidate| !collection.items.contains_key(candidate))
             .ok_or_else(|| {
                 crate::Error::Config(format!(

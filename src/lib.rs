@@ -20,3 +20,8 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
+
+/// A fresh random 128-bit identifier rendered as 32 lowercase hex characters.
+pub(crate) fn random_hex_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}

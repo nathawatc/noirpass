@@ -7,8 +7,9 @@ use redb::{ReadableDatabase, ReadableTable};
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, DEFAULT_COLLECTION_ID, DeletedCollection, Error, ITEMS,
     ItemMeta, PersistError, Result, Store, decode_collection, decode_item, definite,
-    is_valid_collection_id, now_secs, random_id,
+    is_valid_collection_id, now_secs,
 };
+use crate::random_hex_id;
 
 impl Store {
     pub(super) fn validate_collection_in_txn(
@@ -30,7 +31,7 @@ impl Store {
     pub fn create_collection(&self, label: &str, alias: Option<&str>) -> Result<CollectionMeta> {
         let now = now_secs();
         let meta = CollectionMeta {
-            id: random_id(),
+            id: random_hex_id(),
             label: label.to_string(),
             created: now,
             modified: now,
@@ -149,9 +150,9 @@ impl Store {
         {
             let items = txn.open_table(ITEMS)?;
             let mut collect = |table_key: &str, bytes: &[u8]| -> Result<()> {
-                let metadata: ItemMeta = serde_json::from_slice(bytes)?;
+                let metadata = decode_item(table_key, bytes)?;
                 if metadata.collection == id {
-                    metadata_to_remove.push(decode_item(table_key, bytes)?);
+                    metadata_to_remove.push(metadata);
                 }
                 Ok(())
             };
@@ -200,8 +201,8 @@ impl Store {
                 meta
             };
             let mut aliases = txn.open_table(ALIASES)?;
-            if aliases.get("default")?.is_none() {
-                aliases.insert("default", DEFAULT_COLLECTION_ID)?;
+            if aliases.get(DEFAULT_COLLECTION_ID)?.is_none() {
+                aliases.insert(DEFAULT_COLLECTION_ID, DEFAULT_COLLECTION_ID)?;
             }
             meta
         };

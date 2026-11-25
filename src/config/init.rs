@@ -13,11 +13,11 @@ use crate::gpg::{cert_to_binary, has_usable_encryption_key, parse_recipient_cert
 use crate::store::Store;
 use sequoia_openpgp::Cert;
 
-use super::format::{atomic_write_in, read_optional_in, restore_optional_in, validate_regular_in};
+use super::format::{atomic_write_in, read_optional_in, restore_optional_in};
 use super::status::load_configured_recipient_in;
 use super::{
     CONFIG_VERSION, Config, DEFAULT_IDLE_EXIT_SECONDS, DIFFERENT_RECIPIENT_ERROR, INDEX_FILE,
-    KEYS_DIR, RECIPIENT_REL, SECRETS_DIR,
+    INIT_HINT, KEYS_DIR, RECIPIENT_REL, SECRETS_DIR,
 };
 
 fn has_encrypted_secret_files(root: &Directory) -> Result<bool> {
@@ -66,7 +66,7 @@ fn has_encrypted_secret_files(root: &Directory) -> Result<bool> {
 
 fn reject_missing_index_for_initialized_store(root: &Directory) -> Result<()> {
     let index_path = Path::new(INDEX_FILE);
-    validate_regular_in(root, index_path)?;
+    root.validate_regular_or_absent(index_path)?;
     let has_index = root.entry_exists(index_path)?;
     if has_index {
         root.open_regular(index_path, libc::O_RDWR, 0)?;
@@ -175,25 +175,24 @@ pub(super) fn init_from_cert_in_with_hooks(
     reject_missing_index_for_initialized_store(root)?;
     let has_encrypted_files = has_encrypted_secret_files(root)?;
 
-    if root.entry_exists(Path::new(super::CONFIG_FILE))? {
-        let (_, _, existing_fingerprint) = load_configured_recipient_in(data_dir, root).map_err(|err| {
-            Error::Config(format!(
-                "cannot initialize an already initialized store because existing recipient fingerprint cannot be verified: {err}"
-            ))
-        })?;
+    let idle_exit = if root.entry_exists(Path::new(super::CONFIG_FILE))? {
+        let (existing_config, _, existing_fingerprint) =
+            load_configured_recipient_in(data_dir, root).map_err(|err| {
+                Error::Config(format!(
+                    "cannot initialize an already initialized store because existing recipient fingerprint cannot be verified: {err}"
+                ))
+            })?;
         if existing_fingerprint != new_fingerprint {
             return Err(Error::Config(DIFFERENT_RECIPIENT_ERROR.into()));
         }
+        existing_config.idle_exit
     } else if has_encrypted_files {
-        let _existing = load_configured_recipient_in(data_dir, root).map_err(|err| {
-            Error::Config(format!(
-                "cannot initialize non-empty store because existing recipient fingerprint cannot be verified: {err}"
-            ))
-        })?;
-    }
-
-    let idle_exit =
-        Config::load_in(root).map_or(DEFAULT_IDLE_EXIT_SECONDS, |config| config.idle_exit);
+        return Err(Error::Config(format!(
+            "cannot initialize non-empty store because existing recipient fingerprint cannot be verified: noirpass is not initialized; {INIT_HINT}"
+        )));
+    } else {
+        DEFAULT_IDLE_EXIT_SECONDS
+    };
 
     // Create and pin keys beneath the already selected root. Keep both handles
     // through publication and rollback rather than reopening their pathnames.
@@ -207,8 +206,8 @@ pub(super) fn init_from_cert_in_with_hooks(
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err.into()),
     }
-    validate_regular_in(root, Path::new(RECIPIENT_REL))?;
-    validate_regular_in(root, Path::new(super::CONFIG_FILE))?;
+    root.validate_regular_or_absent(Path::new(RECIPIENT_REL))?;
+    root.validate_regular_or_absent(Path::new(super::CONFIG_FILE))?;
     root.set_permissions(Permissions::from_mode(0o700))?;
     let keys = root.create_child(Path::new(KEYS_DIR), 0o700)?;
     keys.set_permissions(Permissions::from_mode(0o700))?;
