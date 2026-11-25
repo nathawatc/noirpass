@@ -5,7 +5,7 @@ use std::path::Path;
 use sequoia_openpgp::serialize::Serialize;
 
 use super::super::format::{atomic_write_in, atomic_write_in_with_sync};
-use super::super::init::{init_from_cert_in_with_hooks, init_store_with};
+use super::super::init::{init_from_cert_in_with_hooks, init_store_with_hook};
 use super::super::{CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, init_from_bytes};
 use super::support::generated_recipient;
 use crate::filesystem::Directory;
@@ -34,14 +34,13 @@ fn complete_initialization_stays_on_selected_root_after_replacement() {
             let outside_config = fs::read(outside.join(CONFIG_FILE)).unwrap();
             let outside_cert = fs::read(outside.join(RECIPIENT_REL)).unwrap();
             let outside_index = fs::read(outside.join(INDEX_FILE)).unwrap();
-            let config = init_store_with(&selected, || {
+            let config = init_store_with_hook(&selected, &cert, || {
                 fs::rename(&selected, &moved).unwrap();
                 if link {
                     symlink(&outside, &selected).unwrap();
                 } else {
                     fs::rename(&outside, &selected).unwrap();
                 }
-                Ok(cert.clone())
             })
             .unwrap();
             assert_eq!(config.recipient_fingerprint, cert.fingerprint().to_hex());
@@ -207,6 +206,6 @@ fn certificate_sync_failure_rolls_back_fresh_and_existing_initialization() {
             usize::from(existing)
         );
         // A failed fresh initialization must remain retryable.
-        init_store_with(tmp.path(), || Ok(cert.clone())).unwrap();
+        init_store_with_hook(tmp.path(), &cert, || {}).unwrap();
     }
 }

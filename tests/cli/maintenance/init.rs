@@ -310,27 +310,42 @@ fn cli_init_rejects_store_with_missing_index() {
 
 #[test]
 fn cli_init_invalid_recipient_does_not_create_store() {
-    let store = tempfile::tempdir().unwrap();
-    let recipient_path = store.path().join("not-openpgp.asc");
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("existing-store");
+    fs::create_dir(&store).unwrap();
+    let recipient_path = tmp.path().join("not-openpgp.asc");
     std::fs::write(&recipient_path, b"not openpgp").unwrap();
 
-    let output = noirpass_command()
-        .arg("--store-dir")
-        .arg(store.path())
-        .arg("init")
-        .arg("--recipient")
-        .arg(&recipient_path)
-        .output()
-        .expect("spawn noirpass init invalid recipient");
+    for candidate in [&store, &tmp.path().join("fresh-store")] {
+        for recipient in [&recipient_path, &tmp.path().join("missing-recipient.asc")] {
+            let output = noirpass_command()
+                .arg("--store-dir")
+                .arg(candidate)
+                .arg("init")
+                .arg("--recipient")
+                .arg(recipient)
+                .output()
+                .expect("spawn noirpass init invalid recipient");
 
-    assert!(!output.status.success(), "init must reject invalid cert");
+            assert!(!output.status.success(), "init must reject invalid cert");
+        }
+    }
+
     assert!(
-        !store.path().join("index.redb").exists(),
+        !store.join(".noirpass-lifecycle.lock").exists(),
+        "invalid init must not create lifecycle lock"
+    );
+    assert!(
+        !store.join("index.redb").exists(),
         "invalid init must not create index"
     );
     assert!(
-        !store.path().join("secrets").exists(),
+        !store.join("secrets").exists(),
         "invalid init must not create secrets dir"
+    );
+    assert!(
+        !tmp.path().join("fresh-store").exists(),
+        "invalid init must not create fresh store directory"
     );
 }
 

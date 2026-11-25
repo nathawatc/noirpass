@@ -97,20 +97,20 @@ fn parse_usable_recipient(bytes: &[u8]) -> Result<Cert> {
 
 /// Claim one root for the CLI's complete initialization operation.
 pub fn init_store_from_path(data_dir: &Path, path: &str) -> Result<Config> {
-    init_store_with(data_dir, || {
-        let mut bytes = Vec::new();
-        if path == "-" {
-            io::stdin().lock().read_to_end(&mut bytes)?;
-        } else {
-            fs::File::open(path)?.read_to_end(&mut bytes)?;
-        }
-        parse_usable_recipient(&bytes)
-    })
+    let mut bytes = Vec::new();
+    if path == "-" {
+        io::stdin().lock().read_to_end(&mut bytes)?;
+    } else {
+        fs::File::open(path)?.read_to_end(&mut bytes)?;
+    }
+    let cert = parse_usable_recipient(&bytes)?;
+    init_store_with_hook(data_dir, &cert, || {})
 }
 
-pub(super) fn init_store_with(
+pub(super) fn init_store_with_hook(
     data_dir: &Path,
-    read_recipient: impl FnOnce() -> Result<Cert>,
+    cert: &Cert,
+    after_open: impl FnOnce(),
 ) -> Result<Config> {
     let root = super::open_lifecycle_directory(data_dir)?;
     let preopened = if root.entry_exists(Path::new(INDEX_FILE))? {
@@ -132,11 +132,11 @@ pub(super) fn init_store_with(
     } else {
         None
     };
-    let cert = read_recipient()?;
+    after_open();
     let config = init_from_cert_in_with_hooks(
         data_dir,
         &root,
-        &cert,
+        cert,
         |keys, bytes| atomic_write_in(keys, Path::new(RECIPIENT_FILE), bytes, 0o600),
         || {},
     )?;
