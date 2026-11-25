@@ -512,11 +512,7 @@ fn cli_check_repairs_corrupt_alias_and_requires_tty_without_yes() {
 }
 
 #[test]
-fn cli_check_declined_repair_and_unrepairable_defects_exit_nonzero() {
-    const COLLECTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("collections");
-    const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
-    const ALIASES: TableDefinition<&str, &str> = TableDefinition::new("aliases");
-
+fn cli_check_declined_repair_exits_nonzero() {
     let declined_dir = tempfile::tempdir().unwrap();
     let store = Store::open(declined_dir.path()).unwrap();
     let collection = store.ensure_default().unwrap();
@@ -553,7 +549,13 @@ fn cli_check_declined_repair_and_unrepairable_defects_exit_nonzero() {
     );
     let store = Store::open_existing(declined_dir.path()).unwrap();
     assert!(store.get_item(&item.id).is_ok());
-    drop(store);
+}
+
+#[test]
+fn cli_check_unrepairable_defects_exit_nonzero() {
+    const COLLECTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("collections");
+    const ITEMS: TableDefinition<&str, &[u8]> = TableDefinition::new("items");
+    const ALIASES: TableDefinition<&str, &str> = TableDefinition::new("aliases");
 
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
