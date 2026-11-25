@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use noirpass::service::session::Secret as WireSecret;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::super::helpers::{
@@ -49,7 +49,7 @@ async fn assert_foreign_item_operations_rejected(
     )
     .await
     .unwrap();
-    let properties: HashMap<String, OwnedValue> = HashMap::new();
+    let properties: HashMap<String, OwnedVariant> = HashMap::new();
     let err = attacker_collection
         .call::<_, _, (OwnedObjectPath, OwnedObjectPath)>(
             "CreateItem",
@@ -82,8 +82,8 @@ pub(in super::super) async fn s6b_cross_client_session_rejected() {
     assert_ne!(owner.unique_name(), attacker.unique_name());
     let owner_service = service_proxy(&owner).await;
     let attacker_service = service_proxy(&attacker).await;
-    let (_, session): (OwnedValue, OwnedObjectPath) = owner_service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = owner_service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
 

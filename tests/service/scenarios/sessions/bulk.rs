@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use noirpass::crypto::DhHandshake;
 use noirpass::service::session::Secret as WireSecret;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::super::helpers::{
@@ -43,8 +43,8 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
     let proxy = service_proxy(&conn).await;
 
     // Plain session: values come back as raw plaintext.
-    let (_, plain_session): (OwnedValue, OwnedObjectPath) = proxy
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, plain_session): (OwnedVariant, OwnedObjectPath) = proxy
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let requested = bulk_paths(&paths);
@@ -74,12 +74,12 @@ pub(in super::super) async fn s6_get_secrets_bulk() {
 
     // DH session: drive the client side with the library's own handshake.
     let client = DhHandshake::generate();
-    let (server_pub, dh_session): (OwnedValue, OwnedObjectPath) = proxy
+    let (server_pub, dh_session): (OwnedVariant, OwnedObjectPath) = proxy
         .call(
             "OpenSession",
             &(
                 "dh-ietf1024-sha256-aes128-cbc-pkcs7",
-                Value::from(client.public_bytes()),
+                Variant::from(client.public_bytes()),
             ),
         )
         .await
@@ -135,7 +135,7 @@ async fn bounded_bulk_response(
     .unwrap();
     let properties = HashMap::from([(
         "org.freedesktop.Secret.Item.Label",
-        Value::from("bulk response limit").try_to_owned().unwrap(),
+        Variant::from("bulk response limit").try_to_owned().unwrap(),
     )]);
     let secret = WireSecret {
         session: session.clone(),

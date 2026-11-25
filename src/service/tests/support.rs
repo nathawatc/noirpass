@@ -24,13 +24,11 @@ pub(in crate::service) fn test_state(
 /// In-process p2p bus serving the real `Service` interface.
 pub(super) async fn p2p_pair(state: Arc<ServiceState>) -> (zbus::Connection, zbus::Connection) {
     let guid = zbus::Guid::generate();
-    let (p0, p1) = tokio::net::UnixStream::pair().unwrap();
+    let (p0, p1) = std::os::unix::net::UnixStream::pair().unwrap();
     let server = Builder::unix_stream(p0)
         .server(guid)
-        .unwrap()
         .p2p()
         .serve_at(SERVICE_PATH, Service::new(state))
-        .unwrap()
         .build();
     let client = Builder::unix_stream(p1).p2p().build();
     let (server, client) = tokio::join!(server, client);

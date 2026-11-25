@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
+use zbus::OwnedObjectPath;
 use zbus::fdo;
-use zbus::zvariant::OwnedObjectPath;
 use zeroize::Zeroizing;
 
 use super::ServiceState;

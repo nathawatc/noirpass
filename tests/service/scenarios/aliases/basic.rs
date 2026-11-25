@@ -1,4 +1,4 @@
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use super::super::super::helpers::service_proxy;
 

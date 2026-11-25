@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use noirpass::service::session::Secret as WireSecret;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::super::helpers::{
@@ -18,25 +18,25 @@ pub(in super::super) async fn s3_plain_protocol_validation() {
     let conn = zbus::Connection::session().await.unwrap();
     let service = service_proxy(&conn).await;
 
-    let (output, session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (output, session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     assert_eq!(String::try_from(output).unwrap(), "");
 
     let err = service
-        .call::<_, _, (OwnedValue, OwnedObjectPath)>(
+        .call::<_, _, (OwnedVariant, OwnedObjectPath)>(
             "OpenSession",
-            &("plain", Value::from("non-empty")),
+            &("plain", Variant::from("non-empty")),
         )
         .await
         .unwrap_err();
     assert_method_error(&err, INVALID_ARGS_ERROR);
 
     let err = service
-        .call::<_, _, (OwnedValue, OwnedObjectPath)>(
+        .call::<_, _, (OwnedVariant, OwnedObjectPath)>(
             "OpenSession",
-            &("plain", Value::from(vec![1_u8])),
+            &("plain", Variant::from(vec![1_u8])),
         )
         .await
         .unwrap_err();
@@ -56,7 +56,7 @@ pub(in super::super) async fn s3_plain_protocol_validation() {
 
     let item_properties = HashMap::from([(
         "org.freedesktop.Secret.Item.Label".to_string(),
-        Value::from("s3-initial").try_to_owned().unwrap(),
+        Variant::from("s3-initial").try_to_owned().unwrap(),
     )]);
     let initial_secret = WireSecret {
         session: session.clone(),
@@ -105,7 +105,7 @@ pub(in super::super) async fn s3_plain_protocol_validation() {
         value: Zeroizing::new(b"must not create".to_vec()),
         content_type: "text/plain".to_string(),
     };
-    let empty_properties: HashMap<String, OwnedValue> = HashMap::new();
+    let empty_properties: HashMap<String, OwnedVariant> = HashMap::new();
     let err = collection
         .call::<_, _, (OwnedObjectPath, OwnedObjectPath)>(
             "CreateItem",

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use noirpass::service::session::Secret as WireSecret;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::super::harness::harness;
@@ -54,8 +54,8 @@ pub(in super::super) async fn s12_item_mutation_signals() {
     )
     .await
     .unwrap();
-    let (_, session): (OwnedValue, OwnedObjectPath) = service_proxy
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = service_proxy
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
 

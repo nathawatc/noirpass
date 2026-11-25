@@ -218,7 +218,7 @@ async fn blocking_work_bounds_decryption_and_rechecks_queued_session() {
     )
     .await
     .unwrap();
-    let _: Vec<zbus::zvariant::OwnedObjectPath> =
+    let _: Vec<zbus::OwnedObjectPath> =
         tokio::time::timeout(Duration::from_secs(2), proxy.get_property("Collections"))
             .await
             .unwrap()

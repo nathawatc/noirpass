@@ -16,12 +16,10 @@ async fn service_signals(client: &zbus::Connection, member: &str) -> zbus::Messa
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .interface("org.freedesktop.Secret.Service")
-        .unwrap()
         .path(SERVICE_PATH)
-        .unwrap()
         .member(member)
-        .unwrap()
-        .build();
+        .build()
+        .unwrap();
     zbus::MessageStream::for_match_rule(rule, client, None)
         .await
         .unwrap()
@@ -66,7 +64,7 @@ async fn cancelled_collection_creation_finishes_alias_registration_and_signals()
         .unwrap()
         .unwrap()
         .unwrap();
-    let (path,): (zbus::zvariant::OwnedObjectPath,) = message.body().deserialize().unwrap();
+    let (path,): (zbus::OwnedObjectPath,) = message.body().deserialize().unwrap();
     assert_eq!(path, collection_path(&id));
 }
 
@@ -186,6 +184,6 @@ async fn cancelled_collection_deletion_removes_items_aliases_and_emits_signal() 
         .unwrap()
         .unwrap()
         .unwrap();
-    let (path,): (zbus::zvariant::OwnedObjectPath,) = message.body().deserialize().unwrap();
+    let (path,): (zbus::OwnedObjectPath,) = message.body().deserialize().unwrap();
     assert_eq!(path, collection_path(&collection.id));
 }

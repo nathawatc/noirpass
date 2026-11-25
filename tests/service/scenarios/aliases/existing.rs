@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::super::super::helpers::{
     COLLECTION_IFACE, PROPERTIES_IFACE, SERVICE_IFACE, SERVICE_NAME, SERVICE_PATH,
@@ -41,11 +41,8 @@ pub(in super::super) async fn s13_existing_alias_collection() {
     // Assert current server state; the independent signal stream can run ahead of proxy caching.
     let collection = zbus::proxy::Builder::<zbus::Proxy<'_>>::new(&conn)
         .destination(SERVICE_NAME)
-        .unwrap()
         .path(initial_path.clone())
-        .unwrap()
         .interface(COLLECTION_IFACE)
-        .unwrap()
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
         .await
@@ -158,7 +155,7 @@ pub(in super::super) async fn s13_existing_alias_collection() {
     let (returned_path, prompt): (OwnedObjectPath, OwnedObjectPath) = service
         .call::<_, _, (OwnedObjectPath, OwnedObjectPath)>(
             "CreateCollection",
-            &(HashMap::<String, OwnedValue>::new(), "s13-existing-alias"),
+            &(HashMap::<String, OwnedVariant>::new(), "s13-existing-alias"),
         )
         .await
         .unwrap();
@@ -291,7 +288,7 @@ pub(in super::super) async fn s13_existing_alias_collection() {
     .expect("alias-absent CollectionCreated stream ended");
     let (created_path,): (OwnedObjectPath,) = created_message.body().deserialize().unwrap();
     assert_eq!(created_path, new_path);
-    let (interface, changed, invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
+    let (interface, changed, invalidated): (String, HashMap<String, OwnedVariant>, Vec<String>) =
         tokio::time::timeout(
             Duration::from_secs(10),
             next_event(service_properties_changed.as_mut()),

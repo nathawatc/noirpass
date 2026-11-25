@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use noirpass::service::session::Secret as WireSecret;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::harness::harness;
@@ -30,7 +30,7 @@ pub(super) async fn s15_malformed_known_properties() {
         service.get_property("Collections").await.unwrap();
     let wrong_collection_label = HashMap::from([(
         "org.freedesktop.Secret.Collection.Label".to_string(),
-        Value::from(vec![1_u8, 2]).try_to_owned().unwrap(),
+        Variant::from(vec![1_u8, 2]).try_to_owned().unwrap(),
     )]);
     let mut collection_created =
         std::pin::pin!(service.receive_signal("CollectionCreated").await.unwrap());
@@ -179,8 +179,8 @@ pub(super) async fn s15_malformed_known_properties() {
     .await;
 
     // Open valid plain session and create baseline item for replacement checks.
-    let (_, session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let item_attributes = attrs("s15-replace").into_iter().collect::<HashMap<_, _>>();
@@ -214,11 +214,13 @@ pub(super) async fn s15_malformed_known_properties() {
     let wrong_item_label = HashMap::from([
         (
             "org.freedesktop.Secret.Item.Label".to_string(),
-            Value::from(vec![3_u8]).try_to_owned().unwrap(),
+            Variant::from(vec![3_u8]).try_to_owned().unwrap(),
         ),
         (
             "org.freedesktop.Secret.Item.Attributes".to_string(),
-            Value::from(item_attributes.clone()).try_to_owned().unwrap(),
+            Variant::from(item_attributes.clone())
+                .try_to_owned()
+                .unwrap(),
         ),
     ]);
     assert_invalid_item_create(
@@ -254,13 +256,13 @@ pub(super) async fn s15_malformed_known_properties() {
     let wrong_item_attributes = HashMap::from([
         (
             "org.freedesktop.Secret.Item.Label".to_string(),
-            Value::from("s15-invalid-attributes")
+            Variant::from("s15-invalid-attributes")
                 .try_to_owned()
                 .unwrap(),
         ),
         (
             "org.freedesktop.Secret.Item.Attributes".to_string(),
-            Value::from("not-a-dict").try_to_owned().unwrap(),
+            Variant::from("not-a-dict").try_to_owned().unwrap(),
         ),
     ]);
     assert_invalid_item_create(
@@ -285,7 +287,7 @@ pub(super) async fn s15_malformed_known_properties() {
     );
 
     // Absent known properties retain empty defaults.
-    let empty_properties: HashMap<String, OwnedValue> = HashMap::new();
+    let empty_properties: HashMap<String, OwnedVariant> = HashMap::new();
     let default_secret = WireSecret {
         session,
         parameters: Vec::new(),

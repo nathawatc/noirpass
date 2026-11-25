@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use noirpass::service::session::Secret;
 use roxmltree::{Document, ParsingOptions};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::helpers::{
@@ -113,9 +113,7 @@ fn assert_interface(xml: &str, interface: &str, expected: &[(&str, &str, &str, &
 async fn introspect(connection: &zbus::Connection, path: &str) -> String {
     let proxy = zbus::fdo::IntrospectableProxy::builder(connection)
         .destination(SERVICE_NAME)
-        .unwrap()
         .path(path)
-        .unwrap()
         .build()
         .await
         .unwrap();
@@ -166,8 +164,8 @@ pub(super) async fn introspection_contract() {
             COLLECTION,
         );
     }
-    let (_, session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     assert_interface(
@@ -187,7 +185,7 @@ pub(super) async fn introspection_contract() {
             zbus::Proxy::new(&connection, SERVICE_NAME, collection_path, COLLECTION_IFACE)
                 .await
                 .unwrap();
-        let properties: HashMap<String, OwnedValue> = HashMap::new();
+        let properties: HashMap<String, OwnedVariant> = HashMap::new();
         let (item_path, _): (OwnedObjectPath, OwnedObjectPath) = collection
             .call("CreateItem", &(&properties, &secret, false))
             .await

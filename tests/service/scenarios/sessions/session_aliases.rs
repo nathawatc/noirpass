@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use noirpass::service::alias_path;
 use noirpass::service::session::Secret;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::super::harness::harness;
@@ -59,8 +59,8 @@ async fn assert_retargeted(
 }
 
 async fn assert_item_notifications(service: &zbus::Proxy<'_>, alias: &zbus::Proxy<'_>) {
-    let (_, session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let secret = Secret {
@@ -86,7 +86,7 @@ async fn assert_item_notifications(service: &zbus::Proxy<'_>, alias: &zbus::Prox
     let (path, _): (OwnedObjectPath, OwnedObjectPath) = alias
         .call(
             "CreateItem",
-            &(HashMap::<String, OwnedValue>::new(), &secret, false),
+            &(HashMap::<String, OwnedVariant>::new(), &secret, false),
         )
         .await
         .unwrap();
@@ -198,7 +198,7 @@ pub(in super::super) async fn s6e_session_alias_lifecycle() {
         root
     );
     let error = properties
-        .call::<_, _, OwnedValue>("Get", &(COLLECTION_IFACE, "Label"))
+        .call::<_, _, OwnedVariant>("Get", &(COLLECTION_IFACE, "Label"))
         .await
         .unwrap_err();
     assert_method_error(&error, UNKNOWN_OBJECT_ERROR);

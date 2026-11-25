@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 use super::super::super::helpers::{
     COLLECTION_IFACE, PROPERTIES_IFACE, SERVICE_NAME, SERVICE_PATH, assert_no_signal,
@@ -39,11 +39,8 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
     // Assert current server state; raw signals can precede updates to the proxy cache.
     let canonical = zbus::proxy::Builder::<zbus::Proxy<'_>>::new(&conn)
         .destination(SERVICE_NAME)
-        .unwrap()
         .path(a_path.clone())
-        .unwrap()
         .interface(COLLECTION_IFACE)
-        .unwrap()
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
         .await
@@ -231,8 +228,8 @@ pub(in super::super) async fn s14_collection_alias_notifications() {
 
     // Item membership changes fan out to canonical and alias paths. Replace
     // keeps membership unchanged and therefore emits no Items change.
-    let (_, session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let mut initial_items: Vec<OwnedObjectPath> = canonical.get_property("Items").await.unwrap();

@@ -64,9 +64,7 @@ async fn temporary_mutations_remain_available_while_persistent_workers_are_busy(
         .unwrap();
     let collection = Collection::new(state.clone(), SESSION_COLLECTION_ID.into());
     let message = zbus::Message::method_call(collection_path(SESSION_COLLECTION_ID), "CreateItem")
-        .unwrap()
         .sender(":1.7")
-        .unwrap()
         .build(&())
         .unwrap();
     let secret = Secret {
@@ -111,7 +109,7 @@ async fn temporary_mutations_remain_available_while_persistent_workers_are_busy(
     tokio::time::timeout(Duration::from_secs(2), state.wait_for_active_calls())
         .await
         .unwrap();
-    let _: zbus::zvariant::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
+    let _: zbus::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
     assert_eq!(state.list_session_items().len(), 0);
 }
 
@@ -138,12 +136,10 @@ async fn cancelled_metadata_waiter_finishes_update_and_signals() {
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .interface("org.freedesktop.Secret.Collection")
-            .unwrap()
             .member("ItemChanged")
-            .unwrap()
             .path(collection_path(id))
-            .unwrap()
-            .build();
+            .build()
+            .unwrap();
         let mut signals = zbus::MessageStream::for_match_rule(rule, &client, None)
             .await
             .unwrap();
@@ -174,8 +170,7 @@ async fn cancelled_metadata_waiter_finishes_update_and_signals() {
         .unwrap()
         .unwrap()
         .unwrap();
-        let (changed_path,): (zbus::zvariant::OwnedObjectPath,) =
-            signal.body().deserialize().unwrap();
+        let (changed_path,): (zbus::OwnedObjectPath,) = signal.body().deserialize().unwrap();
         assert_eq!(changed_path, item_path(id, &meta.id));
         let proxy = zbus::Proxy::new(
             &client,
@@ -488,9 +483,7 @@ async fn cancelled_create_waiter_still_commits_and_registers_item() {
         .unwrap();
     let collection = Collection::new(state.clone(), id.into());
     let message = zbus::Message::method_call(collection_path(id), "CreateItem")
-        .unwrap()
         .sender(":1.7")
-        .unwrap()
         .build(&())
         .unwrap();
     let secret = Secret {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 use super::super::common::{
     export_public_cert, init_noirpass_store, sigterm, spawn_daemon, spawn_dbus_daemon,
@@ -28,14 +28,14 @@ pub(super) async fn transport_session_limit_is_reported_and_close_restores_capac
     let proxy = service_proxy(&connection).await;
     let mut sessions = Vec::new();
     for _ in 0..64 {
-        let (_, path): (OwnedValue, OwnedObjectPath) = proxy
-            .call("OpenSession", &("plain", Value::from("")))
+        let (_, path): (OwnedVariant, OwnedObjectPath) = proxy
+            .call("OpenSession", &("plain", Variant::from("")))
             .await
             .unwrap();
         sessions.push(path);
     }
     let err = proxy
-        .call::<_, _, (OwnedValue, OwnedObjectPath)>("OpenSession", &("plain", Value::from("")))
+        .call::<_, _, (OwnedVariant, OwnedObjectPath)>("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap_err();
     assert_method_error(&err, "org.freedesktop.DBus.Error.LimitsExceeded");
@@ -48,8 +48,8 @@ pub(super) async fn transport_session_limit_is_reported_and_close_restores_capac
     .await
     .unwrap();
     session.call::<_, _, ()>("Close", &()).await.unwrap();
-    let (_, replacement): (OwnedValue, OwnedObjectPath) = proxy
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, replacement): (OwnedVariant, OwnedObjectPath) = proxy
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     assert_ne!(replacement, sessions[0]);
@@ -75,15 +75,14 @@ async fn rejected_plain_open_session_does_not_register_session() {
     wait_for_name(&address);
 
     let conn = zbus::connection::Builder::address(address.as_str())
-        .unwrap()
         .build()
         .await
         .unwrap();
     let proxy = service_proxy(&conn).await;
     let err = proxy
-        .call::<_, _, (OwnedValue, OwnedObjectPath)>(
+        .call::<_, _, (OwnedVariant, OwnedObjectPath)>(
             "OpenSession",
-            &("plain", Value::from("non-empty")),
+            &("plain", Variant::from("non-empty")),
         )
         .await
         .unwrap_err();
@@ -135,13 +134,12 @@ async fn idle_exit_daemon_exits() {
     // leaked session must not block idle-exit once NameOwnerChanged reaps it.
     {
         let conn = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
         let proxy = service_proxy(&conn).await;
-        let (_output, session): (OwnedValue, OwnedObjectPath) = proxy
-            .call("OpenSession", &("plain", Value::from("")))
+        let (_output, session): (OwnedVariant, OwnedObjectPath) = proxy
+            .call("OpenSession", &("plain", Variant::from("")))
             .await
             .unwrap();
         assert!(
@@ -189,13 +187,12 @@ async fn temporary_secret_survives_idle_exit_but_not_bus_shutdown() {
     );
     wait_for_name(&address);
     let conn = zbus::connection::Builder::address(address.as_str())
-        .unwrap()
         .build()
         .await
         .unwrap();
     let service = service_proxy(&conn).await;
-    let (_, session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let collection = zbus::Proxy::new(
@@ -212,7 +209,7 @@ async fn temporary_secret_survives_idle_exit_but_not_bus_shutdown() {
         value: Zeroizing::new(b"keep until bus ends".to_vec()),
         content_type: "text/plain".into(),
     };
-    let properties: HashMap<String, OwnedValue> = HashMap::new();
+    let properties: HashMap<String, OwnedVariant> = HashMap::new();
     collection
         .call::<_, _, (OwnedObjectPath, OwnedObjectPath)>(
             "CreateItem",
@@ -272,20 +269,18 @@ async fn disconnect_unregisters_owned_session() {
 
     let session = {
         let owner = zbus::connection::Builder::address(address.as_str())
-            .unwrap()
             .build()
             .await
             .unwrap();
         let proxy = service_proxy(&owner).await;
-        let (_, session): (OwnedValue, OwnedObjectPath) = proxy
-            .call("OpenSession", &("plain", Value::from("")))
+        let (_, session): (OwnedVariant, OwnedObjectPath) = proxy
+            .call("OpenSession", &("plain", Variant::from("")))
             .await
             .unwrap();
         session
     };
 
     let observer = zbus::connection::Builder::address(address.as_str())
-        .unwrap()
         .build()
         .await
         .unwrap();
@@ -337,13 +332,12 @@ async fn stale_session_path_is_not_reissued_after_restart() {
     wait_for_name(&address);
 
     let conn = zbus::connection::Builder::address(address.as_str())
-        .unwrap()
         .build()
         .await
         .unwrap();
     let proxy = service_proxy(&conn).await;
-    let (_, stale): (OwnedValue, OwnedObjectPath) = proxy
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, stale): (OwnedVariant, OwnedObjectPath) = proxy
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
 
@@ -382,8 +376,8 @@ async fn stale_session_path_is_not_reissued_after_restart() {
         .unwrap_err();
     assert_method_error(&err, UNKNOWN_OBJECT_ERROR);
 
-    let (_, replacement): (OwnedValue, OwnedObjectPath) = proxy
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, replacement): (OwnedVariant, OwnedObjectPath) = proxy
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let stale_after_new = proxy

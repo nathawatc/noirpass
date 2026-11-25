@@ -21,8 +21,8 @@ impl ServiceState {
             .try_acquire_owned()
             .map_err(|_| limit())?;
         // Size calculation writes to a null sink; it creates no plaintext copy.
-        let bytes = zbus::zvariant::serialized_size(
-            zbus::zvariant::serialized::Context::new_dbus(zbus::zvariant::LE, 0),
+        let bytes = zbus::wire::serialized_size(
+            zbus::wire::serialized::Context::new(zbus::wire::LE, 0),
             input,
         )
         .map_err(|err| fdo::Error::InvalidArgs(err.to_string()))?

@@ -21,7 +21,7 @@ use tokio::sync::{
     Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard,
     OwnedSemaphorePermit, RwLock as AsyncRwLock, Semaphore,
 };
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 use zeroize::Zeroizing;
 
 use super::SESSION_COLLECTION_ID;

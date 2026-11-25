@@ -3,8 +3,8 @@
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
+use zbus::OwnedObjectPath;
 use zbus::fdo;
-use zbus::zvariant::OwnedObjectPath;
 
 use super::{
     MAX_TRANSPORT_SESSIONS, MAX_TRANSPORT_SESSIONS_PER_OWNER, SESSION_ALLOCATION_ATTEMPTS,

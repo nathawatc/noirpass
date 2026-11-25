@@ -10,9 +10,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use zbus::OwnedObjectPath;
 use zbus::interface;
 use zbus::object_server::ObjectServer;
-use zbus::zvariant::{OwnedObjectPath, Type};
+use zbus::zvariant::Type;
 use zeroize::Zeroizing;
 
 use crate::service::{SecretError, ServiceState, message_sender};

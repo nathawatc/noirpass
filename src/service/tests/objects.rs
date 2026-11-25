@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::super::{
     SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, alias_path, collection_path,
@@ -16,7 +16,7 @@ async fn get_property(
     path: &OwnedObjectPath,
     interface: &str,
     property: &str,
-) -> OwnedValue {
+) -> OwnedVariant {
     connection
         .call_method(
             None::<zbus::names::BusName<'_>>,
@@ -324,6 +324,7 @@ async fn registration_errors_can_leave_persisted_interfaces_served() {
             .at(SERVICE_PATH, zbus::fdo::ObjectManager)
             .await
             .unwrap()
+            .is_none()
     );
     let connection_guard = server_conn.clone();
     server_conn.close().await.unwrap();
@@ -393,6 +394,7 @@ async fn alias_removal_error_leaves_store_cleared_and_interface_absent() {
             .at(SERVICE_PATH, zbus::fdo::ObjectManager)
             .await
             .unwrap()
+            .is_none()
     );
     let connection_guard = server_conn.clone();
     server_conn.close().await.unwrap();
@@ -482,12 +484,10 @@ async fn collection_delete_ignores_already_absent_interface_and_finishes_cleanup
     let deleted_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .path(SERVICE_PATH)
-        .unwrap()
         .interface("org.freedesktop.Secret.Service")
-        .unwrap()
         .member("CollectionDeleted")
-        .unwrap()
-        .build();
+        .build()
+        .unwrap();
     let mut collection_deleted =
         zbus::MessageStream::for_match_rule(deleted_rule, &client_conn, None)
             .await
@@ -495,12 +495,10 @@ async fn collection_delete_ignores_already_absent_interface_and_finishes_cleanup
     let properties_rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .path(SERVICE_PATH)
-        .unwrap()
         .interface("org.freedesktop.DBus.Properties")
-        .unwrap()
         .member("PropertiesChanged")
-        .unwrap()
-        .build();
+        .build()
+        .unwrap();
     let mut properties_changed =
         zbus::MessageStream::for_match_rule(properties_rule, &client_conn, None)
             .await
@@ -535,7 +533,7 @@ async fn collection_delete_ignores_already_absent_interface_and_finishes_cleanup
     .unwrap()
     .unwrap()
     .unwrap();
-    let (interface, changed, _invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
+    let (interface, changed, _invalidated): (String, HashMap<String, OwnedVariant>, Vec<String>) =
         changed_signal.body().deserialize().unwrap();
     assert_eq!(interface, "org.freedesktop.Secret.Service");
     assert!(changed.contains_key("Collections"));
@@ -725,10 +723,9 @@ async fn items_signals_reuse_reserved_workers_and_match_canonical_and_alias_valu
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .interface("org.freedesktop.DBus.Properties")
-        .unwrap()
         .member("PropertiesChanged")
-        .unwrap()
-        .build();
+        .build()
+        .unwrap();
     let mut signals = zbus::MessageStream::for_match_rule(rule, &client, None)
         .await
         .unwrap();
@@ -766,7 +763,7 @@ async fn items_signals_reuse_reserved_workers_and_match_canonical_and_alias_valu
         paths.insert(signal.header().path().unwrap().as_str().to_string());
         let (interface, mut changed, invalidated): (
             String,
-            HashMap<String, OwnedValue>,
+            HashMap<String, OwnedVariant>,
             Vec<String>,
         ) = signal.body().deserialize().unwrap();
         assert_eq!(interface, "org.freedesktop.Secret.Collection");
@@ -845,7 +842,7 @@ async fn queued_alias_items_reads_follow_repointing_and_preserve_removed_alias_e
                 matches!(reply, Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.UnknownObject")
             );
         } else {
-            let value: OwnedValue = reply.unwrap().body().deserialize().unwrap();
+            let value: OwnedVariant = reply.unwrap().body().deserialize().unwrap();
             assert_eq!(
                 Vec::<OwnedObjectPath>::try_from(value).unwrap(),
                 vec![item_path(&second.id, &item.id)]

@@ -23,7 +23,6 @@ async fn daemon_subscribes_to_client_disconnects_before_publishing_name() {
     let cert = export_public_cert(&h.gnupg_home);
     init_noirpass_store(store.path(), &cert);
     let monitor = zbus::connection::Builder::address(address.as_str())
-        .unwrap()
         .build()
         .await
         .unwrap();

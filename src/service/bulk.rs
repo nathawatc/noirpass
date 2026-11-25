@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use zbus::OwnedObjectPath;
 use zbus::fdo;
-use zbus::zvariant::OwnedObjectPath;
 
 use super::session::Secret;
 use super::state::{MAX_BLOCKING_WORKERS, RequestGuard};
@@ -18,8 +18,8 @@ pub(super) fn secret_entry_bytes(
     path: &OwnedObjectPath,
     secret: &Secret,
 ) -> Result<usize, SecretError> {
-    let size = zbus::zvariant::serialized_size(
-        zbus::zvariant::serialized::Context::new_dbus(zbus::zvariant::LE, 0),
+    let size = zbus::wire::serialized_size(
+        zbus::wire::serialized::Context::new(zbus::wire::LE, 0),
         &(path, secret),
     )
     .map_err(|err| SecretError::Failed(err.to_string()))?

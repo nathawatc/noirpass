@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use super::super::harness::harness;
 use super::super::helpers::{attrs, object_id, service_proxy};

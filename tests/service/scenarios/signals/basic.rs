@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use super::super::super::helpers::{
     COLLECTION_IFACE, ITEM_IFACE, PROPERTIES_IFACE, SERVICE_NAME, attrs, locked_property,

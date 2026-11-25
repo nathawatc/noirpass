@@ -43,7 +43,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zbus::{fdo, interface};
 
 use crate::crypto::{DhHandshake, SessionCipher};
@@ -83,11 +83,11 @@ impl Service {
     async fn open_session(
         &self,
         algorithm: &str,
-        input: Value<'_>,
+        input: Variant<'_>,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
+    ) -> fdo::Result<(OwnedVariant, OwnedObjectPath)> {
         let activity = self.state.request(&(algorithm, &input))?;
         let (output, cipher) = match algorithm {
             ALGORITHM_PLAIN => {
@@ -100,7 +100,7 @@ impl Service {
                     ));
                 }
                 (
-                    Value::from("")
+                    Variant::from("")
                         .try_to_owned()
                         .map_err(|e| fdo::Error::Failed(e.to_string()))?,
                     SessionCipher::Plain,
@@ -116,7 +116,7 @@ impl Service {
                     .derive(&client_pub)
                     .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
                 (
-                    Value::from(server_pub)
+                    Variant::from(server_pub)
                         .try_to_owned()
                         .map_err(|e| fdo::Error::Failed(e.to_string()))?,
                     cipher,
@@ -162,7 +162,7 @@ impl Service {
     #[zbus(out_args("collection", "prompt"))]
     async fn create_collection(
         &self,
-        properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedVariant>,
         alias: &str,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,

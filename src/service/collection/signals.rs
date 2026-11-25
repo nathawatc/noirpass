@@ -7,7 +7,7 @@ use std::sync::Arc;
 use zbus::fdo;
 use zbus::names::InterfaceName;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedObjectPath, Value};
+use zbus::{OwnedObjectPath, Variant};
 
 use super::{COLLECTION_INTERFACE, Collection};
 use crate::service::state::MutationGuard;
@@ -101,7 +101,7 @@ pub(crate) async fn emit_collection_items_changed(
         fdo::Properties::properties_changed(
             &emitter,
             InterfaceName::from_static_str_unchecked(COLLECTION_INTERFACE),
-            HashMap::from([("Items", Value::from(items.as_slice()))]),
+            HashMap::from([("Items", Variant::from(items.as_slice()))]),
             Cow::Borrowed(&[]),
         )
         .await?;
@@ -138,7 +138,7 @@ pub(crate) async fn emit_collection_modified(
         fdo::Properties::properties_changed(
             &emitter,
             InterfaceName::from_static_str_unchecked(COLLECTION_INTERFACE),
-            HashMap::from([("Modified", Value::from(modified))]),
+            HashMap::from([("Modified", Variant::from(modified))]),
             Cow::Borrowed(&[]),
         )
         .await?;

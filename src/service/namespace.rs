@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use zbus::fdo;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::objects::root_path;
 use super::{
@@ -18,7 +18,7 @@ use super::{
 impl Service {
     pub(super) async fn create_collection_inner(
         &self,
-        properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedVariant>,
         alias: &str,
         server: &ObjectServer,
         emitter: &SignalEmitter<'_>,

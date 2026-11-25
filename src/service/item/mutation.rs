@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
+use zbus::OwnedObjectPath;
 use zbus::fdo;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::OwnedObjectPath;
 
 use super::{Item, root_path};
 use crate::service::collection::{

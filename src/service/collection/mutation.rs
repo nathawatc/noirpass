@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use zbus::fdo;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::{
     Collection, emit_collection_items_changed, emit_collection_label_modified,
@@ -20,7 +20,7 @@ use crate::service::{
 impl Collection {
     pub(super) async fn create_item_inner(
         &self,
-        properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedVariant>,
         secret: Secret,
         replace: bool,
         server: &ObjectServer,

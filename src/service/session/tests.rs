@@ -3,13 +3,13 @@ use crate::crypto::{DhHandshake, SessionCipher};
 use crate::gpg::test_support::TestGnupg;
 use crate::service::tests::test_state;
 use zbus::connection::Builder;
-use zbus::zvariant::serialized::Context;
-use zbus::zvariant::{LE, to_bytes};
+use zbus::wire::serialized::Context;
+use zbus::wire::{LE, to_bytes};
 
 async fn p2p_pair() -> (zbus::Connection, zbus::Connection) {
     let guid = zbus::Guid::generate();
-    let (p0, p1) = tokio::net::UnixStream::pair().unwrap();
-    let server = Builder::unix_stream(p0).server(guid).unwrap().p2p().build();
+    let (p0, p1) = std::os::unix::net::UnixStream::pair().unwrap();
+    let server = Builder::unix_stream(p0).server(guid).p2p().build();
     let client = Builder::unix_stream(p1).p2p().build();
     let (server, client) = tokio::join!(server, client);
     (server.unwrap(), client.unwrap())
@@ -43,7 +43,7 @@ fn secret_zvariant_roundtrip() {
         content_type: "text/plain".to_string(),
     };
 
-    let ctxt = Context::new_dbus(LE, 0);
+    let ctxt = Context::new(LE, 0);
     let bytes = to_bytes(ctxt, &secret).unwrap();
     let (decoded, _): (Secret, usize) = bytes.deserialize().unwrap();
     assert_eq!(decoded, secret);
@@ -66,6 +66,7 @@ async fn close_removes_object_and_session_state() {
             .at(&path, Session::new(state.clone(), path.clone()))
             .await
             .unwrap()
+            .is_none()
     );
 
     session
@@ -139,6 +140,7 @@ async fn failed_close_preserves_state_and_can_be_retried() {
             .at(&path, Session::new(state.clone(), path.clone()))
             .await
             .unwrap()
+            .is_none()
     );
 
     let err = session
@@ -190,6 +192,7 @@ async fn concurrent_close_preserves_unrelated_session() {
             .at(&path, Session::new(state.clone(), path.clone()))
             .await
             .unwrap()
+            .is_none()
     );
 
     let (first, second) = tokio::join!(

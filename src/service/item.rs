@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use zbus::names::InterfaceName;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedObjectPath, Value};
+use zbus::{OwnedObjectPath, Variant};
 use zbus::{fdo, interface};
 
 use crate::service::objects::root_path;
@@ -74,7 +74,7 @@ impl Item {
         emitter: &SignalEmitter<'_>,
     ) -> fdo::Result<()> {
         let mut changed = HashMap::new();
-        changed.insert("Attributes", Value::from(self.attributes()?));
+        changed.insert("Attributes", Variant::from(self.attributes()?));
         fdo::Properties::properties_changed(
             emitter,
             InterfaceName::from_static_str_unchecked(ITEM_INTERFACE),
@@ -88,7 +88,7 @@ impl Item {
     /// Emit the changed signal for Label while mutation serialization remains held.
     pub(crate) async fn emit_label_changed(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
         let mut changed = HashMap::new();
-        changed.insert("Label", Value::from(self.label()?));
+        changed.insert("Label", Variant::from(self.label()?));
         fdo::Properties::properties_changed(
             emitter,
             InterfaceName::from_static_str_unchecked(ITEM_INTERFACE),

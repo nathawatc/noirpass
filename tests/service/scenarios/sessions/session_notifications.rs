@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use noirpass::service::session::Secret;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::super::helpers::{
@@ -18,7 +18,7 @@ async fn mutate_item(
 ) -> OwnedObjectPath {
     match step {
         0 | 1 => {
-            let properties: HashMap<String, OwnedValue> = HashMap::new();
+            let properties: HashMap<String, OwnedVariant> = HashMap::new();
             let (path, _): (OwnedObjectPath, OwnedObjectPath) = collection
                 .call("CreateItem", &(&properties, secret, step == 1))
                 .await
@@ -50,7 +50,7 @@ pub(in super::super) async fn s6d_session_collection_notifications() {
     collection_notifications("/org/freedesktop/secrets/collection/session", "session").await;
     let conn = zbus::Connection::session().await.unwrap();
     let service = service_proxy(&conn).await;
-    let properties: HashMap<String, OwnedValue> = HashMap::new();
+    let properties: HashMap<String, OwnedVariant> = HashMap::new();
     let (path, _): (OwnedObjectPath, OwnedObjectPath) = service
         .call("CreateCollection", &(&properties, "modified_test"))
         .await
@@ -66,8 +66,8 @@ pub(in super::super) async fn s6d_session_collection_notifications() {
 async fn collection_notifications(collection_path: &str, alias_name: &str) {
     let conn = zbus::Connection::session().await.unwrap();
     let service = service_proxy(&conn).await;
-    let (_, session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_, session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let canonical = zbus::Proxy::new(&conn, SERVICE_NAME, collection_path, COLLECTION_IFACE)

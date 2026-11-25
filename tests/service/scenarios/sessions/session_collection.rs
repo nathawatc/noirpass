@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use noirpass::service::{parse_item_path, session::Secret as WireSecret};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use super::super::super::harness::harness;
@@ -11,17 +11,17 @@ use super::super::super::helpers::{
     service_proxy,
 };
 
-fn item_properties(attributes: &HashMap<String, String>) -> HashMap<String, OwnedValue> {
+fn item_properties(attributes: &HashMap<String, String>) -> HashMap<String, OwnedVariant> {
     HashMap::from([
         (
             "org.freedesktop.Secret.Item.Label".to_string(),
-            Value::from("s6c temporary LUKS passphrase")
+            Variant::from("s6c temporary LUKS passphrase")
                 .try_to_owned()
                 .unwrap(),
         ),
         (
             "org.freedesktop.Secret.Item.Attributes".to_string(),
-            Value::from(attributes.clone()).try_to_owned().unwrap(),
+            Variant::from(attributes.clone()).try_to_owned().unwrap(),
         ),
     ])
 }
@@ -197,8 +197,8 @@ pub(in super::super) async fn s6c_temporary_session_collection() {
     let collections: Vec<OwnedObjectPath> = service.get_property("Collections").await.unwrap();
     assert!(collections.contains(&session_collection));
 
-    let (_output, transport_session): (OwnedValue, OwnedObjectPath) = service
-        .call("OpenSession", &("plain", Value::from("")))
+    let (_output, transport_session): (OwnedVariant, OwnedObjectPath) = service
+        .call("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap();
     let collection = zbus::Proxy::new(

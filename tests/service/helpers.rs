@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use noirpass::service::session::Secret as WireSecret;
 use zbus::export::futures_core::Stream;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 pub(super) const SERVICE_NAME: &str = "org.freedesktop.secrets";
 pub(super) const SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -30,7 +30,7 @@ pub(super) async fn service_proxy(conn: &zbus::Connection) -> zbus::Proxy<'stati
 pub(super) async fn next_property_change<S>(
     stream: Pin<&mut S>,
     expected_interface: &str,
-) -> (String, OwnedValue)
+) -> (String, OwnedVariant)
 where
     S: Stream<Item = zbus::Message>,
 {
@@ -38,7 +38,7 @@ where
         .await
         .expect("timed out waiting for PropertiesChanged")
         .expect("PropertiesChanged stream ended");
-    let (interface, changed, invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
+    let (interface, changed, invalidated): (String, HashMap<String, OwnedVariant>, Vec<String>) =
         message.body().deserialize().unwrap();
     assert_eq!(interface, expected_interface);
     assert_eq!(invalidated.len(), 0);
@@ -57,7 +57,7 @@ where
         .await
         .expect("timed out waiting for invalidated PropertiesChanged")
         .expect("invalidated PropertiesChanged stream ended");
-    let (interface, changed, invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
+    let (interface, changed, invalidated): (String, HashMap<String, OwnedVariant>, Vec<String>) =
         message.body().deserialize().unwrap();
     assert_eq!(interface, expected_interface);
     assert_eq!(changed.len(), 0);
@@ -96,8 +96,8 @@ where
 }
 
 pub(super) async fn locked_property(proxy: &zbus::Proxy<'_>, interface: &str) -> bool {
-    let value: OwnedValue = proxy
-        .call::<_, _, OwnedValue>("Get", &(interface, "Locked"))
+    let value: OwnedVariant = proxy
+        .call::<_, _, OwnedVariant>("Get", &(interface, "Locked"))
         .await
         .expect("Locked property");
     bool::try_from(value).expect("Locked property must be boolean")
@@ -115,25 +115,25 @@ pub(super) fn attrs(case: &str) -> Vec<(String, String)> {
     ]
 }
 
-pub(super) fn collection_properties(label: Option<&str>) -> HashMap<String, OwnedValue> {
+pub(super) fn collection_properties(label: Option<&str>) -> HashMap<String, OwnedVariant> {
     let Some(label) = label else {
         return HashMap::new();
     };
     HashMap::from([(
         "org.freedesktop.Secret.Collection.Label".to_string(),
-        Value::from(label).try_to_owned().unwrap(),
+        Variant::from(label).try_to_owned().unwrap(),
     )])
 }
 
-pub(super) fn item_properties(label: &str, case: &str) -> HashMap<String, OwnedValue> {
+pub(super) fn item_properties(label: &str, case: &str) -> HashMap<String, OwnedVariant> {
     HashMap::from([
         (
             "org.freedesktop.Secret.Item.Label".to_string(),
-            Value::from(label).try_to_owned().unwrap(),
+            Variant::from(label).try_to_owned().unwrap(),
         ),
         (
             "org.freedesktop.Secret.Item.Attributes".to_string(),
-            Value::from(attrs(case).into_iter().collect::<HashMap<_, _>>())
+            Variant::from(attrs(case).into_iter().collect::<HashMap<_, _>>())
                 .try_to_owned()
                 .unwrap(),
         ),
@@ -151,7 +151,7 @@ pub(super) async fn assert_invalid_item_create(
     collection: &zbus::Proxy<'_>,
     collection_properties: &zbus::Proxy<'_>,
     item_properties: &zbus::Proxy<'_>,
-    properties: &HashMap<String, OwnedValue>,
+    properties: &HashMap<String, OwnedVariant>,
     secret: &WireSecret,
     replace: bool,
 ) {

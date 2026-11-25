@@ -3,9 +3,9 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use zbus::OwnedObjectPath;
 use zbus::fdo;
 use zbus::object_server::ObjectServer;
-use zbus::zvariant::OwnedObjectPath;
 
 use super::ServiceState;
 use crate::crypto::SessionCipher;
@@ -58,9 +58,7 @@ pub fn session_path(n: u128) -> OwnedObjectPath {
 /// Fails for alias names that are not valid path elements; such aliases are
 /// still stored and resolvable through `ReadAlias`, they just get no object.
 pub fn alias_path(name: &str) -> zbus::Result<OwnedObjectPath> {
-    Ok(OwnedObjectPath::try_from(format!(
-        "{SERVICE_PATH}/aliases/{name}"
-    ))?)
+    OwnedObjectPath::try_from(format!("{SERVICE_PATH}/aliases/{name}"))
 }
 
 /// Extract the collection id from a collection path, if it is one.
@@ -101,15 +99,15 @@ where
         .at(&path, Session::new(state.clone(), path.clone()))
         .await
     {
-        Ok(true) if state.session_cipher(&path, &owner).is_some() => Ok(path),
-        Ok(true) => {
+        Ok(None) if state.session_cipher(&path, &owner).is_some() => Ok(path),
+        Ok(None) => {
             // Owner disconnected while ObjectServer::at() yielded.
             let _ = server.remove::<Session, _>(&path).await;
             Err(fdo::Error::Failed(
                 "session owner disconnected during registration".into(),
             ))
         }
-        Ok(false) => {
+        Ok(Some(_)) => {
             state.remove_session(&path, &owner);
             Err(fdo::Error::Failed(format!(
                 "session object path {path} is already registered"

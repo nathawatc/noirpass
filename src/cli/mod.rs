@@ -145,8 +145,8 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Serve the service object first, then the pre-existing collections and
     // items, and only then claim the well-known name: clients activating us
     // never observe a half-populated object tree.
-    let connection = zbus::connection::Builder::session()?
-        .serve_at(SERVICE_PATH, Service::new(state.clone()))?
+    let connection = zbus::connection::Builder::session()
+        .serve_at(SERVICE_PATH, Service::new(state.clone()))
         .build()
         .await?;
     register_existing(connection.object_server(), &state).await?;

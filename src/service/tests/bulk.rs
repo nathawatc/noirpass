@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use zbus::zvariant::{LE, OwnedObjectPath, serialized::Context, to_bytes};
+use zbus::OwnedObjectPath;
+use zbus::wire::{LE, serialized::Context, to_bytes};
 use zeroize::Zeroizing;
 
 use super::super::SecretError;
@@ -63,7 +64,7 @@ fn bulk_response_bounds_wire_size_and_refunds_replaced_paths() {
     insert_bulk_secret(&mut out, &mut bytes, path.clone(), secret.clone()).unwrap();
     insert_bulk_secret(&mut out, &mut bytes, path.clone(), secret.clone()).unwrap();
     assert_eq!(out.len(), 1);
-    let serialized = to_bytes(Context::new_dbus(LE, 0), &out).unwrap();
+    let serialized = to_bytes(Context::new(LE, 0), &out).unwrap();
     assert!(serialized.len() <= bytes);
     assert!(bytes <= MAX_BULK_SECRET_BYTES);
     drop(serialized);
@@ -86,5 +87,5 @@ fn bulk_response_bounds_wire_size_and_refunds_replaced_paths() {
         secret.value = Zeroizing::new(vec![9; length]);
         insert_bulk_secret(&mut out, &mut bytes, path, secret.clone()).unwrap();
     }
-    assert!(to_bytes(Context::new_dbus(LE, 0), &out).unwrap().len() <= bytes);
+    assert!(to_bytes(Context::new(LE, 0), &out).unwrap().len() <= bytes);
 }

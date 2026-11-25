@@ -1,4 +1,4 @@
-use zbus::zvariant::{OwnedObjectPath, Value};
+use zbus::{OwnedObjectPath, Variant};
 
 use super::super::objects::validate_session_owner;
 use super::super::session::Session;
@@ -31,7 +31,7 @@ async fn saturated_request_admission_preserves_method_errors_and_property_reads(
     for method in ["OpenSession", "GetSecrets"] {
         let error = if method == "OpenSession" {
             proxy
-                .call_method(method, &("plain", Value::from("")))
+                .call_method(method, &("plain", Variant::from("")))
                 .await
                 .unwrap_err()
         } else {
@@ -47,7 +47,7 @@ async fn saturated_request_admission_preserves_method_errors_and_property_reads(
     assert_ne!(collections.len(), 0);
     drop(requests);
     let error = proxy
-        .call_method("OpenSession", &("plain", Value::from("")))
+        .call_method("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap_err();
     assert!(matches!(error, zbus::Error::MethodError(ref name, _, _)
@@ -101,6 +101,7 @@ async fn failed_object_registration_rolls_back_session_state() {
             .at(&occupied, Session::new(state.clone(), occupied.clone()))
             .await
             .unwrap()
+            .is_none()
     );
 
     let err =
@@ -125,6 +126,7 @@ async fn object_registration_error_rolls_back_both_registries() {
             .at(SERVICE_PATH, zbus::fdo::ObjectManager)
             .await
             .unwrap()
+            .is_none()
     );
     let connection_guard = server_conn.clone();
     server_conn.close().await.unwrap();
@@ -162,7 +164,7 @@ async fn open_session_rejects_missing_sender() {
             SERVICE_PATH,
             iface,
             "OpenSession",
-            &("plain", Value::from("")),
+            &("plain", Variant::from("")),
         )
         .await
         .unwrap_err();
@@ -178,7 +180,7 @@ async fn open_session_rejects_missing_sender() {
             SERVICE_PATH,
             iface,
             "OpenSession",
-            &(ALGORITHM_DH, Value::from(client_dh.public_bytes())),
+            &(ALGORITHM_DH, Variant::from(client_dh.public_bytes())),
         )
         .await
         .unwrap_err();
@@ -193,7 +195,7 @@ async fn open_session_rejects_missing_sender() {
             SERVICE_PATH,
             iface,
             "OpenSession",
-            &("rot13", Value::from("")),
+            &("rot13", Variant::from("")),
         )
         .await
         .unwrap_err();
