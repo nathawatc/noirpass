@@ -82,8 +82,9 @@ pub(super) fn load_recipient_in(data_dir: &Path, root: &Directory) -> Result<(Co
 }
 
 /// Compute status without mutating store.
+#[cfg(test)]
 #[must_use]
-pub fn status(data_dir: &Path) -> Status {
+pub(super) fn status(data_dir: &Path) -> Status {
     status_with_cert(data_dir).0
 }
 

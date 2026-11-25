@@ -69,11 +69,12 @@ pub(super) fn ciphertext_file_sha256(file: &mut fs::File) -> std::io::Result<Str
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
-        let read = file.read(&mut buf)?;
-        if read == 0 {
-            break;
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buf[..read]),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
         }
-        hasher.update(&buf[..read]);
     }
     Ok(format_sha256(hasher.finalize()))
 }

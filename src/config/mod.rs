@@ -2,13 +2,12 @@
 
 use std::fs::{self, File, Permissions};
 use std::io;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use sequoia_openpgp::Cert;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::filesystem::{Directory, create_directory_all_nofollow, validate_no_symlink_components};
 use crate::store::{INDEX_FILE, SECRETS_DIR};
 
@@ -67,19 +66,7 @@ impl LifecycleLock {
             0o600,
         )?;
 
-        loop {
-            // SAFETY: `file` is an open regular file and its descriptor remains
-            // alive for the lifetime of the returned guard.
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if result == 0 {
-                break;
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(Error::Io(error));
-        }
+        file.lock()?;
 
         directory.set_permissions(Permissions::from_mode(0o700))?;
         file.set_permissions(Permissions::from_mode(0o600))?;
@@ -100,7 +87,9 @@ use format::{config_path, recipient_cert_path};
 use init::init_from_bytes;
 pub use init::init_store_from_path;
 pub use startup::open_startup_store;
-pub use status::{load_recipient, status, status_with_cert};
+#[cfg(test)]
+use status::status;
+pub use status::{load_recipient, status_with_cert};
 
 /// Minimal persisted config.
 #[derive(Debug, Clone, PartialEq, Eq)]

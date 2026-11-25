@@ -46,21 +46,33 @@ impl ServiceState {
     /// Replace any persisted target with a bounded, process-local session target.
     /// The caller holds object lifecycle serialization through registration and signals.
     pub(crate) fn set_session_alias(&self, name: &str) -> crate::Result<()> {
+        {
+            let collection = self
+                .session_collection
+                .lock()
+                .expect("session collection lock poisoned");
+            if name.len() > MAX_SESSION_ALIAS_BYTES
+                || (!collection.aliases.contains(name)
+                    && collection.aliases.len() >= MAX_SESSION_ALIASES)
+            {
+                return Err(crate::Error::Config(
+                    "temporary collection exceeds alias limits".into(),
+                ));
+            }
+        }
+        // Never persist the session target, or leave an old target to reappear after restart.
+        // Validate capacity before the Store mutation, release the mutex across the disk commit,
+        // and update memory only after a definite commit.
+        self.store.set_alias(name, None)?;
         let mut collection = self
             .session_collection
             .lock()
             .expect("session collection lock poisoned");
-        if name.len() > MAX_SESSION_ALIAS_BYTES
-            || (!collection.aliases.contains(name)
-                && collection.aliases.len() >= MAX_SESSION_ALIASES)
-        {
+        if !collection.aliases.contains(name) && collection.aliases.len() >= MAX_SESSION_ALIASES {
             return Err(crate::Error::Config(
                 "temporary collection exceeds alias limits".into(),
             ));
         }
-        // Never persist the session target, or leave an old target to reappear after restart.
-        // Validate capacity before the Store mutation, and update memory only after a definite commit.
-        self.store.set_alias(name, None)?;
         collection.aliases.insert(name.to_string());
         Ok(())
     }
