@@ -143,7 +143,7 @@ pub(crate) async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     store.recover_interrupted_operations()?;
     store.ensure_safe_to_serve()?;
     store.ensure_default()?;
-    let gpg = Gpg::from_cert(recipient.cert)?;
+    let gpg = Gpg::from_cert(recipient.cert);
     gpg.ensure_recipient_secret_available().await?;
     info!(key = %gpg.fingerprint(), "using OpenPGP key");
     let state = ServiceState::new(store, gpg);

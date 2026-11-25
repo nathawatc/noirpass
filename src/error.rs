@@ -15,10 +15,6 @@ pub enum Error {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A generic redb error.
-    #[error("database error: {0}")]
-    Redb(#[from] redb::Error),
-
     /// The redb database could not be opened or created.
     #[error("database open error: {0}")]
     RedbDatabase(#[from] redb::DatabaseError),

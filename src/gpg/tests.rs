@@ -6,7 +6,7 @@ use sequoia_openpgp::cert::CertBuilder;
 async fn encrypt_decrypt_roundtrip_via_agent() {
     let gnupg = TestGnupg::new();
     let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
-    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
     assert_eq!(gpg.fingerprint(), gnupg.fingerprint());
     gpg.ensure_recipient_secret_available().await.unwrap();
 
@@ -24,7 +24,7 @@ async fn encrypt_decrypt_roundtrip_via_agent() {
 async fn decrypt_rejects_garbage() {
     let gnupg = TestGnupg::new();
     let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
-    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
     assert!(gpg.decrypt(b"not a pgp message at all").await.is_err());
 }
 
@@ -33,7 +33,7 @@ fn encrypt_uses_configured_recipient_cert() {
     let one = TestGnupg::new();
     let two = TestGnupg::new();
     let cert = parse_recipient_cert(&two.export_public_binary()).unwrap();
-    let gpg = Gpg::from_cert(cert).unwrap();
+    let gpg = Gpg::from_cert(cert);
 
     assert_eq!(gpg.fingerprint(), two.fingerprint());
     assert_ne!(gpg.fingerprint(), one.fingerprint());
@@ -44,7 +44,7 @@ async fn recipient_secret_check_rejects_wrong_gnupg_home() {
     let one = TestGnupg::new();
     let two = TestGnupg::new();
     let cert = parse_recipient_cert(&two.export_public_binary()).unwrap();
-    let gpg = Gpg::from_cert_with_homedir(cert, Some(one.path().to_path_buf())).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(one.path().to_path_buf()));
 
     let err = gpg.ensure_recipient_secret_available().await.unwrap_err();
 
@@ -83,7 +83,7 @@ fn has_usable_encryption_key_accepts_transport_only_subkey() {
 async fn encrypt_decrypt_roundtrip_via_agent_with_storage_only_subkey() {
     let cert = storage_only_cert();
     let gnupg = TestGnupg::import(&cert);
-    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
 
     let plaintext = b"storage-only secret";
     let ciphertext = gpg.encrypt(plaintext).unwrap();
@@ -96,7 +96,7 @@ async fn encrypt_decrypt_roundtrip_via_agent_with_storage_only_subkey() {
 async fn encrypt_decrypt_roundtrip_via_agent_with_transport_only_subkey() {
     let cert = transport_only_cert();
     let gnupg = TestGnupg::import(&cert);
-    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
 
     let plaintext = b"transport-only secret";
     let ciphertext = gpg.encrypt(plaintext).unwrap();
@@ -120,7 +120,7 @@ async fn agent_socket_matches_gnupg_and_does_not_restart_stopped_agent() {
     let socket = super::socket::agent_socket(Some(gnupg.path())).unwrap();
     assert_eq!(socket, std::path::Path::new(expected.trim()));
     let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
-    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
     gpg.ensure_recipient_secret_available().await.unwrap();
     let status = std::process::Command::new("gpgconf")
         .arg("--homedir")

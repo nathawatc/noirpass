@@ -17,7 +17,7 @@ pub(in crate::service) fn test_state(
     let store = Store::open(dir).unwrap();
     store.ensure_default().unwrap();
     let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
-    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf())).unwrap();
+    let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
     ServiceState::new(store, gpg)
 }
 

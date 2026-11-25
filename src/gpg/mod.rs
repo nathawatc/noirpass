@@ -40,18 +40,20 @@ pub struct Gpg {
 
 impl Gpg {
     /// Construct a `Gpg` from the configured recipient certificate.
-    pub fn from_cert(cert: Cert) -> Result<Self> {
+    #[must_use]
+    pub fn from_cert(cert: Cert) -> Self {
         Self::from_cert_with_homedir(cert, None)
     }
 
     /// Construct a `Gpg` from a cert and explicit `GNUPGHOME` for tests.
-    pub fn from_cert_with_homedir(cert: Cert, homedir: Option<PathBuf>) -> Result<Self> {
+    #[must_use]
+    pub fn from_cert_with_homedir(cert: Cert, homedir: Option<PathBuf>) -> Self {
         let fingerprint = cert.fingerprint().to_hex();
-        Ok(Self {
+        Self {
             cert,
             fingerprint,
             homedir,
-        })
+        }
     }
 
     /// The primary fingerprint (hex) of the recipient certificate.
@@ -63,14 +65,12 @@ impl Gpg {
     /// Verify that `gpg-agent` has a secret key for at least one current
     /// encryption-capable recipient key.
     pub async fn ensure_recipient_secret_available(&self) -> Result<()> {
-        let cert = self.cert.clone();
-        let homedir = self.homedir.clone();
-        let fingerprint = self.fingerprint.clone();
-        agent::ensure_recipient_secret_available(homedir.as_deref(), &cert)
+        agent::ensure_recipient_secret_available(self.homedir.as_deref(), &self.cert)
             .await
             .map_err(|err| {
                 Error::Config(format!(
-                    "no available GnuPG secret key for configured recipient {fingerprint}: {err}"
+                    "no available GnuPG secret key for configured recipient {}: {err}",
+                    self.fingerprint
                 ))
             })
     }

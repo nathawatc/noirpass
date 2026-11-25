@@ -8,15 +8,11 @@ pub(super) async fn run(store_dir: &Path) -> noirpass::Result<ExitCode> {
     let (mut status, cert) = status_with_cert(store_dir);
     if status.usable()
         && let Some(cert) = cert
+        && let Err(err) = Gpg::from_cert(cert)
+            .ensure_recipient_secret_available()
+            .await
     {
-        match Gpg::from_cert(cert) {
-            Ok(gpg) => {
-                if let Err(err) = gpg.ensure_recipient_secret_available().await {
-                    status.errors.push(err.to_string());
-                }
-            }
-            Err(err) => status.errors.push(err.to_string()),
-        }
+        status.errors.push(err.to_string());
     }
     print_status(&status);
     if status.usable() {
