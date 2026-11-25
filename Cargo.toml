@@ -22,9 +22,11 @@ exclude = [
     ".github/",
     ".gitignore",
     ".rumdl.toml",
+    ".editorconfig",
     # Matches root and all nested AGENTS.md files (src/, systemd/, tests/).
     "AGENTS.md",
     "SKILL.md",
+    "CODE_OF_CONDUCT.md",
     "flake.lock",
     "flake.nix",
 ]

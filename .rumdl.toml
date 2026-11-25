@@ -1,9 +1,7 @@
 [global]
-disable = ["MD033"]
+editorconfig = true
 extend-enable = ["MD060", "MD063"]
-respect-gitignore = true
 flavor = "gfm"
 
 [MD013]
-line-length = 100  # Line length
 code-blocks = false  # Exclude code blocks from line length check
