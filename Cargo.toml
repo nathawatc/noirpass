@@ -67,5 +67,5 @@ zeroize = { version = "1.9.0", features = ["serde"] }
 
 [dev-dependencies]
 oo7 = { version = "0.7.0-alpha", default-features = false, features = ["tokio", "native_crypto"] }
-roxmltree = "0.20.0"
+roxmltree = "0.21.2"
 tempfile = "3.27.0"
