@@ -174,8 +174,7 @@ impl Collection {
                     .blocking(None, move |state| {
                         Ok(state.store().search_collection_items(&id, &attributes)?)
                     })
-                    .await
-                    .map_err(|err| fdo::Error::Failed(err.to_string()))?
+                    .await?
             };
             Ok(items
                 .into_iter()
@@ -253,10 +252,10 @@ impl Collection {
                 .collect());
         }
         let object = self.clone();
-        self.state
-            .blocking_admitted(activity.clone(), None, move |_| Ok(object.item_paths()))
-            .await
-            .map_err(|err| fdo::Error::Failed(err.to_string()))?
+        Ok(self
+            .state
+            .blocking_admitted(activity.clone(), None, move |_| Ok(object.item_paths()?))
+            .await?)
     }
 
     /// Human-readable label.

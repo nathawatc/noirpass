@@ -214,13 +214,9 @@ impl Collection {
             let label = label.to_string();
             self.state
                 .blocking(Some(lifecycle.clone()), move |state| {
-                    Ok(state
-                        .store()
-                        .set_collection_label(&collection_id, &label)
-                        .map_err(fdo::Error::from))
+                    Ok(state.store().set_collection_label(&collection_id, &label)?)
                 })
-                .await
-                .map_err(|err| fdo::Error::Failed(err.to_string()))??;
+                .await?;
         }
         emit_collection_label_modified(&self.state, server, connection, &id).await?;
         let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;

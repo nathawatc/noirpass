@@ -53,3 +53,18 @@ impl From<crate::Error> for SecretError {
         }
     }
 }
+
+impl From<SecretError> for fdo::Error {
+    fn from(err: SecretError) -> Self {
+        match err {
+            SecretError::InvalidArgs(message) => Self::InvalidArgs(message),
+            SecretError::NotSupported(message) => Self::NotSupported(message),
+            SecretError::Failed(message) | SecretError::NoSession(message) => Self::Failed(message),
+            SecretError::AccessDenied(message) => Self::AccessDenied(message),
+            SecretError::LimitsExceeded(message) => Self::LimitsExceeded(message),
+            SecretError::NoSuchObject(message) => Self::UnknownObject(message),
+            SecretError::ZBus(zbus::Error::FDO(fdo)) => *fdo,
+            SecretError::ZBus(other) => Self::Failed(other.to_string()),
+        }
+    }
+}

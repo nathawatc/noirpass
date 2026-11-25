@@ -159,13 +159,15 @@ impl Item {
                 object
                     .state
                     .blocking(Some(lifecycle.clone()), move |state| {
-                        Ok(state
-                            .store()
-                            .update_item(&id, label.as_deref(), attributes, None, None)
-                            .map_err(fdo::Error::from))
+                        Ok(state.store().update_item(
+                            &id,
+                            label.as_deref(),
+                            attributes,
+                            None,
+                            None,
+                        )?)
                     })
-                    .await
-                    .map_err(|err| fdo::Error::Failed(err.to_string()))??;
+                    .await?;
             }
             let path = object.path();
             let item_emitter = SignalEmitter::new(&connection, path.clone())?;

@@ -91,8 +91,7 @@ pub(crate) async fn emit_collection_items_changed(
                     collection_object_paths_for_id(state, &id)?,
                 ))
             })
-            .await
-            .map_err(|err| fdo::Error::Failed(err.to_string()))?
+            .await?
     };
     for path in paths {
         // Preserve failure when a required collection interface is missing.
@@ -130,8 +129,7 @@ pub(crate) async fn emit_collection_modified(
                     collection_object_paths_for_id(state, &id)?,
                 ))
             })
-            .await
-            .map_err(|err| fdo::Error::Failed(err.to_string()))?
+            .await?
     };
     for path in paths {
         let emitter = SignalEmitter::new(connection, path)?;

@@ -198,8 +198,7 @@ impl Service {
             let query = attributes.clone();
             let mut unlocked: Vec<_> = state
                 .blocking(None, move |state| Ok(state.store().search_items(&query)?))
-                .await
-                .map_err(|err| fdo::Error::Failed(err.to_string()))?
+                .await?
                 .into_iter()
                 .map(|meta| item_path(&meta.collection, &meta.id))
                 .collect();

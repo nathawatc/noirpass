@@ -37,38 +37,27 @@ impl Service {
         let (id, created) = self
             .state
             .blocking(Some(lifecycle.clone()), move |state| {
-                Ok((|| -> fdo::Result<(String, bool)> {
-                    if !alias_for_worker.is_empty()
-                        && let Some(existing) = state
-                            .read_alias(&alias_for_worker)
-                            .map_err(fdo::Error::from)?
-                        && (existing == SESSION_COLLECTION_ID
-                            || state.store().get_collection(&existing).is_ok())
-                    {
-                        if let Some(label) = label.as_deref() {
-                            if existing == SESSION_COLLECTION_ID {
-                                state
-                                    .set_session_collection_label(label)
-                                    .map_err(fdo::Error::from)?;
-                            } else {
-                                state
-                                    .store()
-                                    .set_collection_label(&existing, label)
-                                    .map_err(fdo::Error::from)?;
-                            }
+                if !alias_for_worker.is_empty()
+                    && let Some(existing) = state.read_alias(&alias_for_worker)?
+                    && (existing == SESSION_COLLECTION_ID
+                        || state.store().get_collection(&existing).is_ok())
+                {
+                    if let Some(label) = label.as_deref() {
+                        if existing == SESSION_COLLECTION_ID {
+                            state.set_session_collection_label(label)?;
+                        } else {
+                            state.store().set_collection_label(&existing, label)?;
                         }
-                        return Ok((existing, false));
                     }
-                    let alias = (!alias_for_worker.is_empty()).then_some(alias_for_worker.as_str());
-                    let meta = state
-                        .store()
-                        .create_collection(label.as_deref().unwrap_or(""), alias)
-                        .map_err(fdo::Error::from)?;
-                    Ok((meta.id, true))
-                })())
+                    return Ok((existing, false));
+                }
+                let alias = (!alias_for_worker.is_empty()).then_some(alias_for_worker.as_str());
+                let meta = state
+                    .store()
+                    .create_collection(label.as_deref().unwrap_or(""), alias)?;
+                Ok((meta.id, true))
             })
-            .await
-            .map_err(|err| fdo::Error::Failed(err.to_string()))??;
+            .await?;
         let path = collection_path(&id);
         if !created {
             if relabel {
