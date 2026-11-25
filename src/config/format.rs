@@ -17,8 +17,8 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(test)]
 use super::RECIPIENT_REL;
 use super::{
-    CONFIG_FILE, CONFIG_TMP_PREFIX, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT,
-    MIN_IDLE_EXIT_SECONDS,
+    CONFIG_FILE, CONFIG_TMP_PREFIX, Config, DEFAULT_IDLE_EXIT_SECONDS, IDLE_EXIT_KEY, INIT_HINT,
+    MIN_IDLE_EXIT_SECONDS, RECIPIENT_CERT_KEY, RECIPIENT_FINGERPRINT_KEY, VERSION_KEY,
 };
 
 impl Config {
@@ -56,10 +56,10 @@ impl Config {
         validate_idle_exit(self.idle_exit)?;
         directory.validate_regular_or_absent(&self.recipient_cert)?;
         let mut doc = DocumentMut::new();
-        doc["version"] = value(self.version);
-        doc["recipient_fingerprint"] = value(self.recipient_fingerprint.as_str());
-        doc["recipient_cert"] = value(self.recipient_cert.to_string_lossy().as_ref());
-        doc["idle_exit"] = value(self.idle_exit);
+        doc[VERSION_KEY] = value(self.version);
+        doc[RECIPIENT_FINGERPRINT_KEY] = value(self.recipient_fingerprint.as_str());
+        doc[RECIPIENT_CERT_KEY] = value(self.recipient_cert.to_string_lossy().as_ref());
+        doc[IDLE_EXIT_KEY] = value(self.idle_exit);
         let text = doc.to_string();
         atomic_write_in(directory, Path::new(CONFIG_FILE), text.as_bytes(), 0o600)?;
         Ok(())
@@ -192,25 +192,32 @@ pub(super) fn parse_config(text: &str) -> Result<Config> {
         .parse::<DocumentMut>()
         .map_err(|e| Error::Config(format!("invalid config.toml: {e}")))?;
     let version = doc
-        .get("version")
+        .get(VERSION_KEY)
         .and_then(toml_edit::Item::as_integer)
-        .ok_or_else(|| Error::Config("config.toml missing integer `version`".into()))?;
+        .ok_or_else(|| Error::Config(format!("config.toml missing integer `{VERSION_KEY}`")))?;
     let recipient_fingerprint = doc
-        .get("recipient_fingerprint")
+        .get(RECIPIENT_FINGERPRINT_KEY)
         .and_then(toml_edit::Item::as_str)
-        .ok_or_else(|| Error::Config("config.toml missing string `recipient_fingerprint`".into()))?
+        .ok_or_else(|| {
+            Error::Config(format!(
+                "config.toml missing string `{RECIPIENT_FINGERPRINT_KEY}`"
+            ))
+        })?
         .to_string();
     let recipient_cert = doc
-        .get("recipient_cert")
+        .get(RECIPIENT_CERT_KEY)
         .and_then(toml_edit::Item::as_str)
-        .ok_or_else(|| Error::Config("config.toml missing string `recipient_cert`".into()))?;
+        .ok_or_else(|| {
+            Error::Config(format!("config.toml missing string `{RECIPIENT_CERT_KEY}`"))
+        })?;
     let recipient_cert = PathBuf::from(recipient_cert);
     validate_recipient_cert_path(&recipient_cert)?;
     let idle_exit = doc
-        .get("idle_exit")
+        .get(IDLE_EXIT_KEY)
         .map(|item| {
-            item.as_integer()
-                .ok_or_else(|| Error::Config("config.toml `idle_exit` must be an integer".into()))
+            item.as_integer().ok_or_else(|| {
+                Error::Config(format!("config.toml `{IDLE_EXIT_KEY}` must be an integer"))
+            })
         })
         .transpose()?
         .unwrap_or(DEFAULT_IDLE_EXIT_SECONDS);

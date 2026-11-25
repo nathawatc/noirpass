@@ -11,12 +11,23 @@ use crate::error::Result;
 use crate::filesystem::{Directory, create_directory_all_nofollow, validate_no_symlink_components};
 use crate::store::{INDEX_FILE, SECRETS_DIR};
 
-const CONFIG_FILE: &str = "config.toml";
+/// Configuration file name inside the Noirpass store directory.
+pub const CONFIG_FILE: &str = "config.toml";
 const CONFIG_TMP_PREFIX: &str = ".noirpass-tmp-";
 const KEYS_DIR: &str = "keys";
 const RECIPIENT_FILE: &str = "recipient.pgp";
-const RECIPIENT_REL: &str = "keys/recipient.pgp";
-const CONFIG_VERSION: i64 = 1;
+/// Store-relative path to the binary `OpenPGP` recipient certificate.
+pub const RECIPIENT_REL: &str = "keys/recipient.pgp";
+/// Current persisted configuration schema version.
+pub const CONFIG_VERSION: i64 = 1;
+/// TOML key for the configuration schema version.
+pub const VERSION_KEY: &str = "version";
+/// TOML key for the expected primary recipient fingerprint.
+pub const RECIPIENT_FINGERPRINT_KEY: &str = "recipient_fingerprint";
+/// TOML key for the store-relative recipient certificate path.
+pub const RECIPIENT_CERT_KEY: &str = "recipient_cert";
+/// TOML key for the daemon inactivity timeout setting.
+pub const IDLE_EXIT_KEY: &str = "idle_exit";
 /// Minimum valid `idle_exit` value (`-1` disables idle exit).
 pub const MIN_IDLE_EXIT_SECONDS: i64 = -1;
 /// Default daemon inactivity timeout in seconds.

@@ -102,6 +102,8 @@ Package installs:
 
 ```text
 bin/noirpass
+share/man/man1/noirpass.1
+share/man/man5/noirpass.toml.5
 share/dbus-1/services/org.freedesktop.secrets.service
 share/systemd/user/noirpass.service
 ```

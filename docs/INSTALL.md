@@ -75,10 +75,12 @@ repository root:
 cargo build --locked --release
 ```
 
-Install executable and activation files:
+Install executable, man pages, and activation files:
 
 ```sh
 sudo install -Dm755 target/release/noirpass /usr/bin/noirpass
+sudo install -Dm644 man/noirpass.1 /usr/local/share/man/man1/noirpass.1
+sudo install -Dm644 man/noirpass.toml.5 /usr/local/share/man/man5/noirpass.toml.5
 install -Dm644 systemd/noirpass.service \
   "$HOME/.config/systemd/user/noirpass.service"
 install -Dm644 systemd/org.freedesktop.secrets.service \

@@ -49,6 +49,10 @@
             '';
 
             postInstall = ''
+              install -Dm644 man/noirpass.1 \
+                "$out/share/man/man1/noirpass.1"
+              install -Dm644 man/noirpass.toml.5 \
+                "$out/share/man/man5/noirpass.toml.5"
               install -Dm644 systemd/noirpass.service \
                 "$out/share/systemd/user/noirpass.service"
               install -Dm644 systemd/org.freedesktop.secrets.service \

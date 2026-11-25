@@ -78,7 +78,8 @@ the daemon and maintenance commands. Stores outside `%h/.local/share` require a 
 adding the selected store's parent to `ReadWritePaths`.
 
 Default idle exit is five minutes without activity, transport sessions, or temporary items. See
-[Configuration](docs/CONFIG.md) for `config.toml` and overrides.
+`man noirpass.toml` (`noirpass.toml(5)`) for `config.toml` settings and `man noirpass`
+(`noirpass(1)`) for CLI options.
 
 Temporary storage is bounded to 256 items and 16 MiB, with at most 1 MiB per secret. Applications
 receiving `org.freedesktop.DBus.Error.LimitsExceeded` should close unused sessions, wait for work to

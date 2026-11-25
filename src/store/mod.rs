@@ -59,8 +59,10 @@ const ALIASES: TableDefinition<&str, &str> = TableDefinition::new("aliases");
 
 /// The well-known id, label and alias of the default collection.
 pub const DEFAULT_COLLECTION_ID: &str = "default";
-pub(crate) const INDEX_FILE: &str = "index.redb";
-pub(crate) const SECRETS_DIR: &str = "secrets";
+/// Metadata database filename inside the Noirpass store directory.
+pub const INDEX_FILE: &str = "index.redb";
+/// Subdirectory holding per-item `OpenPGP` ciphertext files.
+pub const SECRETS_DIR: &str = "secrets";
 
 /// A handle to the persistent metadata index and secret files.
 #[derive(Debug)]

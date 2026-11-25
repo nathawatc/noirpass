@@ -1,0 +1,90 @@
+.TH "NOIRPASS.TOML" "5" "2026-11-25" "noirpass 1.0.2" "File Formats"
+.SH NAME
+noirpass.toml \- Noirpass configuration file (config.toml)
+.SH SYNOPSIS
+\fI$XDG_DATA_HOME/noirpass/config.toml\fR
+.PP
+\fI~/.local/share/noirpass/config.toml\fR
+.PP
+\fI<STORE_DIR>/config.toml\fR
+.SH DESCRIPTION
+Noirpass stores configuration in \fBconfig.toml\fR inside its store directory.
+By default this is \fI$XDG_DATA_HOME/noirpass/config.toml\fR when
+\fBXDG_DATA_HOME\fR is set to an absolute path, or
+\fI~/.local/share/noirpass/config.toml\fR otherwise. Passing
+\fB\-\-store\-dir\fR or setting \fBNOIRPASS_STORE\fR selects
+\fI<STORE_DIR>/config.toml\fR instead.
+.PP
+\fBnoirpass init \-\-recipient <FILE|\->\fR creates \fBconfig.toml\fR with
+mode \fB0600\fR inside a \fB0700\fR store directory. Recipient fields are
+managed by Noirpass; edit only documented runtime settings.
+.SH SETTINGS
+\fBidle_exit\fR (integer, default \fB300\fR, minimum \fB\-1\fR)
+.RS
+Controls how the daemon exits when no transport session is open and the
+temporary \fBsession\fR collection is empty:
+.TP
+\fB\-1\fR
+Keep the daemon running until a signal (\fBSIGINT\fR/\fBSIGTERM\fR), session
+bus disconnect, or fatal store error.
+.TP
+\fB0\fR
+Exit after the first completed Noirpass application method or property
+handler, once no handler is active, no transport session is open, and no
+temporary secret remains.
+.TP
+\fIPositive integer\fR
+Exit after this many seconds without Noirpass application activity, once no
+handler is active, no transport session is open, and no temporary secret
+remains.
+.PP
+Default is \fB300\fR. An existing \fBconfig.toml\fR without \fBidle_exit\fR
+uses the same default. Re\-running \fBnoirpass init\fR for the same primary
+recipient preserves the current deserialized value. Command\-line
+\fB\-\-idle\-exit <VALUE>\fR overrides configuration for one daemon
+invocation.
+.PP
+A temporary secret in the \fBsession\fR collection deliberately pins the
+daemon so Secret Service clients requesting \(lqremember for this session\(rq
+keep that secret until they delete it or the daemon/login session ends. Calls
+managed directly by \fBzbus\fR, including \fBorg.freedesktop.DBus.Peer.Ping\fR
+and \fBorg.freedesktop.DBus.Introspectable.Introspect\fR, do not count as
+Noirpass application activity.
+.RE
+.SH MANAGED FIELDS
+These fields are written by \fBnoirpass init\fR and validated on startup and
+maintenance:
+.TP
+\fBversion\fR (integer, currently \fB1\fR)
+Persisted configuration format version.
+.TP
+\fBrecipient_fingerprint\fR (string)
+Expected uppercase hex primary OpenPGP fingerprint of the store recipient.
+.TP
+\fBrecipient_cert\fR (string, default \fBkeys/recipient.pgp\fR)
+Store\-relative path to the stored binary recipient certificate; must contain
+only normal relative path components inside the store directory.
+.SH EXAMPLES
+Exit after the first Noirpass handler finishes with no transport session or
+temporary secret:
+.RS
+.nf
+idle_exit = 0
+.fi
+.RE
+.PP
+Keep the daemon running:
+.RS
+.nf
+idle_exit = \-1
+.fi
+.RE
+.PP
+Exit after ten inactive minutes:
+.RS
+.nf
+idle_exit = 600
+.fi
+.RE
+.SH SEE ALSO
+\fBnoirpass\fR(1)

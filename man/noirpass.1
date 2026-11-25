@@ -1,0 +1,135 @@
+.TH "NOIRPASS" "1" "2026-11-25" "noirpass 1.0.2" "User Commands"
+.SH NAME
+noirpass \- Minimal on\-demand GPG\-backed freedesktop Secret Service
+.SH SYNOPSIS
+\fBnoirpass\fR [\fIOPTIONS\fR] [\fICOMMAND\fR]
+.SH DESCRIPTION
+Minimal on\-demand GPG\-backed freedesktop Secret Service
+.PP
+When invoked without a subcommand, \fBnoirpass\fR starts the D\-Bus daemon and
+claims \fBorg.freedesktop.secrets\fR on the session bus once the object tree
+is ready. Persistent values are encrypted at rest with OpenPGP and decrypted
+via \fBgpg\-agent\fR(1); temporary secrets in the \fBsession\fR collection
+stay in zeroizing memory until deleted or daemon exit.
+.PP
+Configuration defaults come from \fBconfig.toml\fR (see
+\fBnoirpass.toml\fR(5)).
+.SH OPTIONS
+\fB\-\-store\-dir\fR \fI<STORE_DIR>\fR
+.RS
+Directory for the metadata index and encrypted secret files.
+.PP
+Defaults to `$XDG_DATA_HOME/noirpass` (or `~/.local/share/noirpass`).
+.PP
+[env: \fBNOIRPASS_STORE\fR]
+.RE
+.PP
+\fB\-\-idle\-exit\fR \fI<IDLE_EXIT>\fR
+.RS
+Exit after this many seconds without Noirpass application activity (0 = after
+activity, \-1 = never).
+.PP
+The daemon only exits when there are also no open transport sessions and no
+temporary secrets in the standard session collection. Defaults to
+`config.toml` `idle_exit`, or 300 when omitted.
+.RE
+.PP
+\fB\-h\fR, \fB\-\-help\fR
+.RS
+Print help (see a summary with '\-h')
+.RE
+.PP
+\fB\-V\fR, \fB\-\-version\fR
+.RS
+Print version
+.RE
+.SH COMMANDS
+.SS init
+\fBnoirpass init\fR [\fIOPTIONS\fR]
+.PP
+Initialize noirpass with an exported public `OpenPGP` recipient cert
+.PP
+\fB\-\-recipient\fR \fI<RECIPIENT>\fR
+.RS
+Recipient cert path, or '\-' to read from stdin
+.RE
+.SS deinit
+\fBnoirpass deinit\fR
+.PP
+Permanently delete all Noirpass\-owned state after two confirmations
+.SS status
+\fBnoirpass status\fR
+.PP
+Report whether the noirpass store is initialized and usable
+.SS list
+\fBnoirpass list\fR
+.PP
+List indexed secrets without decrypting them
+.SS delete
+\fBnoirpass delete\fR [\fIOPTIONS\fR] \fI<ID>\fR
+.PP
+Delete one indexed secret and its ciphertext file
+.PP
+\fIID\fR
+.RS
+Secret id shown by `noirpass list`
+.RE
+.PP
+\fB\-y\fR, \fB\-\-yes\fR
+.RS
+Skip the interactive confirmation
+.RE
+.SS check
+\fBnoirpass check\fR [\fIOPTIONS\fR]
+.PP
+Check redb metadata against `.gpg` files and offer safe repair
+.PP
+\fB\-y\fR, \fB\-\-yes\fR
+.RS
+Delete stale/corrupt entries (including canonical ciphertext) and corrupt
+aliases without prompting
+.RE
+.SH ENVIRONMENT
+.TP
+\fBNOIRPASS_STORE\fR
+Overrides the store directory when \fB\-\-store\-dir\fR is not passed.
+.TP
+\fBXDG_DATA_HOME\fR
+Base directory for the default store \fI$XDG_DATA_HOME/noirpass\fR when set to
+an absolute path.
+.TP
+\fBHOME\fR
+Fallback base directory for \fI~/.local/share/noirpass\fR when
+\fBXDG_DATA_HOME\fR is unset.
+.TP
+\fBRUST_LOG\fR
+Controls diagnostic log filtering via \fBtracing_subscriber\fR.
+.TP
+\fBDBUS_SESSION_BUS_ADDRESS\fR
+Session bus socket used by the daemon.
+.TP
+\fBGNUPGHOME\fR
+GnuPG home directory used when locating \fBgpg\-agent\fR(1).
+.SH FILES
+.TP
+\fI$XDG_DATA_HOME/noirpass\fR
+Default store directory (or \fI~/.local/share/noirpass\fR when
+\fBXDG_DATA_HOME\fR is unset).
+.TP
+\fI<STORE_DIR>/config.toml\fR
+Persisted store configuration and runtime settings. See
+\fBnoirpass.toml\fR(5).
+.TP
+\fI<STORE_DIR>/keys/recipient.pgp\fR
+Stored binary OpenPGP public certificate for the configured recipient.
+.TP
+\fI<STORE_DIR>/index.redb\fR
+Metadata database for collections, aliases, and item attributes.
+.TP
+\fI<STORE_DIR>/secrets/\fR
+Directory holding per\-item OpenPGP ciphertext files.
+.SH EXIT STATUS
+Exits \fB0\fR on success and a non\-zero status on configuration, store,
+agent, D\-Bus, or confirmation failure.
+.SH SEE ALSO
+\fBnoirpass.toml\fR(5), \fBgpg\fR(1), \fBgpg\-agent\fR(1), \fBsystemctl\fR(1)

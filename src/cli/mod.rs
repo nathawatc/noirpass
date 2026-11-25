@@ -5,9 +5,18 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::builder::styling::{AnsiColor, Styles};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
-use noirpass::config::{MIN_IDLE_EXIT_SECONDS, init_store_from_path};
+use noirpass::config::{
+    CONFIG_FILE, DEFAULT_IDLE_EXIT_SECONDS, IDLE_EXIT_KEY, MIN_IDLE_EXIT_SECONDS,
+    init_store_from_path,
+};
+
+const STORE_DIR_ENV: &str = "NOIRPASS_STORE";
+const DEFAULT_STORE_SUBDIR: &str = "noirpass";
+const XDG_DATA_HOME_ENV: &str = "XDG_DATA_HOME";
+const HOME_ENV: &str = "HOME";
+const FALLBACK_DATA_SUBDIR: &str = ".local/share";
 
 const CLI_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().bold())
@@ -29,14 +38,10 @@ struct Cli {
     /// Directory for the metadata index and encrypted secret files.
     ///
     /// Defaults to `$XDG_DATA_HOME/noirpass` (or `~/.local/share/noirpass`).
-    #[arg(long, env = "NOIRPASS_STORE")]
+    #[arg(long, env = STORE_DIR_ENV)]
     store_dir: Option<PathBuf>,
 
     /// Exit after this many seconds without Noirpass application activity (0 = after activity, -1 = never).
-    ///
-    /// The daemon only exits when there are also no open transport sessions
-    /// and no temporary secrets in the standard session collection.
-    /// Defaults to `config.toml` `idle_exit`, or 300 when omitted.
     #[arg(
         long,
         allow_negative_numbers = true,
@@ -81,21 +86,31 @@ enum Command {
 
 /// `$XDG_DATA_HOME/noirpass`, falling back to `~/.local/share/noirpass`.
 fn default_store_dir() -> noirpass::Result<PathBuf> {
-    std::env::var_os("XDG_DATA_HOME")
+    std::env::var_os(XDG_DATA_HOME_ENV)
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| {
-            std::env::var_os("HOME")
+            std::env::var_os(HOME_ENV)
                 .map(PathBuf::from)
                 .filter(|p| p.is_absolute())
-                .map(|home| home.join(".local/share"))
+                .map(|home| home.join(FALLBACK_DATA_SUBDIR))
         })
-        .map(|base| base.join("noirpass"))
+        .map(|base| base.join(DEFAULT_STORE_SUBDIR))
         .ok_or_else(|| {
-            noirpass::Error::Config(
-                "cannot determine default store directory: set an absolute XDG_DATA_HOME or HOME, or pass --store-dir / NOIRPASS_STORE".into(),
-            )
+            noirpass::Error::Config(format!(
+                "cannot determine default store directory: set an absolute {XDG_DATA_HOME_ENV} or {HOME_ENV}, or pass --store-dir / {STORE_DIR_ENV}"
+            ))
         })
+}
+
+pub(crate) fn cli_command() -> clap::Command {
+    let idle_exit_long_help = format!(
+        "Exit after this many seconds without Noirpass application activity (0 = after activity, {MIN_IDLE_EXIT_SECONDS} = never).\n\n\
+         The daemon only exits when there are also no open transport sessions \
+         and no temporary secrets in the standard session collection.\n\
+         Defaults to `{CONFIG_FILE}` `{IDLE_EXIT_KEY}`, or {DEFAULT_IDLE_EXIT_SECONDS} when omitted."
+    );
+    Cli::command().mut_arg("idle_exit", move |arg| arg.long_help(idle_exit_long_help))
 }
 
 pub(crate) async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -104,7 +119,8 @@ pub(crate) async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .compact()
         .init();
 
-    let cli = Cli::parse();
+    let matches = cli_command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     if cli.command.is_some() && cli.idle_exit.is_some() {
         return Err(noirpass::Error::Config(
             "--idle-exit applies only to the daemon and cannot be used with subcommands".into(),
@@ -167,3 +183,6 @@ fn confirm_terminal(prompt: &str, non_tty_error: &str) -> noirpass::Result<bool>
         "y" | "yes"
     ))
 }
+
+#[cfg(test)]
+mod man;
