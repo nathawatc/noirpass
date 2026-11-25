@@ -9,7 +9,9 @@ fn indeterminate_update_commit_keeps_artifacts_for_persisted_outcome() {
         .create_item(&collection.id, "item", HashMap::new(), "text/plain", b"old")
         .unwrap();
     let path = store.secret_path(&item.id).unwrap();
-    let staged = store.stage_secret_file(&item.id, b"new", "update").unwrap();
+    let staged = store
+        .stage_secret_file(&item.id, b"new", RecoveryKind::Update)
+        .unwrap();
     let mut updated = item.clone();
     updated.ciphertext_sha256 = Some(ciphertext_sha256(b"new"));
     let bytes = serde_json::to_vec(&updated).unwrap();
@@ -55,7 +57,9 @@ fn indeterminate_update_without_metadata_commit_restores_old_ciphertext() {
         .create_item(&collection.id, "item", HashMap::new(), "text/plain", b"old")
         .unwrap();
     let path = store.secret_path(&item.id).unwrap();
-    let staged = store.stage_secret_file(&item.id, b"new", "update").unwrap();
+    let staged = store
+        .stage_secret_file(&item.id, b"new", RecoveryKind::Update)
+        .unwrap();
     let txn = store.db.begin_write().unwrap();
 
     let err = store

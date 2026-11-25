@@ -29,11 +29,11 @@ mod records;
 mod recovery;
 
 pub use format::is_valid_item_id;
+pub(crate) use format::{RecoveryKind, is_lower_hex, parse_recovery_secret_name};
 use format::{
     ciphertext_file_sha256, ciphertext_sha256, decode_collection, decode_item,
-    is_valid_collection_id, recovery_kind, secret_path,
+    is_valid_collection_id, secret_path,
 };
-pub(crate) use format::{is_lower_hex, parse_recovery_secret_name};
 pub(crate) use integrity::INTEGRITY_CHECK_FAILED_ERROR;
 #[cfg(test)]
 use open::open_existing_root;

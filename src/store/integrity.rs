@@ -11,8 +11,8 @@ use crate::filesystem::Directory;
 
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, INDEX_FILE, ITEMS,
-    IndexedItem, IntegrityReport, ItemMeta, Store, ciphertext_file_sha256, is_valid_collection_id,
-    is_valid_item_id, parse_recovery_secret_name, recovery_kind,
+    IndexedItem, IntegrityReport, ItemMeta, RecoveryKind, Store, ciphertext_file_sha256,
+    is_valid_collection_id, is_valid_item_id, parse_recovery_secret_name,
 };
 
 pub(crate) const INTEGRITY_CHECK_FAILED_ERROR: &str =
@@ -258,7 +258,7 @@ fn scan_integrity<D: ReadableDatabase>(
             recovery_secret_files.push(file_name);
             continue;
         }
-        if recovery_kind(&file_name).is_some() {
+        if RecoveryKind::from_file_name(&file_name).is_some() {
             return Err(Error::Config(format!(
                 "invalid recovery file: {}",
                 path.display()

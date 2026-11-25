@@ -164,23 +164,28 @@ impl Service {
         let state = self.state.clone();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(activity.run(async move {
-            let path =
-                register_session_object_with(&server, &state, cipher, owner.clone(), rand::random)
-                    .await?;
-            if connection.is_bus() {
-                let presence = async {
-                    let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
-                    let name = zbus::names::BusName::try_from(owner.as_str())
-                        .map_err(|err| fdo::Error::InvalidArgs(err.to_string()))?;
-                    proxy.name_has_owner(name).await
-                };
-                validate_session_owner(&server, &state, &path, &owner, presence).await?;
-            }
-            Ok((output, path))
-        }))
-        .await
-        .map_err(|_| fdo::Error::Failed("session registration failed".into()))?
+        activity
+            .spawn("session registration failed", async move {
+                let path = register_session_object_with(
+                    &server,
+                    &state,
+                    cipher,
+                    owner.clone(),
+                    rand::random,
+                )
+                .await?;
+                if connection.is_bus() {
+                    let presence = async {
+                        let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
+                        let name = zbus::names::BusName::try_from(owner.as_str())
+                            .map_err(|err| fdo::Error::InvalidArgs(err.to_string()))?;
+                        proxy.name_has_owner(name).await
+                    };
+                    validate_session_owner(&server, &state, &path, &owner, presence).await?;
+                }
+                Ok((output, path))
+            })
+            .await
     }
 
     /// Create a collection.
@@ -200,13 +205,13 @@ impl Service {
         let alias = alias.to_string();
         let server = server.clone();
         let emitter = emitter.into_owned();
-        tokio::spawn(activity.run(async move {
-            object
-                .create_collection_inner(properties, &alias, &server, &emitter)
-                .await
-        }))
-        .await
-        .map_err(|_| fdo::Error::Failed("collection creation failed".into()))?
+        activity
+            .spawn("collection creation failed", async move {
+                object
+                    .create_collection_inner(properties, &alias, &server, &emitter)
+                    .await
+            })
+            .await
     }
 
     /// Search all collections for items whose attributes are a superset of
@@ -222,24 +227,24 @@ impl Service {
     ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
         let activity = self.state.request(&attributes)?;
         let state = self.state.clone();
-        tokio::spawn(activity.run(async move {
-            let query = attributes.clone();
-            let mut unlocked: Vec<_> = state
-                .blocking(None, move |state| Ok(state.store().search_items(&query)?))
-                .await?
-                .into_iter()
-                .map(|meta| item_path(&meta.collection, &meta.id))
-                .collect();
-            unlocked.extend(
-                state
-                    .search_session_items(&attributes)
+        activity
+            .spawn("item search failed", async move {
+                let query = attributes.clone();
+                let mut unlocked: Vec<_> = state
+                    .blocking(None, move |state| Ok(state.store().search_items(&query)?))
+                    .await?
                     .into_iter()
-                    .map(|meta| item_path(&meta.collection, &meta.id)),
-            );
-            Ok((unlocked, Vec::new()))
-        }))
-        .await
-        .map_err(|_| fdo::Error::Failed("item search failed".into()))?
+                    .map(|meta| item_path(&meta.collection, &meta.id))
+                    .collect();
+                unlocked.extend(
+                    state
+                        .search_session_items(&attributes)
+                        .into_iter()
+                        .map(|meta| item_path(&meta.collection, &meta.id)),
+                );
+                Ok((unlocked, Vec::new()))
+            })
+            .await
     }
 
     /// Unlock objects. Everything is already unlocked, so all inputs are
@@ -321,13 +326,13 @@ impl Service {
         let name = name.to_string();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(activity.run(async move {
-            object
-                .set_alias_inner(&name, collection, &server, &connection)
-                .await
-        }))
-        .await
-        .map_err(|_| fdo::Error::Failed("alias mutation failed".into()))?
+        activity
+            .spawn("alias mutation failed", async move {
+                object
+                    .set_alias_inner(&name, collection, &server, &connection)
+                    .await
+            })
+            .await
     }
 
     /// Object paths of all collections.

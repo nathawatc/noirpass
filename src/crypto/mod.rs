@@ -19,6 +19,8 @@
 //!   let cipher = hs.derive(&client_public)?;   // -> SessionCipher::Dh
 //! ```
 
+use std::sync::OnceLock;
+
 use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use hkdf::Hkdf;
 use num_bigint_dig::BigUint;
@@ -43,9 +45,12 @@ const MODP_1024_PRIME_HEX: &str = concat!(
 /// Byte length of a group element (1024 bits = 128 bytes).
 const GROUP_BYTES: usize = 128;
 
-/// The prime modulus of the MODP group.
-fn prime() -> BigUint {
-    BigUint::parse_bytes(MODP_1024_PRIME_HEX.as_bytes(), 16).expect("MODP prime is valid hex")
+/// The prime modulus of the MODP group, parsed once per process.
+fn prime() -> &'static BigUint {
+    static PRIME: OnceLock<BigUint> = OnceLock::new();
+    PRIME.get_or_init(|| {
+        BigUint::parse_bytes(MODP_1024_PRIME_HEX.as_bytes(), 16).expect("MODP prime is valid hex")
+    })
 }
 
 /// Left-pad a big-endian integer's bytes to exactly `GROUP_BYTES`.
@@ -103,7 +108,7 @@ impl DhHandshake {
         let p = prime();
         let g = BigUint::from(2u32);
         let private = Zeroizing::new(BigUint::from_bytes_be(private_bytes));
-        let public = g.modpow(&private, &p);
+        let public = g.modpow(&private, p);
         Self { private, public }
     }
 
@@ -123,7 +128,7 @@ impl DhHandshake {
     pub fn derive(self, client_public: &[u8]) -> Result<SessionCipher> {
         let p = prime();
         let one = BigUint::from(1u32);
-        let p_minus_one = &p - &one;
+        let p_minus_one = p - &one;
         let significant = match client_public.iter().position(|byte| *byte != 0) {
             Some(offset) => &client_public[offset..],
             None => &[],
@@ -141,7 +146,7 @@ impl DhHandshake {
             ));
         }
 
-        let shared = Zeroizing::new(client.modpow(&self.private, &p));
+        let shared = Zeroizing::new(client.modpow(&self.private, p));
         let ikm = Zeroizing::new(pad_be(&shared));
 
         // HKDF-SHA256 with no salt and empty info, per the spec / libsecret.

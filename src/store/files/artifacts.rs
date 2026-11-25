@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-use super::super::Store;
+use super::super::{RecoveryKind, Store};
 
 impl Store {
     pub(in crate::store) fn sync_secrets_dir(&self) -> Result<()> {
@@ -13,14 +13,15 @@ impl Store {
         Ok(())
     }
 
-    pub(in crate::store) fn recovery_path(&self, kind: &str, id: &str) -> PathBuf {
+    pub(in crate::store) fn recovery_path(&self, kind: RecoveryKind, id: &str) -> PathBuf {
         self.secrets_dir.join(format!(
-            ".noirpass-{kind}-{id}-{:016x}.gpg",
+            ".noirpass-{}-{id}-{:016x}.gpg",
+            kind.as_str(),
             rand::random::<u64>()
         ))
     }
 
-    pub(super) fn reserve_recovery_path(&self, kind: &str, id: &str) -> Result<PathBuf> {
+    pub(super) fn reserve_recovery_path(&self, kind: RecoveryKind, id: &str) -> Result<PathBuf> {
         for _ in 0..16 {
             let path = self.recovery_path(kind, id);
             match self.create_secret_file(&path) {
@@ -64,7 +65,7 @@ impl Store {
         &self,
         id: &str,
         ciphertext: &[u8],
-        kind: &str,
+        kind: RecoveryKind,
     ) -> Result<PathBuf> {
         for _ in 0..16 {
             let path = self.recovery_path(kind, id);

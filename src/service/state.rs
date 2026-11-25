@@ -165,6 +165,22 @@ impl RequestGuard {
     pub(crate) async fn run<F: std::future::Future>(self: Arc<Self>, future: F) -> F::Output {
         ADMITTED_REQUEST.scope(self, future).await
     }
+
+    /// Spawn an owned task carrying request admission through caller cancellation.
+    pub(crate) async fn spawn<T, E, F>(
+        self: Arc<Self>,
+        failure_message: &'static str,
+        future: F,
+    ) -> std::result::Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<zbus::fdo::Error> + Send + 'static,
+        F: std::future::Future<Output = std::result::Result<T, E>> + Send + 'static,
+    {
+        tokio::spawn(self.run(future))
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed(failure_message.into()))?
+    }
 }
 
 impl Drop for ActivityGuard {

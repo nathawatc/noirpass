@@ -24,8 +24,7 @@ pub(super) fn secret_entry_bytes(
     )
     .map_err(|err| SecretError::Failed(err.to_string()))?
     .size();
-    size.checked_add(7)
-        .map(|size| size & !7)
+    size.checked_next_multiple_of(8)
         .ok_or_else(|| SecretError::LimitsExceeded("bulk secret response is too large".into()))
 }
 

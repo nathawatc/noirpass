@@ -112,11 +112,11 @@ impl Item {
         let owner = message_sender(&header)?;
         let object = self.clone();
         let connection = connection.clone();
-        tokio::spawn(
-            activity.run(async move { object.set_secret_inner(secret, &owner, &connection).await }),
-        )
-        .await
-        .map_err(|_| fdo::Error::Failed("secret mutation failed".into()))?
+        activity
+            .spawn("secret mutation failed", async move {
+                object.set_secret_inner(secret, &owner, &connection).await
+            })
+            .await
     }
 
     /// Delete this item and its secret value (and persistent file, when present).
@@ -130,9 +130,11 @@ impl Item {
         let object = self.clone();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(activity.run(async move { object.delete_inner(&server, &connection).await }))
+        activity
+            .spawn("item deletion failed", async move {
+                object.delete_inner(&server, &connection).await
+            })
             .await
-            .map_err(|_| fdo::Error::Failed("item deletion failed".into()))?
     }
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).

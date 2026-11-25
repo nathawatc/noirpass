@@ -146,25 +146,25 @@ impl Collection {
     ) -> fdo::Result<Vec<OwnedObjectPath>> {
         let activity = self.state.request(&attributes)?;
         let object = self.clone();
-        tokio::spawn(activity.run(async move {
-            let id = object.resolve_id()?;
-            let items = if id == SESSION_COLLECTION_ID {
-                object.state.search_session_items(&attributes)
-            } else {
-                object
-                    .state
-                    .blocking(None, move |state| {
-                        Ok(state.store().search_collection_items(&id, &attributes)?)
-                    })
-                    .await?
-            };
-            Ok(items
-                .into_iter()
-                .map(|meta| item_path(&meta.collection, &meta.id))
-                .collect())
-        }))
-        .await
-        .map_err(|_| fdo::Error::Failed("collection search failed".into()))?
+        activity
+            .spawn("collection search failed", async move {
+                let id = object.resolve_id()?;
+                let items = if id == SESSION_COLLECTION_ID {
+                    object.state.search_session_items(&attributes)
+                } else {
+                    object
+                        .state
+                        .blocking(None, move |state| {
+                            Ok(state.store().search_collection_items(&id, &attributes)?)
+                        })
+                        .await?
+                };
+                Ok(items
+                    .into_iter()
+                    .map(|meta| item_path(&meta.collection, &meta.id))
+                    .collect())
+            })
+            .await
     }
 
     /// Create (or replace) an item in this collection.
@@ -191,13 +191,13 @@ impl Collection {
         let object = self.clone();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(activity.run(async move {
-            object
-                .create_item_inner(properties, secret, replace, &server, &connection, &owner)
-                .await
-        }))
-        .await
-        .map_err(|_| fdo::Error::Failed("secret mutation failed".into()))?
+        activity
+            .spawn("secret mutation failed", async move {
+                object
+                    .create_item_inner(properties, secret, replace, &server, &connection, &owner)
+                    .await
+            })
+            .await
     }
 
     /// Delete this collection, all its items and their secret files.
@@ -215,9 +215,11 @@ impl Collection {
         let object = self.clone();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(activity.run(async move { object.delete_inner(&server, &connection).await }))
+        activity
+            .spawn("collection deletion failed", async move {
+                object.delete_inner(&server, &connection).await
+            })
             .await
-            .map_err(|_| fdo::Error::Failed("collection deletion failed".into()))?
     }
 
     /// Object paths of the items in this collection.
@@ -263,11 +265,11 @@ impl Collection {
         let label = label.to_string();
         let server = server.clone();
         let connection = connection.clone();
-        tokio::spawn(
-            activity.run(async move { object.set_label_inner(&label, &server, &connection).await }),
-        )
-        .await
-        .map_err(|_| fdo::Error::Failed("collection metadata mutation failed".into()))?
+        activity
+            .spawn("collection metadata mutation failed", async move {
+                object.set_label_inner(&label, &server, &connection).await
+            })
+            .await
     }
 
     /// Always `false`: noirpass has no lock state (`gpg-agent` is the gate).

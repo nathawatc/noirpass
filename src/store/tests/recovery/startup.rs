@@ -5,8 +5,12 @@ fn startup_recovery_removes_valid_staged_files() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let create = store.stage_secret_file(id, b"create", "create").unwrap();
-    let update = store.stage_secret_file(id, b"update", "update").unwrap();
+    let create = store
+        .stage_secret_file(id, b"create", RecoveryKind::Create)
+        .unwrap();
+    let update = store
+        .stage_secret_file(id, b"update", RecoveryKind::Update)
+        .unwrap();
 
     let report = store.check_integrity().unwrap();
     assert_eq!(report.recovery_secret_files.len(), 2);

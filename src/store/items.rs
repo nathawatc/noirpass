@@ -13,8 +13,9 @@ use crate::error::{Error, Result};
 use crate::random_hex_id;
 
 use super::{
-    COLLECTIONS, CollectionMeta, ITEMS, ItemMeta, PersistError, Store, StoreTransaction,
-    StoreWriteGuard, ciphertext_sha256, decode_item, definite, is_valid_collection_id, now_secs,
+    COLLECTIONS, CollectionMeta, ITEMS, ItemMeta, PersistError, RecoveryKind, Store,
+    StoreTransaction, StoreWriteGuard, ciphertext_sha256, decode_item, definite,
+    is_valid_collection_id, now_secs,
 };
 
 impl Store {
@@ -353,7 +354,7 @@ impl Store {
         };
         if let Some(secret) = secret_ciphertext {
             let path = self.secret_path(id)?;
-            let staged = self.stage_secret_file(id, secret, "update")?;
+            let staged = self.stage_secret_file(id, secret, RecoveryKind::Update)?;
             self.replace_then_commit(&path, &staged, commit)?;
         } else {
             match commit() {

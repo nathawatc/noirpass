@@ -79,9 +79,9 @@ fn invalid_client_pubkeys_rejected() {
     // 0, 1 and p-1 (and larger) are all invalid.
     assert!(make().derive(&pad_be(&BigUint::from(0u32))).is_err());
     assert!(make().derive(&pad_be(&BigUint::from(1u32))).is_err());
-    let p_minus_one = &p - BigUint::from(1u32);
+    let p_minus_one = p - BigUint::from(1u32);
     assert!(make().derive(&pad_be(&p_minus_one)).is_err());
-    assert!(make().derive(&pad_be(&p)).is_err());
+    assert!(make().derive(&pad_be(p)).is_err());
     assert!(make().derive(&[0xff; GROUP_BYTES + 1]).is_err());
 }
 

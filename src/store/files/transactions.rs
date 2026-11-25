@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-use super::super::{PersistError, Store};
+use super::super::{PersistError, RecoveryKind, Store};
 
 impl Store {
     pub(in crate::store) fn finish_create_install(
@@ -54,7 +54,7 @@ impl Store {
             .file_stem()
             .and_then(|name| name.to_str())
             .ok_or_else(|| Error::Config(format!("invalid secret path: {}", path.display())))?;
-        let backup = self.reserve_recovery_path("backup", id)?;
+        let backup = self.reserve_recovery_path(RecoveryKind::Backup, id)?;
         if let Err(backup_err) = self.rename_secret_file(path, &backup) {
             return match self.cleanup_files(&[staged, &backup]) {
                 Ok(()) => Err(backup_err.into()),
@@ -137,7 +137,7 @@ impl Store {
             .file_stem()
             .and_then(|name| name.to_str())
             .ok_or_else(|| Error::Config(format!("invalid secret path: {}", path.display())))?;
-        let quarantine = self.reserve_recovery_path("quarantine", id)?;
+        let quarantine = self.reserve_recovery_path(RecoveryKind::Quarantine, id)?;
         let quarantined = match self.rename_secret_file(path, &quarantine) {
             Ok(()) => {
                 if let Err(sync_err) = self.sync_secrets_dir() {
@@ -246,7 +246,7 @@ impl Store {
             .collect::<Result<Vec<_>>>()?;
         let mut planned = Vec::new();
         for (path, id) in validated {
-            match self.reserve_recovery_path("quarantine", &id) {
+            match self.reserve_recovery_path(RecoveryKind::Quarantine, &id) {
                 Ok(quarantine) => planned.push((path, quarantine)),
                 Err(reserve_err) => {
                     let reserved = planned

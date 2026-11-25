@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-use super::Store;
+use super::{RecoveryKind, Store, ciphertext_file_sha256};
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +91,13 @@ impl Store {
             .read_regular(self.secret_entry(path)?)
     }
 
+    pub(super) fn secret_file_sha256(&self, path: &Path) -> io::Result<String> {
+        let mut file =
+            self.secrets_directory
+                .open_regular(self.secret_entry(path)?, libc::O_RDONLY, 0)?;
+        ciphertext_file_sha256(&mut file)
+    }
+
     pub(super) fn remove_secret_file(&self, path: &Path) -> io::Result<()> {
         #[cfg(test)]
         self.inject_file_failure(FileOperation::Remove)?;
@@ -109,7 +116,7 @@ impl Store {
     pub(super) fn write_secret_file(&self, id: &str, ciphertext: &[u8]) -> Result<PathBuf> {
         let path = self.secret_path(id)?;
         self.validate_secret_regular_or_absent(&path)?;
-        let staged = self.stage_secret_file(id, ciphertext, "create")?;
+        let staged = self.stage_secret_file(id, ciphertext, RecoveryKind::Create)?;
         if let Err(install_err) = self
             .secrets_directory
             .hard_link(self.secret_entry(&staged)?, self.secret_entry(&path)?)

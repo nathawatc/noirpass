@@ -37,7 +37,9 @@ fn replacement_restores_previous_ciphertext_when_commit_fails() {
     let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let path = store.secret_path(id).unwrap();
     fs::write(&path, b"old").unwrap();
-    let staged = store.stage_secret_file(id, b"new", "test").unwrap();
+    let staged = store
+        .stage_secret_file(id, b"new", RecoveryKind::Update)
+        .unwrap();
 
     let err = store
         .replace_then_commit(
@@ -168,7 +170,9 @@ fn item_secret_reader_waits_for_update_rollback() {
         .create_item(&collection.id, "item", HashMap::new(), "text/plain", b"old")
         .unwrap();
     let path = store.secret_path(&item.id).unwrap();
-    let staged = store.stage_secret_file(&item.id, b"new", "update").unwrap();
+    let staged = store
+        .stage_secret_file(&item.id, b"new", RecoveryKind::Update)
+        .unwrap();
     let write_guard = store.write_guard_checked().unwrap();
     let reader_store = std::sync::Arc::clone(&store);
     let reader_id = item.id.clone();
@@ -218,7 +222,7 @@ fn create_persist_ciphertext_cleanup_failure_poisons_store() {
     let store = Store::open(tmp.path()).unwrap();
     let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let path = store.secret_path(id).unwrap();
-    let marker = store.recovery_path("create", id);
+    let marker = store.recovery_path(RecoveryKind::Create, id);
     fs::create_dir(&path).unwrap();
     fs::write(&marker, b"ciphertext").unwrap();
 
@@ -253,7 +257,7 @@ fn create_persist_cleanup_stays_in_pinned_directory_after_path_replacement() {
     let store = Store::open(tmp.path()).unwrap();
     let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let path = store.secret_path(id).unwrap();
-    let marker = store.recovery_path("create", id);
+    let marker = store.recovery_path(RecoveryKind::Create, id);
     fs::write(&path, b"ciphertext").unwrap();
     fs::write(&marker, b"ciphertext").unwrap();
 
@@ -291,7 +295,7 @@ fn create_persist_marker_cleanup_failure_poisons_store() {
     let store = Store::open(tmp.path()).unwrap();
     let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let path = store.secret_path(id).unwrap();
-    let marker = store.recovery_path("create", id);
+    let marker = store.recovery_path(RecoveryKind::Create, id);
     fs::write(&path, b"ciphertext").unwrap();
     fs::create_dir(&marker).unwrap();
 

@@ -9,7 +9,43 @@ use crate::error::{Error, Result};
 
 use super::{CollectionMeta, DEFAULT_COLLECTION_ID, ItemMeta};
 
-const RECOVERY_KINDS: [&str; 4] = ["create", "update", "quarantine", "backup"];
+/// Recognized crash-recovery artifact families in `secrets/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryKind {
+    Create,
+    Update,
+    Quarantine,
+    Backup,
+}
+
+impl RecoveryKind {
+    const ALL: [Self; 4] = [Self::Create, Self::Update, Self::Quarantine, Self::Backup];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Quarantine => "quarantine",
+            Self::Backup => "backup",
+        }
+    }
+
+    pub(crate) const fn priority(self) -> u8 {
+        match self {
+            Self::Create | Self::Update => 0,
+            Self::Quarantine => 1,
+            Self::Backup => 2,
+        }
+    }
+
+    pub(crate) fn from_file_name(file_name: &str) -> Option<Self> {
+        let rest = file_name.strip_prefix(".noirpass-")?;
+        Self::ALL.into_iter().find(|kind| {
+            rest.strip_prefix(kind.as_str())
+                .is_some_and(|tail| tail.starts_with('-'))
+        })
+    }
+}
 
 fn format_sha256(digest: impl AsRef<[u8]>) -> String {
     use std::fmt::Write as _;
@@ -60,18 +96,9 @@ pub(crate) fn is_lower_hex(s: &str, len: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(crate) fn recovery_kind(file_name: &str) -> Option<&'static str> {
-    RECOVERY_KINDS.into_iter().find(|kind| {
-        file_name
-            .strip_prefix(".noirpass-")
-            .and_then(|rest| rest.strip_prefix(kind))
-            .is_some_and(|rest| rest.starts_with('-'))
-    })
-}
-
-pub(crate) fn parse_recovery_secret_name(file_name: &str) -> Option<(&'static str, &str)> {
-    let kind = recovery_kind(file_name)?;
-    let rest = &file_name[".noirpass-".len() + kind.len() + 1..];
+pub(crate) fn parse_recovery_secret_name(file_name: &str) -> Option<(RecoveryKind, &str)> {
+    let kind = RecoveryKind::from_file_name(file_name)?;
+    let rest = &file_name[".noirpass-".len() + kind.as_str().len() + 1..];
     let (id, suffix) = rest.split_once('-')?;
     let valid_token = suffix
         .strip_suffix(".gpg")

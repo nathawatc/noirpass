@@ -141,72 +141,72 @@ impl Item {
         let label = label.map(str::to_owned);
         let object = self.clone();
         let connection = connection.clone();
-        tokio::spawn(activity.run(async move {
-            let lifecycle = object
-                .state
-                .lock_owned_collection_lifecycle(&object.collection_id)
-                .await;
-            let relabel = label.is_some();
-            let meta = if object.collection_id == SESSION_COLLECTION_ID {
-                object
+        activity
+            .spawn("item metadata mutation failed", async move {
+                let lifecycle = object
                     .state
-                    .update_session_item(&object.id, label.as_deref(), attributes, None, None)
-                    .map_err(fdo::Error::from)?
-            } else {
-                let id = object.id.clone();
-                object
-                    .state
-                    .blocking(Some(lifecycle.clone()), move |state| {
-                        Ok(state.store().update_item(
-                            &id,
-                            label.as_deref(),
-                            attributes,
-                            None,
-                            None,
-                        )?)
-                    })
-                    .await?
-            };
-            let path = object.path();
-            let item_emitter = SignalEmitter::new(&connection, path.clone())?;
-            let collection_emitter =
-                SignalEmitter::new(&connection, collection_path(&object.collection_id))?;
-            if relabel {
+                    .lock_owned_collection_lifecycle(&object.collection_id)
+                    .await;
+                let relabel = label.is_some();
+                let meta = if object.collection_id == SESSION_COLLECTION_ID {
+                    object
+                        .state
+                        .update_session_item(&object.id, label.as_deref(), attributes, None, None)
+                        .map_err(fdo::Error::from)?
+                } else {
+                    let id = object.id.clone();
+                    object
+                        .state
+                        .blocking(Some(lifecycle.clone()), move |state| {
+                            Ok(state.store().update_item(
+                                &id,
+                                label.as_deref(),
+                                attributes,
+                                None,
+                                None,
+                            )?)
+                        })
+                        .await?
+                };
+                let path = object.path();
+                let item_emitter = SignalEmitter::new(&connection, path.clone())?;
+                let collection_emitter =
+                    SignalEmitter::new(&connection, collection_path(&object.collection_id))?;
+                if relabel {
+                    emit_property_changed(
+                        &item_emitter,
+                        ITEM_INTERFACE,
+                        "Label",
+                        Variant::from(meta.label.as_str()),
+                    )
+                    .await?;
+                } else {
+                    emit_property_changed(
+                        &item_emitter,
+                        ITEM_INTERFACE,
+                        "Attributes",
+                        Variant::from(meta.attributes),
+                    )
+                    .await?;
+                }
                 emit_property_changed(
                     &item_emitter,
                     ITEM_INTERFACE,
-                    "Label",
-                    Variant::from(meta.label.as_str()),
+                    "Modified",
+                    Variant::from(meta.modified),
                 )
                 .await?;
-            } else {
-                emit_property_changed(
-                    &item_emitter,
-                    ITEM_INTERFACE,
-                    "Attributes",
-                    Variant::from(meta.attributes),
+                Collection::item_changed(&collection_emitter, path).await?;
+                emit_collection_modified(
+                    &object.state,
+                    &connection,
+                    &object.collection_id,
+                    meta.modified,
+                    lifecycle.clone(),
                 )
                 .await?;
-            }
-            emit_property_changed(
-                &item_emitter,
-                ITEM_INTERFACE,
-                "Modified",
-                Variant::from(meta.modified),
-            )
-            .await?;
-            Collection::item_changed(&collection_emitter, path).await?;
-            emit_collection_modified(
-                &object.state,
-                &connection,
-                &object.collection_id,
-                meta.modified,
-                lifecycle.clone(),
-            )
-            .await?;
-            Ok(())
-        }))
-        .await
-        .map_err(|_| fdo::Error::Failed("item metadata mutation failed".into()))?
+                Ok(())
+            })
+            .await
     }
 }

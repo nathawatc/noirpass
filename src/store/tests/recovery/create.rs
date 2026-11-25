@@ -16,7 +16,7 @@ fn indeterminate_create_commit_keeps_ciphertext_and_poisons_store() {
         .unwrap();
 
     let path = store.secret_path(&item.id).unwrap();
-    let create_marker = store.recovery_path("create", &item.id);
+    let create_marker = store.recovery_path(RecoveryKind::Create, &item.id);
     fs::hard_link(&path, &create_marker).unwrap();
     let err = store
         .finish_create_persist(
