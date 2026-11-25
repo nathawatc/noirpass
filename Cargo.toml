@@ -60,12 +60,12 @@ tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros", "sync", "
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 toml_edit = "0.25.13"
-# `p2p` (feature addition, not a version change) enables in-process
-# peer-to-peer connections used by the D-Bus layer smoke tests.
-zbus = { version = "6.5.0", default-features = false, features = ["tokio", "p2p", "proxy", "service"] }
+zbus = { version = "6.5.0", default-features = false, features = ["tokio", "proxy", "service"] }
 zeroize = { version = "1.9.0", features = ["serde"] }
 
 [dev-dependencies]
-oo7 = { version = "0.7.0-alpha", default-features = false, features = ["tokio", "native_crypto"] }
+oo7 = { version = "0.7.3", default-features = false, features = ["tokio", "native_crypto"] }
 roxmltree = "0.21.2"
 tempfile = "3.27.0"
+# `p2p` enables in-process peer-to-peer connections used by the D-Bus layer tests.
+zbus = { version = "6.5.0", default-features = false, features = ["p2p"] }
