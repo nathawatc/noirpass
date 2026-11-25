@@ -160,3 +160,42 @@ fn open_existing_refuses_missing_or_locked_store() {
     drop(store);
     assert!(Store::open_existing(tmp.path()).is_ok());
 }
+
+#[test]
+fn delete_collection_handles_empty_collection_and_missing_ciphertext() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+
+    let empty = store.create_collection("empty", None).unwrap();
+    let deleted_empty = store.delete_collection(&empty.id).unwrap();
+    assert_eq!(deleted_empty.item_ids.len(), 0);
+    assert!(store.check_integrity().unwrap().is_healthy());
+
+    let collection = store.create_collection("partial", None).unwrap();
+    let present = store
+        .create_item(
+            &collection.id,
+            "present",
+            HashMap::new(),
+            "text/plain",
+            b"1",
+        )
+        .unwrap();
+    let missing = store
+        .create_item(
+            &collection.id,
+            "missing",
+            HashMap::new(),
+            "text/plain",
+            b"2",
+        )
+        .unwrap();
+    fs::remove_file(store.secret_path(&missing.id).unwrap()).unwrap();
+
+    let deleted = store.delete_collection(&collection.id).unwrap();
+    assert_eq!(
+        deleted.item_ids.into_iter().collect::<HashSet<_>>(),
+        HashSet::from([present.id, missing.id])
+    );
+    assert!(store.check_integrity().unwrap().is_healthy());
+}

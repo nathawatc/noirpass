@@ -199,6 +199,33 @@ impl Store {
         }
     }
 
+    fn rollback_partial_quarantine<T>(
+        &self,
+        context: &str,
+        remaining_planned: &[(PathBuf, PathBuf)],
+        moves: &[(PathBuf, PathBuf)],
+        propagate_if_clean: Option<Error>,
+    ) -> Result<T> {
+        let reserved = remaining_planned
+            .iter()
+            .map(|(_, reserved)| reserved.as_path())
+            .collect::<Vec<_>>();
+        let cleanup = self.cleanup_files(&reserved);
+        let restore = self.restore_quarantines(moves);
+        if let (Ok(()), Ok(()), Some(err)) = (&cleanup, &restore, propagate_if_clean) {
+            return Err(err);
+        }
+        self.poison_error(Error::Config(format!(
+            "{context}; reserved cleanup: {}; rollback: {}",
+            cleanup
+                .err()
+                .map_or_else(|| "ok".to_string(), |error| error.to_string()),
+            restore
+                .err()
+                .map_or_else(|| "ok".to_string(), |error| error.to_string())
+        )))
+    }
+
     pub(in crate::store) fn quarantine_many_then_commit<T>(
         &self,
         paths: &[PathBuf],
@@ -239,30 +266,32 @@ impl Store {
         for (index, (path, quarantine)) in planned.iter().enumerate() {
             match self.rename_secret_file(path, quarantine) {
                 Ok(()) => moves.push((path.clone(), quarantine.clone())),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    if let Err(cleanup_err) = self.remove_secret_file(quarantine) {
+                        return self.rollback_partial_quarantine(
+                            &format!(
+                                "failed to remove unused quarantine {}: {cleanup_err}",
+                                quarantine.display()
+                            ),
+                            &planned[index + 1..],
+                            &moves,
+                            None,
+                        );
+                    }
+                }
                 Err(err) => {
-                    let reserved = planned[index..]
-                        .iter()
-                        .map(|(_, reserved)| reserved.as_path())
-                        .collect::<Vec<_>>();
-                    let cleanup = self.cleanup_files(&reserved);
-                    let restore = self.restore_quarantines(&moves);
-                    return match (cleanup, restore) {
-                        (Ok(()), Ok(())) => Err(err.into()),
-                        (cleanup, restore) => self.poison_error(Error::Config(format!(
-                            "failed to quarantine {}: {err}; reserved cleanup: {}; rollback: {}",
-                            path.display(),
-                            cleanup
-                                .err()
-                                .map_or_else(|| "ok".to_string(), |error| error.to_string()),
-                            restore
-                                .err()
-                                .map_or_else(|| "ok".to_string(), |error| error.to_string())
-                        ))),
-                    };
+                    return self.rollback_partial_quarantine(
+                        &format!("failed to quarantine {}: {err}", path.display()),
+                        &planned[index..],
+                        &moves,
+                        Some(err.into()),
+                    );
                 }
             }
         }
-        if let Err(sync_err) = self.sync_secrets_dir() {
+        if !moves.is_empty()
+            && let Err(sync_err) = self.sync_secrets_dir()
+        {
             return match self.restore_quarantines(&moves) {
                 Ok(()) => Err(sync_err),
                 Err(restore_err) => self.poison_error(Error::Config(format!(
@@ -272,7 +301,7 @@ impl Store {
         }
 
         match commit() {
-            Ok(value) => {
+            Ok(value) if !moves.is_empty() => {
                 for (_, quarantine) in &moves {
                     self.finish_post_commit_cleanup(Self::remove_recovery_file(
                         quarantine,
@@ -283,12 +312,16 @@ impl Store {
                 self.finish_post_commit_cleanup(self.sync_secrets_dir())?;
                 Ok(value)
             }
-            Err(PersistError::Definite(err)) => match self.restore_quarantines(&moves) {
-                Ok(()) => Err(err),
-                Err(restore_err) => self.poison_error(Error::Config(format!(
-                    "metadata deletion failed: {err}; ciphertext rollback also failed: {restore_err}"
-                ))),
-            },
+            Ok(value) => Ok(value),
+            Err(PersistError::Definite(err)) if !moves.is_empty() => {
+                match self.restore_quarantines(&moves) {
+                    Ok(()) => Err(err),
+                    Err(restore_err) => self.poison_error(Error::Config(format!(
+                        "metadata deletion failed: {err}; ciphertext rollback also failed: {restore_err}"
+                    ))),
+                }
+            }
+            Err(PersistError::Definite(err)) => Err(err),
             Err(PersistError::Indeterminate(err)) => {
                 self.poison();
                 Err(Error::Config(format!(
