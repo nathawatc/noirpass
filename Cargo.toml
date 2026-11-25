@@ -24,6 +24,7 @@ exclude = [
     ".rumdl.toml",
     # Matches root and all nested AGENTS.md files (src/, systemd/, tests/).
     "AGENTS.md",
+    "SKILL.md",
     "flake.lock",
     "flake.nix",
 ]

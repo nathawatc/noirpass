@@ -7,7 +7,8 @@ change, preserve security properties, and read the nearest scoped guidance befor
 
 Root rules. Read nearest `AGENTS.md` for narrower ownership guidance.
 
-- [src/cli/AGENTS.md](src/cli/AGENTS.md): CLI entrypoints, commands, confirmation, and daemon orchestration
+- [src/cli/AGENTS.md](src/cli/AGENTS.md): CLI entrypoints, commands, confirmation, man pages, and
+  daemon orchestration
 - [src/config/AGENTS.md](src/config/AGENTS.md): configuration, initialization, recipient lifecycle, and deinitialization
 - [src/crypto/AGENTS.md](src/crypto/AGENTS.md): Secret Service transport cryptography and secret-memory handling
 - [src/gpg/AGENTS.md](src/gpg/AGENTS.md): OpenPGP encryption, certificate validation, and GPG-agent integration
@@ -49,25 +50,7 @@ module docs own local rationale. Do not invent a second central design document.
 
 ## Environment and Validation
 
-Run Rust tooling through the flake development shell first:
-
-```sh
-nix develop -c cargo <subcommand> ...
-```
-
-Use direct `cargo` only when `nix` is unavailable (`command not found`, exit 127). For other Nix
-failures, fix or report the failure; do not silently bypass the environment.
-
-Required gates:
-
-```sh
-nix develop -c cargo build --release
-nix develop -c cargo fmt --check
-nix develop -c cargo clippy --all-targets -- -D warnings
-nix develop -c cargo test
-nix develop -c cargo llvm-cov --all-targets --fail-under-lines 80
-git diff --check
-```
+Before finishing any change, run repository validation gates using the `validate` skill.
 
 Claim a gate only from observed command output. Optional real-desktop smoke tests remain feature-
 gated and must skip safely when unavailable. Mandatory tests must follow [`tests/AGENTS.md`](tests/AGENTS.md).

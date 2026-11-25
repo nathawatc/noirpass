@@ -2,6 +2,7 @@
 disable = ["MD033"]
 extend-enable = ["MD060", "MD063"]
 respect-gitignore = true
+flavor = "gfm"
 
 [MD013]
 line-length = 100  # Line length

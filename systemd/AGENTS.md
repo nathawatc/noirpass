@@ -60,8 +60,7 @@ choices, especially why `ReadWritePaths` names the data parent rather than the s
 Package version follows `Cargo.toml`; do not duplicate the release version in `flake.nix`.
 Package and formatting checks use repository-owned dependencies and fixtures and remain hermetic.
 
-`flake.nix` installs both service files, substitutes the packaged executable path in both, runs
-hermetic package checks, and exposes package/app/check/dev-shell outputs. Changes to unit names,
-activation keys, executable paths, writable paths, or hardening directives require inspecting the
-Nix `postInstall` substitution and validating the installed-file result without using a user's real
-Secret Service bus or store.
+`flake.nix` installs both service files (substituting `/usr/bin/noirpass` to `$out/bin/noirpass`)
+and `man/noirpass.1` / `man/noirpass.toml.5`, runs hermetic package checks, and exposes
+package/app/check/dev-shell outputs. After changing `Cargo.toml`, `flake.nix`, `systemd/`, or
+`man/`, run the `verify-packaging` skill against isolated build outputs only.

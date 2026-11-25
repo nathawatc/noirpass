@@ -86,6 +86,13 @@ has elapsed, there are no sessions or temporary items, and no Noirpass applicati
 active; new application calls fail once shutdown admission closes. Service-layer synchronization
 details belong to [`../service/AGENTS.md`](../service/AGENTS.md).
 
+## Man Pages
+
+- `man/noirpass.1` and `man/noirpass.toml.5` are generated from `Cli` (`cli_command()`) and shared
+  config/store/service constants via `src/cli/man.rs` and must stay in sync with code.
+- After changing CLI definitions, config keys/defaults, store paths, or `src/cli/man.rs`, run the
+  `update-man-pages` skill.
+
 ## Boundaries
 
 - Configuration state machine and atomic config/certificate writes: [`../config/AGENTS.md`](../config/AGENTS.md).
