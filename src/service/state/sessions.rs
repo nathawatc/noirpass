@@ -1,5 +1,6 @@
 //! Transport cipher registration and unique-sender ownership.
 
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
@@ -14,6 +15,26 @@ use crate::crypto::SessionCipher;
 use crate::service::session_path;
 
 impl ServiceState {
+    fn has_capacity(sessions: &HashMap<OwnedObjectPath, SessionEntry>, owner: &str) -> bool {
+        sessions.len() < MAX_TRANSPORT_SESSIONS
+            && sessions
+                .values()
+                .filter(|entry| entry.owner == owner)
+                .count()
+                < MAX_TRANSPORT_SESSIONS_PER_OWNER
+    }
+
+    /// Pre-check session limits before running expensive DH handshake arithmetic.
+    pub(in crate::service) fn ensure_session_capacity(&self, owner: &str) -> fdo::Result<()> {
+        let sessions = self.sessions.lock().expect("session lock poisoned");
+        if !Self::has_capacity(&sessions, owner) {
+            return Err(fdo::Error::LimitsExceeded(
+                "transport session limit reached; close unused sessions".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Number of currently open sessions.
     #[cfg(test)]
     #[must_use]
@@ -41,13 +62,7 @@ impl ServiceState {
         F: FnMut() -> u128,
     {
         let mut sessions = self.sessions.lock().expect("session lock poisoned");
-        if sessions.len() >= MAX_TRANSPORT_SESSIONS
-            || sessions
-                .values()
-                .filter(|entry| entry.owner == owner)
-                .count()
-                >= MAX_TRANSPORT_SESSIONS_PER_OWNER
-        {
+        if !Self::has_capacity(&sessions, &owner) {
             return Err(fdo::Error::LimitsExceeded(
                 "transport session limit reached; close unused sessions".into(),
             ));

@@ -27,6 +27,11 @@ fn transport_session_limits_release_capacity_on_close_and_disconnect() {
         })
         .unwrap_err();
     assert!(matches!(err, zbus::fdo::Error::LimitsExceeded(_)));
+    assert!(matches!(
+        state.ensure_session_capacity(owner),
+        Err(zbus::fdo::Error::LimitsExceeded(_))
+    ));
+    state.ensure_session_capacity(":1.8").unwrap();
     assert_eq!(state.session_count(), MAX_TRANSPORT_SESSIONS_PER_OWNER);
     assert!(!state.remove_session(&paths[0], ":1.8"));
     assert!(state.remove_session(&paths[0], owner));

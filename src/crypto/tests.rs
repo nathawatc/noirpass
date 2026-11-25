@@ -117,3 +117,23 @@ fn plain_passthrough() {
     let pt = cipher.decrypt(&iv, &ct).unwrap();
     assert_eq!(&pt[..], b"hello");
 }
+
+#[test]
+fn respond_validates_client_public_and_derives_matching_key() {
+    let p = prime();
+    for bad in [
+        pad_be(&BigUint::from(0u32)),
+        pad_be(&BigUint::from(1u32)),
+        pad_be(&(p - BigUint::from(1u32))),
+        pad_be(p),
+        vec![0xff; GROUP_BYTES + 1],
+    ] {
+        assert!(matches!(DhHandshake::respond(&bad), Err(Error::Crypto(_))));
+    }
+
+    let client = DhHandshake::generate();
+    let (server_pub, server_cipher) = DhHandshake::respond(&client.public_bytes()).unwrap();
+    let client_cipher = client.derive(&server_pub).unwrap();
+    let (iv, ct) = server_cipher.encrypt(b"respond secret");
+    assert_eq!(&client_cipher.decrypt(&iv, &ct).unwrap()[..], b"respond secret");
+}

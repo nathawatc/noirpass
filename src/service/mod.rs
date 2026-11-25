@@ -128,6 +128,7 @@ impl Service {
                     ));
                 }
                 let owner = message_sender_fdo(&header)?;
+                self.state.ensure_session_capacity(&owner)?;
                 (
                     owner,
                     Variant::from("")
@@ -141,10 +142,8 @@ impl Service {
                     fdo::Error::InvalidArgs("expected client public key as byte array".into())
                 })?;
                 let owner = message_sender_fdo(&header)?;
-                let handshake = DhHandshake::generate();
-                let server_pub = handshake.public_bytes();
-                let cipher = handshake
-                    .derive(&client_pub)
+                self.state.ensure_session_capacity(&owner)?;
+                let (server_pub, cipher) = DhHandshake::respond(&client_pub)
                     .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
                 (
                     owner,

@@ -119,13 +119,8 @@ impl DhHandshake {
         pad_be(&self.public)
     }
 
-    /// Complete the handshake with the client's public key, producing the
-    /// session cipher.
-    ///
-    /// The client public key is rejected if it is not a proper group element
-    /// (`<= 1` or `>= p - 1`), which rules out the small-subgroup values that
-    /// would collapse the shared secret.
-    pub fn derive(self, client_public: &[u8]) -> Result<SessionCipher> {
+    /// Validate a client DH public key before generating server secrets or allocating.
+    fn parse_client_public(client_public: &[u8]) -> Result<BigUint> {
         let p = prime();
         let one = BigUint::from(1u32);
         let p_minus_one = p - &one;
@@ -145,7 +140,11 @@ impl DhHandshake {
                 "client public key is outside the valid group range".into(),
             ));
         }
+        Ok(client)
+    }
 
+    fn derive_parsed(self, client: &BigUint) -> Result<SessionCipher> {
+        let p = prime();
         let shared = Zeroizing::new(client.modpow(&self.private, p));
         let ikm = Zeroizing::new(pad_be(&shared));
 
@@ -156,6 +155,27 @@ impl DhHandshake {
             .map_err(|e| Error::Crypto(format!("HKDF expand failed: {e}")))?;
 
         Ok(SessionCipher::Dh(DhKey { key }))
+    }
+
+    /// Validate `client_public` first, then generate a fresh server keypair and
+    /// return `(server_public_bytes, session_cipher)`.
+    pub fn respond(client_public: &[u8]) -> Result<(Vec<u8>, SessionCipher)> {
+        let client = Self::parse_client_public(client_public)?;
+        let handshake = Self::generate();
+        let server_public = handshake.public_bytes();
+        let cipher = handshake.derive_parsed(&client)?;
+        Ok((server_public, cipher))
+    }
+
+    /// Complete the handshake with the client's public key, producing the
+    /// session cipher.
+    ///
+    /// The client public key is rejected if it is not a proper group element
+    /// (`<= 1` or `>= p - 1`), which rules out the small-subgroup values that
+    /// would collapse the shared secret.
+    pub fn derive(self, client_public: &[u8]) -> Result<SessionCipher> {
+        let client = Self::parse_client_public(client_public)?;
+        self.derive_parsed(&client)
     }
 }
 
