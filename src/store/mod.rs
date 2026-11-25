@@ -143,15 +143,35 @@ fn definite<E: Into<Error>>(error: E) -> PersistError {
     PersistError::Definite(error.into())
 }
 
-/// Lowercase hex SHA-256 digest of `ciphertext`.
-fn ciphertext_sha256(ciphertext: &[u8]) -> String {
+fn format_sha256(digest: impl AsRef<[u8]>) -> String {
     use std::fmt::Write as _;
-    Sha256::digest(ciphertext)
+    digest
+        .as_ref()
         .iter()
         .fold(String::with_capacity(64), |mut out, byte| {
             let _ = write!(out, "{byte:02x}");
             out
         })
+}
+
+/// Lowercase hex SHA-256 digest of `ciphertext`.
+fn ciphertext_sha256(ciphertext: &[u8]) -> String {
+    format_sha256(Sha256::digest(ciphertext))
+}
+
+/// Stream a ciphertext file through SHA-256 without buffering the full payload in RAM.
+fn ciphertext_file_sha256(file: &mut fs::File) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(format_sha256(hasher.finalize()))
 }
 
 /// A fresh random 128-bit identifier rendered as 32 hex characters.

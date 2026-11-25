@@ -332,3 +332,35 @@ fn integrity_rejects_non_regular_ciphertext_paths() {
 
     assert!(err.to_string().contains("not a regular file"));
 }
+
+#[test]
+fn streaming_integrity_digest_handles_empty_large_and_tampered_ciphertext() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.create_collection("c", None).unwrap();
+    let empty = store
+        .create_item(&collection.id, "empty", HashMap::new(), "text/plain", b"")
+        .unwrap();
+    let large_payload = vec![0x5a_u8; 128 * 1024 + 17];
+    let large = store
+        .create_item(
+            &collection.id,
+            "large",
+            HashMap::new(),
+            "text/plain",
+            &large_payload,
+        )
+        .unwrap();
+    assert!(store.check_integrity().unwrap().is_healthy());
+    assert!(store.has_secret_file(&empty.id).unwrap());
+    assert!(store.has_secret_file(&large.id).unwrap());
+
+    let large_path = store.secret_path(&large.id).unwrap();
+    let mut tampered = large_payload;
+    *tampered.last_mut().unwrap() ^= 0xff;
+    fs::write(&large_path, tampered).unwrap();
+
+    let report = store.check_integrity().unwrap();
+    assert_eq!(report.ciphertext_mismatches.len(), 1);
+    assert_eq!(report.ciphertext_mismatches[0].table_key, large.id);
+}

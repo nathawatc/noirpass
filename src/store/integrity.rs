@@ -1,7 +1,7 @@
 //! Store integrity scanning and startup safety policy.
 
 use std::collections::HashSet;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
 use redb::{DatabaseError, ReadableDatabase, ReadableTable};
@@ -11,8 +11,8 @@ use crate::filesystem::Directory;
 
 use super::{
     ALIASES, COLLECTIONS, CollectionMeta, CorruptCollection, CorruptItem, ITEMS, IndexedItem,
-    IntegrityReport, ItemMeta, Store, ciphertext_sha256, is_valid_collection_id, is_valid_item_id,
-    parse_recovery_secret_name, recovery_kind,
+    IntegrityReport, ItemMeta, Store, ciphertext_file_sha256, is_valid_collection_id,
+    is_valid_item_id, parse_recovery_secret_name, recovery_kind,
 };
 
 impl Store {
@@ -193,15 +193,12 @@ fn scan_integrity<D: ReadableDatabase>(
         match directory.metadata(Path::new(path.file_name().expect("canonical filename"))) {
             Ok(file_metadata) if file_metadata.file_type().is_file() => {
                 if let Some(expected_hash) = &metadata.ciphertext_sha256 {
-                    let mut ciphertext = Vec::new();
-                    directory
-                        .open_regular(
-                            Path::new(path.file_name().expect("canonical filename")),
-                            libc::O_RDONLY,
-                            0,
-                        )?
-                        .read_to_end(&mut ciphertext)?;
-                    if ciphertext_sha256(&ciphertext) != *expected_hash {
+                    let mut file = directory.open_regular(
+                        Path::new(path.file_name().expect("canonical filename")),
+                        libc::O_RDONLY,
+                        0,
+                    )?;
+                    if ciphertext_file_sha256(&mut file)? != *expected_hash {
                         ciphertext_mismatches.push(IndexedItem {
                             table_key,
                             metadata,
