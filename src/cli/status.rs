@@ -1,9 +1,10 @@
 use std::path::Path;
+use std::process::ExitCode;
 
 use noirpass::config::{Status, load_recipient, status};
 use noirpass::gpg::Gpg;
 
-pub(super) async fn run(store_dir: &Path) -> noirpass::Result<()> {
+pub(super) async fn run(store_dir: &Path) -> noirpass::Result<ExitCode> {
     let mut status = status(store_dir);
     if status.usable() {
         match load_recipient(store_dir).and_then(|recipient| Gpg::from_cert(recipient.cert)) {
@@ -17,9 +18,10 @@ pub(super) async fn run(store_dir: &Path) -> noirpass::Result<()> {
     }
     print_status(&status);
     if status.usable() {
-        return Ok(());
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
     }
-    std::process::exit(1);
 }
 
 fn yes_no(value: bool) -> &'static str {

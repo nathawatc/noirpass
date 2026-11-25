@@ -7,6 +7,7 @@
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -101,7 +102,7 @@ fn default_store_dir() -> PathBuf {
         .join("noirpass")
 }
 
-pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .compact()
@@ -116,17 +117,22 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("initialized: yes");
             println!("data directory: {}", store_dir.display());
             println!("recipient fingerprint: {}", config.recipient_fingerprint);
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
-        Some(Command::Deinit) => return deinit::run(&store_dir).map_err(Into::into),
+        Some(Command::Deinit) => {
+            deinit::run(&store_dir)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Some(Command::Status) => return status::run(&store_dir).await.map_err(Into::into),
-        Some(Command::List) => return list::run(&store_dir).map_err(Into::into),
+        Some(Command::List) => {
+            list::run(&store_dir)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Some(Command::Delete { id, yes }) => {
-            return delete::run(&store_dir, &id, yes).map_err(Into::into);
+            delete::run(&store_dir, &id, yes)?;
+            return Ok(ExitCode::SUCCESS);
         }
-        Some(Command::Check { yes }) => {
-            return check::run(&store_dir, yes).map(|_| ()).map_err(Into::into);
-        }
+        Some(Command::Check { yes }) => return check::run(&store_dir, yes).map_err(Into::into),
         None => {}
     }
 
@@ -164,7 +170,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = connection.release_name(SERVICE_NAME).await;
     drop(connection);
     info!("exiting");
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn confirm(prompt: &str, assume_yes: bool) -> noirpass::Result<bool> {

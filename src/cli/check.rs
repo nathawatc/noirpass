@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::ExitCode;
 
 use noirpass::store::{Store, is_valid_item_id};
 
 use super::confirm;
 
-pub(super) fn run(store_dir: &Path, yes: bool) -> noirpass::Result<bool> {
+pub(super) fn run(store_dir: &Path, yes: bool) -> noirpass::Result<ExitCode> {
     let store = Store::open_existing(store_dir)?;
     store.recover_interrupted_operations()?;
     if check_and_repair(&store, yes)? {
-        return Ok(true);
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
     }
-    std::process::exit(1);
 }
 
 #[allow(
