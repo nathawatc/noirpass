@@ -9,32 +9,35 @@
 //! [`Database`] is `Send + Sync`, so every method takes `&self` and performs
 //! its own short-lived transaction.
 
-use std::fs;
-use std::os::fd::AsRawFd;
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use redb::{
-    Database, DatabaseError, ReadOnlyDatabase, ReadableDatabase, TableDefinition,
-    backends::FileBackend,
-};
-use sha2::{Digest, Sha256};
+use redb::{Database, TableDefinition};
 
 use crate::error::{Error, Result};
-use crate::filesystem::{Directory, create_directory_all_nofollow, validate_no_symlink_components};
+use crate::filesystem::Directory;
 use crate::now_secs;
 
 mod collections;
 mod files;
+mod format;
 mod integrity;
 mod items;
-mod persistence;
+mod open;
 mod records;
 mod recovery;
 
+pub use format::is_valid_item_id;
+use format::{
+    ciphertext_file_sha256, ciphertext_sha256, decode_collection, decode_item,
+    is_valid_collection_id, recovery_kind, secret_path,
+};
+pub(crate) use format::{is_lower_hex, parse_recovery_secret_name};
 pub(crate) use integrity::INTEGRITY_CHECK_FAILED_ERROR;
+#[cfg(test)]
+use open::open_existing_root;
+use open::{open_existing_secrets, open_readonly_database_file};
 pub use records::{
     CollectionMeta, CorruptCollection, CorruptItem, DeletedCollection, IndexedItem,
     IntegrityReport, ItemMeta,
@@ -151,147 +154,6 @@ enum PersistError {
 
 fn definite<E: Into<Error>>(error: E) -> PersistError {
     PersistError::Definite(error.into())
-}
-
-fn format_sha256(digest: impl AsRef<[u8]>) -> String {
-    use std::fmt::Write as _;
-    digest
-        .as_ref()
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
-}
-
-/// Lowercase hex SHA-256 digest of `ciphertext`.
-fn ciphertext_sha256(ciphertext: &[u8]) -> String {
-    format_sha256(Sha256::digest(ciphertext))
-}
-
-/// Stream a ciphertext file through SHA-256 without buffering the full payload in RAM.
-fn ciphertext_file_sha256(file: &mut fs::File) -> std::io::Result<String> {
-    use std::io::Read as _;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let read = file.read(&mut buf)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-    Ok(format_sha256(hasher.finalize()))
-}
-
-/// Whether `id` is a canonical item identifier safe for use as a filename.
-fn is_valid_collection_id(id: &str) -> bool {
-    id == DEFAULT_COLLECTION_ID || is_valid_item_id(id)
-}
-
-const RECOVERY_KINDS: [&str; 4] = ["create", "update", "quarantine", "backup"];
-
-/// Whether `id` is a canonical 32-character lowercase hexadecimal item id.
-#[must_use]
-pub fn is_valid_item_id(id: &str) -> bool {
-    is_lower_hex(id, 32)
-}
-
-/// Whether `s` is exactly `len` lowercase hexadecimal characters.
-pub(crate) fn is_lower_hex(s: &str, len: usize) -> bool {
-    s.len() == len
-        && s.bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-pub(crate) fn recovery_kind(file_name: &str) -> Option<&'static str> {
-    RECOVERY_KINDS.into_iter().find(|kind| {
-        file_name
-            .strip_prefix(".noirpass-")
-            .and_then(|rest| rest.strip_prefix(kind))
-            .is_some_and(|rest| rest.starts_with('-'))
-    })
-}
-
-pub(crate) fn parse_recovery_secret_name(file_name: &str) -> Option<(&'static str, &str)> {
-    let kind = recovery_kind(file_name)?;
-    let rest = &file_name[".noirpass-".len() + kind.len() + 1..];
-    let (id, suffix) = rest.split_once('-')?;
-    let valid_token = suffix
-        .strip_suffix(".gpg")
-        .is_some_and(|token| is_lower_hex(token, 16));
-    (is_valid_item_id(id) && valid_token).then_some((kind, id))
-}
-
-fn secret_path(secrets_dir: &Path, id: &str) -> Result<PathBuf> {
-    if !is_valid_item_id(id) {
-        return Err(Error::Config(format!("invalid item id in store: {id}")));
-    }
-    Ok(secrets_dir.join(format!("{id}.gpg")))
-}
-
-fn decode_collection(table_key: &str, value: &[u8]) -> Result<CollectionMeta> {
-    if !is_valid_collection_id(table_key) {
-        return Err(Error::Config(format!(
-            "invalid collection id in store: {table_key}"
-        )));
-    }
-    let metadata: CollectionMeta = serde_json::from_slice(value)?;
-    if metadata.id != table_key {
-        return Err(Error::Config(format!(
-            "collection metadata id {} does not match table key {table_key}",
-            metadata.id
-        )));
-    }
-    Ok(metadata)
-}
-
-fn decode_item(table_key: &str, value: &[u8]) -> Result<ItemMeta> {
-    if !is_valid_item_id(table_key) {
-        return Err(Error::Config(format!(
-            "item table key is not canonical: {table_key}"
-        )));
-    }
-    let metadata: ItemMeta = serde_json::from_slice(value)?;
-    if metadata.id != table_key {
-        return Err(Error::Config(format!(
-            "item metadata id {} does not match table key {table_key}",
-            metadata.id
-        )));
-    }
-    Ok(metadata)
-}
-
-fn open_readonly_database_file(
-    file: &fs::File,
-) -> std::result::Result<ReadOnlyDatabase, DatabaseError> {
-    // Pin the verified file while redb opens its procfs alias.
-    let proc_path = PathBuf::from("/proc/self/fd").join(file.as_raw_fd().to_string());
-    ReadOnlyDatabase::open(proc_path)
-}
-
-fn open_existing_root(dir: &Path) -> Result<Directory> {
-    validate_no_symlink_components(dir)?;
-    if !fs::symlink_metadata(dir)?.is_dir() {
-        return Err(Error::Config(format!(
-            "store path is not a directory: {}",
-            dir.display()
-        )));
-    }
-    Ok(Directory::open(dir)?)
-}
-
-fn open_existing_secrets(dir: &Path, root: &Directory) -> Result<(PathBuf, Directory)> {
-    let secrets_dir = dir.join(SECRETS_DIR);
-    if !root.metadata(Path::new(SECRETS_DIR))?.is_dir() {
-        return Err(Error::Config(format!(
-            "store secrets path is not a directory: {}",
-            secrets_dir.display()
-        )));
-    }
-    let secrets_directory = root.child(Path::new(SECRETS_DIR))?;
-    let _ = secrets_directory.read_dir()?;
-    Ok((secrets_dir, secrets_directory))
 }
 
 impl Store {
@@ -427,107 +289,6 @@ impl Store {
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
-    }
-
-    /// Open (creating if necessary) a store rooted at `dir`.
-    ///
-    /// Creates `dir` and `dir/secrets/` as `0700` directories and opens (or
-    /// creates) `dir/index.redb`.
-    pub fn open(dir: &Path) -> Result<Self> {
-        let root = create_directory_all_nofollow(dir, 0o700)?;
-        Self::open_in(dir, &root)
-    }
-
-    pub(crate) fn open_in(dir: &Path, root: &Directory) -> Result<Self> {
-        Self::open_in_with_sync(dir, root, |_| root.sync_all())
-    }
-
-    fn open_in_with_sync(
-        dir: &Path,
-        root: &Directory,
-        sync_root: impl FnOnce(&Database) -> std::io::Result<()>,
-    ) -> Result<Self> {
-        use std::os::unix::fs::PermissionsExt;
-        root.set_permissions(fs::Permissions::from_mode(0o700))?;
-        let secrets_dir = dir.join(SECRETS_DIR);
-        let secrets_directory = root.create_child(Path::new(SECRETS_DIR), 0o700)?;
-        secrets_directory.set_permissions(fs::Permissions::from_mode(0o700))?;
-        let index =
-            root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR | libc::O_CREAT, 0o600)?;
-        let db = Database::builder().create_with_backend(FileBackend::new(index))?;
-        // Ensure all tables exist so read-only transactions never fail on a
-        // brand-new database.
-        {
-            let txn = db.begin_write()?;
-            txn.open_table(COLLECTIONS)?;
-            txn.open_table(ITEMS)?;
-            txn.open_table(ALIASES)?;
-            txn.commit()?;
-        }
-        // redb syncs index contents; persist the index and secrets directory entries too.
-        sync_root(&db)?;
-
-        Ok(Self::from_parts(db, secrets_dir, secrets_directory))
-    }
-
-    /// Open an already initialized store without creating files or directories.
-    ///
-    /// Maintenance commands use this so a typo in `--store-dir` cannot create a
-    /// second empty store. The redb writer lock also prevents offline mutation
-    /// while the daemon is using the same index.
-    pub fn open_existing(dir: &Path) -> Result<Self> {
-        let root = open_existing_root(dir)?;
-        Self::open_existing_in(dir, &root)
-    }
-
-    /// Share a pinned root with configuration lifecycle operations.
-    pub(crate) fn open_existing_in(dir: &Path, root: &Directory) -> Result<Self> {
-        let (secrets_dir, secrets_directory) = open_existing_secrets(dir, root)?;
-        let index_path = dir.join(INDEX_FILE);
-        let index = root.open_regular(Path::new(INDEX_FILE), libc::O_RDWR, 0)?;
-        if index.metadata()?.len() == 0 {
-            return Err(Error::Config(format!(
-                "metadata database is empty: {}",
-                index_path.display()
-            )));
-        }
-        let db = match Database::builder().create_with_backend(FileBackend::new(index)) {
-            Ok(db) => db,
-            Err(DatabaseError::DatabaseAlreadyOpen) => {
-                return Err(store_in_use_error(&index_path));
-            }
-            Err(err) => return Err(err.into()),
-        };
-        {
-            let txn = db.begin_read()?;
-            txn.open_table(COLLECTIONS)?;
-            txn.open_table(ITEMS)?;
-            txn.open_table(ALIASES)?;
-        }
-        Ok(Self::from_parts(db, secrets_dir, secrets_directory))
-    }
-
-    /// Check whether an existing store is usable without mutating it.
-    #[cfg(test)]
-    pub(super) fn probe_health(dir: &Path) -> Result<()> {
-        let root = open_existing_root(dir)?;
-        let _ = open_existing_secrets(dir, &root)?;
-        Self::probe_health_in(&root)
-    }
-
-    pub(crate) fn probe_health_in(root: &Directory) -> Result<()> {
-        root.child(Path::new(SECRETS_DIR))?;
-        let index = root.open_regular(Path::new(INDEX_FILE), libc::O_RDONLY, 0)?;
-        let db = match open_readonly_database_file(&index) {
-            Ok(db) => db,
-            Err(DatabaseError::DatabaseAlreadyOpen) => return Ok(()),
-            Err(err) => return Err(err.into()),
-        };
-        let txn = db.begin_read()?;
-        txn.open_table(COLLECTIONS)?;
-        txn.open_table(ITEMS)?;
-        txn.open_table(ALIASES)?;
-        Ok(())
     }
 
     /// Path of the `.gpg` secret file backing item `id`.

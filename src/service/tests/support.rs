@@ -6,6 +6,7 @@ use crate::gpg::{Gpg, parse_recipient_cert, test_support::TestGnupg};
 use crate::store::Store;
 use zbus::connection::Builder;
 use zbus::export::futures_core::Stream;
+use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::super::{SERVICE_PATH, Service, ServiceState};
 
@@ -33,6 +34,27 @@ pub(super) async fn p2p_pair(state: Arc<ServiceState>) -> (zbus::Connection, zbu
     let client = Builder::unix_stream(p1).p2p().build();
     let (server, client) = tokio::join!(server, client);
     (server.unwrap(), client.unwrap())
+}
+
+pub(super) async fn get_property(
+    connection: &zbus::Connection,
+    path: &OwnedObjectPath,
+    interface: &str,
+    property: &str,
+) -> OwnedVariant {
+    connection
+        .call_method(
+            None::<zbus::names::BusName<'_>>,
+            path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &(interface, property),
+        )
+        .await
+        .unwrap()
+        .body()
+        .deserialize()
+        .unwrap()
 }
 
 pub(super) async fn next_stream_item<S>(stream: &mut S) -> Option<S::Item>
