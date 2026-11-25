@@ -89,8 +89,7 @@ fn index_ownership_does_not_initialize_or_rewrite_data() {
                     let index = redb::backends::FileBackend::new(
                         root.open_regular(std::path::Path::new(INDEX_FILE), libc::O_RDWR, 0)
                             .unwrap(),
-                    )
-                    .unwrap();
+                    );
                     assert!(
                         !redb::StorageBackend::try_lock_range(
                             &index,

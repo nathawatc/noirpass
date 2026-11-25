@@ -3,7 +3,7 @@
 use std::io;
 use std::os::unix::fs::MetadataExt;
 
-use redb::ReadableDatabase;
+use redb::{ReadableDatabase, ReadableTable};
 
 use crate::error::{Error, Result};
 

@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use redb::{Database, DatabaseError, ReadOnlyDatabase, ReadableDatabase, TableDefinition};
+use redb::{
+    Database, DatabaseError, ReadOnlyDatabase, ReadableDatabase, TableDefinition,
+    backends::FileBackend,
+};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
@@ -427,7 +430,7 @@ impl Store {
         secrets_directory.set_permissions(fs::Permissions::from_mode(0o700))?;
         let index =
             root.open_regular(Path::new("index.redb"), libc::O_RDWR | libc::O_CREAT, 0o600)?;
-        let db = Database::builder().create_file(index)?;
+        let db = Database::builder().create_with_backend(FileBackend::new(index))?;
         // Ensure all tables exist so read-only transactions never fail on a
         // brand-new database.
         {
@@ -466,7 +469,7 @@ impl Store {
                 index_path.display()
             )));
         }
-        let db = match Database::builder().create_file(index) {
+        let db = match Database::builder().create_with_backend(FileBackend::new(index)) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => {
                 return Err(Error::Config(format!(

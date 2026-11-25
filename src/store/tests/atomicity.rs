@@ -1,6 +1,6 @@
 use std::io;
 
-use redb::ReadableDatabase;
+use redb::{ReadableDatabase, ReadableTable};
 
 use super::*;
 

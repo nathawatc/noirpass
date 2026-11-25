@@ -205,7 +205,7 @@ fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<FileBack
             )));
         }
     }
-    let index = FileBackend::new(file)?;
+    let index = FileBackend::new(file);
     if !index
         .try_lock_range(Bound::Unbounded, Bound::Unbounded)
         .map_err(|err| Error::Config(format!("cannot acquire index ownership: {err}")))?

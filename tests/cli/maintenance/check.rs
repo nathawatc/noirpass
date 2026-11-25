@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use noirpass::store::{ItemMeta, Store};
-use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 #[test]
 fn cli_lists_deletes_and_repairs_stale_items() {
