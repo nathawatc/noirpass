@@ -10,7 +10,7 @@ use super::super::common::{
 use super::harness::harness;
 use super::helpers::{
     INVALID_ARGS_ERROR, NO_SESSION_ERROR, SERVICE_NAME, UNKNOWN_OBJECT_ERROR, assert_method_error,
-    service_proxy,
+    method_error_name, service_proxy,
 };
 
 pub(super) fn daemon_runtime_does_not_spawn_gpg() {
@@ -20,8 +20,7 @@ pub(super) fn daemon_runtime_does_not_spawn_gpg() {
         "daemon spawned gpg: {}",
         std::fs::read_to_string(&h.fake_gpg_log)
             .unwrap_or_default()
-            .replace('\n', " ")
-            .replace('\r', " ")
+            .replace(['\n', '\r'], " ")
     );
 }
 
@@ -166,8 +165,7 @@ async fn idle_exit_daemon_exits() {
         "daemon spawned gpg during idle-exit test: {}",
         std::fs::read_to_string(&h.fake_gpg_log)
             .unwrap_or_default()
-            .replace('\n', " ")
-            .replace('\r', " ")
+            .replace(['\n', '\r'], " ")
     );
 
     dbus.kill().expect("kill private dbus-daemon");
@@ -304,11 +302,9 @@ async fn disconnect_unregisters_owned_session() {
             .call::<_, _, ()>("Close", &())
             .await
             .unwrap_err();
-        match &err {
-            zbus::Error::MethodError(name, _, _) if name.as_str() == UNKNOWN_OBJECT_ERROR => break,
-            zbus::Error::MethodError(name, _, _)
-                if name.as_str() == NO_SESSION_ERROR && Instant::now() < deadline =>
-            {
+        match method_error_name(&err).as_deref() {
+            Some(UNKNOWN_OBJECT_ERROR) => break,
+            Some(NO_SESSION_ERROR) if Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             _ => panic!("session object survived owner disconnect: {err}"),

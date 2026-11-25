@@ -838,9 +838,10 @@ async fn queued_alias_items_reads_follow_repointing_and_preserve_removed_alias_e
             .await
             .unwrap();
         if removed {
-            assert!(
-                matches!(reply, Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.UnknownObject")
-            );
+            assert!(matches!(
+                reply,
+                Err(zbus::Error::FDO(err)) if matches!(*err, zbus::fdo::Error::UnknownObject(_))
+            ));
         } else {
             let value: OwnedVariant = reply.unwrap().body().deserialize().unwrap();
             assert_eq!(

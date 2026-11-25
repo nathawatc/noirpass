@@ -140,11 +140,20 @@ pub(super) fn item_properties(label: &str, case: &str) -> HashMap<String, OwnedV
     ])
 }
 
-pub(super) fn assert_method_error(err: &zbus::Error, expected: &str) {
+pub(super) fn method_error_name(err: &zbus::Error) -> Option<String> {
     match err {
-        zbus::Error::MethodError(name, _, _) => assert_eq!(name.as_str(), expected),
-        other => panic!("expected {expected}, got {other}"),
+        zbus::Error::MethodError(name, _, _) => Some(name.as_str().to_owned()),
+        zbus::Error::FDO(err) => Some(zbus::DBusError::name(err.as_ref()).as_str().to_owned()),
+        _ => None,
     }
+}
+
+pub(super) fn assert_method_error(err: &zbus::Error, expected: &str) {
+    assert_eq!(
+        method_error_name(err).as_deref(),
+        Some(expected),
+        "expected {expected}, got {err}"
+    );
 }
 
 pub(super) async fn assert_invalid_item_create(

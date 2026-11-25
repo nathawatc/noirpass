@@ -40,8 +40,10 @@ async fn saturated_request_admission_preserves_method_errors_and_property_reads(
                 .await
                 .unwrap_err()
         };
-        assert!(matches!(error, zbus::Error::MethodError(ref name, _, _)
-            if name.as_str() == "org.freedesktop.DBus.Error.LimitsExceeded"));
+        assert!(matches!(
+            error,
+            zbus::Error::FDO(err) if matches!(*err, zbus::fdo::Error::LimitsExceeded(_))
+        ));
     }
     let collections: Vec<OwnedObjectPath> = proxy.get_property("Collections").await.unwrap();
     assert_ne!(collections.len(), 0);
@@ -50,8 +52,10 @@ async fn saturated_request_admission_preserves_method_errors_and_property_reads(
         .call_method("OpenSession", &("plain", Variant::from("")))
         .await
         .unwrap_err();
-    assert!(matches!(error, zbus::Error::MethodError(ref name, _, _)
-        if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"));
+    assert!(matches!(
+        error,
+        zbus::Error::FDO(err) if matches!(*err, zbus::fdo::Error::AccessDenied(_))
+    ));
 }
 
 #[tokio::test]
@@ -168,8 +172,10 @@ async fn open_session_rejects_missing_sender() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, zbus::Error::MethodError(ref name, _, _)
-        if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"));
+    assert!(matches!(
+        err,
+        zbus::Error::FDO(err) if matches!(*err, zbus::fdo::Error::AccessDenied(_))
+    ));
     assert_eq!(state.session_count(), 0);
 
     // Missing identity also rejects DH sessions after input validation.
@@ -184,8 +190,10 @@ async fn open_session_rejects_missing_sender() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, zbus::Error::MethodError(ref name, _, _)
-        if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"));
+    assert!(matches!(
+        err,
+        zbus::Error::FDO(err) if matches!(*err, zbus::fdo::Error::AccessDenied(_))
+    ));
     assert_eq!(state.session_count(), 0);
 
     // Unknown algorithm is NotSupported.
@@ -199,8 +207,10 @@ async fn open_session_rejects_missing_sender() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, zbus::Error::MethodError(ref name, _, _)
-        if name.as_str() == "org.freedesktop.DBus.Error.NotSupported"));
+    assert!(matches!(
+        err,
+        zbus::Error::FDO(err) if matches!(*err, zbus::fdo::Error::NotSupported(_))
+    ));
 
     // ReadAlias resolves the default collection; unknown aliases → "/".
     let reply = client_conn
