@@ -5,7 +5,9 @@ use std::collections::{BTreeSet, HashMap};
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::error::{Error, Result};
-use crate::store::{ITEMS, ItemMeta, Store, decode_item};
+use crate::store::{
+    COLLECTIONS, ITEMS, ItemMeta, Store, decode_collection, decode_item, is_valid_collection_id,
+};
 
 impl Store {
     /// Fetch a single item by id.
@@ -22,7 +24,7 @@ impl Store {
 
     /// List every item in `collection`, in id order.
     pub fn list_items(&self, collection: &str) -> Result<Vec<ItemMeta>> {
-        self.search_items_matching(Some(collection), &HashMap::new())
+        self.search_items_matching(Some(collection), &HashMap::new(), false)
     }
 
     /// Find an item in `collection` whose attribute set is *exactly* `attrs`.
@@ -53,25 +55,36 @@ impl Store {
     /// first lookup. Successful mutations update them; verified aborts and
     /// filesystem recovery retain them. Nothing changes on disk.
     pub fn search_items(&self, attrs: &HashMap<String, String>) -> Result<Vec<ItemMeta>> {
-        self.search_items_matching(None, attrs)
+        self.search_items_matching(None, attrs, false)
     }
 
-    /// Search only matches in the selected collection without building a global result vector.
+    /// Search only matches in the selected existing collection without building a global result vector.
     pub(crate) fn search_collection_items(
         &self,
         collection: &str,
         attrs: &HashMap<String, String>,
     ) -> Result<Vec<ItemMeta>> {
-        self.search_items_matching(Some(collection), attrs)
+        self.search_items_matching(Some(collection), attrs, true)
     }
 
     fn search_items_matching(
         &self,
         collection: Option<&str>,
         attrs: &HashMap<String, String>,
+        require_collection: bool,
     ) -> Result<Vec<ItemMeta>> {
         let _read_guard = self.read_guard_checked_after_initial_check(|| {})?;
         let txn = self.db.begin_read()?;
+        if require_collection && let Some(id) = collection {
+            if !is_valid_collection_id(id) {
+                return Err(Error::NotFound(format!("collection {id}")));
+            }
+            let collections = txn.open_table(COLLECTIONS)?;
+            let value = collections
+                .get(id)?
+                .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
+            decode_collection(id, value.value())?;
+        }
         let items = txn.open_table(ITEMS)?;
         let matches = |metadata: &ItemMeta| {
             collection.is_none_or(|id| metadata.collection == id)

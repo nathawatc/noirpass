@@ -382,3 +382,19 @@ fn collection_search_filters_before_attribute_matching() {
     );
     assert_eq!(store.search_items(&query).unwrap().len(), 2);
 }
+
+#[test]
+fn search_collection_items_rejects_missing_or_deleted_collection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let collection = store.create_collection("temp", None).unwrap();
+    assert!(matches!(
+        store.search_collection_items("missing", &HashMap::new()),
+        Err(Error::NotFound(_))
+    ));
+    store.delete_collection(&collection.id).unwrap();
+    assert!(matches!(
+        store.search_collection_items(&collection.id, &HashMap::new()),
+        Err(Error::NotFound(_))
+    ));
+}

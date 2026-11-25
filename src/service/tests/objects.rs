@@ -851,3 +851,46 @@ async fn queued_alias_items_reads_follow_repointing_and_preserve_removed_alias_e
         }
     }
 }
+
+#[tokio::test]
+async fn deleted_collection_returns_unknown_object_on_items_and_search() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let collection = state.store().create_collection("ephemeral", None).unwrap();
+    let (server_conn, client_conn) = p2p_pair(state.clone()).await;
+    let path = register_collection(server_conn.object_server(), &state, &collection.id)
+        .await
+        .unwrap();
+    state.store().delete_collection(&collection.id).unwrap();
+
+    let items_err = client_conn
+        .call_method(
+            None::<zbus::names::BusName<'_>>,
+            &path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.freedesktop.Secret.Collection", "Items"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        items_err,
+        zbus::Error::FDO(err) if matches!(*err, zbus::fdo::Error::UnknownObject(_))
+    ));
+
+    let search_err = client_conn
+        .call_method(
+            None::<zbus::names::BusName<'_>>,
+            &path,
+            Some("org.freedesktop.Secret.Collection"),
+            "SearchItems",
+            &(HashMap::<String, String>::new(),),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        search_err,
+        zbus::Error::FDO(err) if matches!(*err, zbus::fdo::Error::UnknownObject(_))
+    ));
+}

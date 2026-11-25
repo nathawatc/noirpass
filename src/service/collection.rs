@@ -104,7 +104,7 @@ impl Collection {
         } else {
             self.state
                 .store()
-                .list_items(&id)
+                .search_collection_items(&id, &HashMap::new())
                 .map_err(fdo::Error::from)?
         };
         Ok(items
@@ -242,8 +242,9 @@ impl Collection {
     #[zbus(property)]
     async fn items(&self) -> fdo::Result<Vec<OwnedObjectPath>> {
         let activity = Arc::new(self.state.activity()?);
-        let id = self.resolve_id()?;
-        if id == SESSION_COLLECTION_ID {
+        if matches!(&self.target, Target::Collection(id) if id == SESSION_COLLECTION_ID)
+            || matches!(&self.target, Target::Alias(name) if self.state.is_session_alias(name))
+        {
             return Ok(self
                 .state
                 .list_session_items()
@@ -254,7 +255,7 @@ impl Collection {
         let object = self.clone();
         Ok(self
             .state
-            .blocking_admitted(activity.clone(), None, move |_| Ok(object.item_paths()?))
+            .blocking_admitted(activity, None, move |_| Ok(object.item_paths()?))
             .await?)
     }
 
