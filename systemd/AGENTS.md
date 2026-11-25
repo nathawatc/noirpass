@@ -26,8 +26,8 @@ contracts in [`../src/cli/AGENTS.md`](../src/cli/AGENTS.md) and packaged paths f
   changes must add the selected store's parent to `ReadWritePaths` and ensure it is compatible with
   `ProtectHome=read-only` and other path restrictions. Do not document custom paths as supported by
   the unit without matching filesystem access rules.
-- Keep `PartOf=graphical-session.target` and the user-unit installation target unless an activation
-  design change updates both service and D-Bus integration together.
+- Keep `PartOf=graphical-session.target` and keep the unit static (no `[Install]` section) so
+  D-Bus activates it strictly on demand.
 
 ## Sandbox and Hardening
 

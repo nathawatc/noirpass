@@ -30,6 +30,3 @@ RestrictAddressFamilies=AF_UNIX
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
-
-[Install]
-WantedBy=default.target
