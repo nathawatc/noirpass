@@ -2,7 +2,7 @@
 
 use std::fs::{self, Permissions};
 use std::io::{self, Read};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -17,7 +17,8 @@ use super::format::{atomic_write_in, read_optional_in, restore_optional_in};
 use super::status::load_configured_recipient_in;
 use super::{
     CONFIG_VERSION, Config, DEFAULT_IDLE_EXIT_SECONDS, DIFFERENT_RECIPIENT_ERROR, INDEX_FILE,
-    INIT_HINT, KEYS_DIR, RECIPIENT_REL, SECRETS_DIR,
+    INIT_HINT, KEYS_DIR, NO_USABLE_ENCRYPTION_KEY_ERROR, RECIPIENT_FILE, RECIPIENT_REL,
+    SECRETS_DIR,
 };
 
 fn has_encrypted_secret_files(root: &Directory) -> Result<bool> {
@@ -89,9 +90,7 @@ fn reject_missing_index_for_initialized_store(root: &Directory) -> Result<()> {
 fn parse_usable_recipient(bytes: &[u8]) -> Result<Cert> {
     let cert = parse_recipient_cert(bytes)?;
     if !has_usable_encryption_key(&cert) {
-        return Err(Error::Config(
-            "recipient certificate has no usable encryption-capable key".into(),
-        ));
+        return Err(Error::Config(NO_USABLE_ENCRYPTION_KEY_ERROR.into()));
     }
     Ok(cert)
 }
@@ -138,7 +137,7 @@ pub(super) fn init_store_with(
         data_dir,
         &root,
         &cert,
-        |keys, bytes| atomic_write_in(keys, Path::new("recipient.pgp"), bytes, 0o600),
+        |keys, bytes| atomic_write_in(keys, Path::new(RECIPIENT_FILE), bytes, 0o600),
         || {},
     )?;
     let store = match store {
@@ -159,7 +158,7 @@ pub(super) fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
         data_dir,
         &root,
         &cert,
-        |keys, bytes| atomic_write_in(keys, Path::new("recipient.pgp"), bytes, 0o600),
+        |keys, bytes| atomic_write_in(keys, Path::new(RECIPIENT_FILE), bytes, 0o600),
         || {},
     )
 }
@@ -211,7 +210,7 @@ pub(super) fn init_from_cert_in_with_hooks(
     root.set_permissions(Permissions::from_mode(0o700))?;
     let keys = root.create_child(Path::new(KEYS_DIR), 0o700)?;
     keys.set_permissions(Permissions::from_mode(0o700))?;
-    let name = Path::new("recipient.pgp");
+    let name = Path::new(RECIPIENT_FILE);
     let previous_cert = read_optional_in(&keys, name)?;
     let previous_config = read_optional_in(root, Path::new(super::CONFIG_FILE))?;
     let binary = cert_to_binary(cert)?;
@@ -225,9 +224,7 @@ pub(super) fn init_from_cert_in_with_hooks(
     let write_result = (|| -> Result<()> {
         write_certificate(&keys, &binary)?;
         after_certificate();
-        let current = root.metadata(Path::new(KEYS_DIR))?;
-        let owned = keys.metadata(Path::new("."))?;
-        if (current.dev(), current.ino()) != (owned.dev(), owned.ino()) {
+        if !root.same_entry_as(Path::new(KEYS_DIR), &keys)? {
             return Err(Error::Config(
                 "recipient directory changed during initialization".into(),
             ));

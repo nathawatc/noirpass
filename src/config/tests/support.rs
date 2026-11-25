@@ -17,13 +17,7 @@ pub(super) fn generated_recipient() -> (Vec<u8>, String) {
 }
 
 pub(super) fn initialized_store_with_item() -> (tempfile::TempDir, ItemMeta) {
-    let (cert, _) = CertBuilder::new()
-        .add_userid("status-integrity")
-        .add_storage_encryption_subkey()
-        .generate()
-        .unwrap();
-    let mut cert_bytes = Vec::new();
-    cert.serialize(&mut cert_bytes).unwrap();
+    let (cert_bytes, _) = generated_recipient();
     let tmp = tempfile::tempdir().unwrap();
     init_from_bytes(tmp.path(), &cert_bytes).unwrap();
     let store = Store::open(tmp.path()).unwrap();

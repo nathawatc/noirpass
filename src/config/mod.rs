@@ -15,11 +15,16 @@ use crate::store::{INDEX_FILE, SECRETS_DIR};
 const CONFIG_FILE: &str = "config.toml";
 const CONFIG_TMP_PREFIX: &str = ".noirpass-tmp-";
 const KEYS_DIR: &str = "keys";
+const RECIPIENT_FILE: &str = "recipient.pgp";
 const RECIPIENT_REL: &str = "keys/recipient.pgp";
 const CONFIG_VERSION: i64 = 1;
+/// Minimum valid `idle_exit` value (`-1` disables idle exit).
+pub const MIN_IDLE_EXIT_SECONDS: i64 = -1;
 /// Default daemon inactivity timeout in seconds.
 pub const DEFAULT_IDLE_EXIT_SECONDS: i64 = 300;
 const INIT_HINT: &str = "run noirpass init --recipient ...";
+const NO_USABLE_ENCRYPTION_KEY_ERROR: &str =
+    "recipient certificate has no usable encryption-capable key";
 const DIFFERENT_RECIPIENT_ERROR: &str = "Noirpass is initialized with a different recipient.\n\nChanging recipient requires deleting the existing Noirpass store first.\n\nRun:\n    noirpass deinit\n\nThen run init again with the new recipient.";
 const LIFECYCLE_LOCK_FILE: &str = ".noirpass-lifecycle.lock";
 

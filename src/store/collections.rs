@@ -12,18 +12,25 @@ use super::{
 use crate::random_hex_id;
 
 impl Store {
-    pub(super) fn validate_collection_in_txn(
-        txn: &redb::WriteTransaction,
+    pub(super) fn decode_collection_from_table(
+        collections: &impl ReadableTable<&'static str, &'static [u8]>,
         id: &str,
     ) -> Result<CollectionMeta> {
         if !is_valid_collection_id(id) {
             return Err(Error::NotFound(format!("collection {id}")));
         }
-        let collections = txn.open_table(COLLECTIONS)?;
         let value = collections
             .get(id)?
             .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
         decode_collection(id, value.value())
+    }
+
+    pub(super) fn validate_collection_in_txn(
+        txn: &redb::WriteTransaction,
+        id: &str,
+    ) -> Result<CollectionMeta> {
+        let collections = txn.open_table(COLLECTIONS)?;
+        Self::decode_collection_from_table(&collections, id)
     }
 
     /// Create a new collection with the given label, optionally registering an
@@ -55,15 +62,9 @@ impl Store {
     /// Fetch a single collection by id.
     pub fn get_collection(&self, id: &str) -> Result<CollectionMeta> {
         self.ensure_not_poisoned()?;
-        if !is_valid_collection_id(id) {
-            return Err(Error::NotFound(format!("collection {id}")));
-        }
         let txn = self.db.begin_read()?;
         let table = txn.open_table(COLLECTIONS)?;
-        let value = table
-            .get(id)?
-            .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
-        decode_collection(id, value.value())
+        Self::decode_collection_from_table(&table, id)
     }
 
     /// List every collection, in id order.

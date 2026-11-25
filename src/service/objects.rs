@@ -11,8 +11,18 @@ use super::ServiceState;
 use crate::crypto::SessionCipher;
 use crate::service::session::Session;
 
+/// Well-known D-Bus service name claimed by the daemon.
+pub const SERVICE_NAME: &str = "org.freedesktop.secrets";
+
 /// Path of the service object.
 pub const SERVICE_PATH: &str = "/org/freedesktop/secrets";
+
+/// D-Bus interface and property names for Secret Service collections and items.
+pub(crate) const COLLECTION_INTERFACE: &str = "org.freedesktop.Secret.Collection";
+pub(crate) const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
+pub(crate) const COLLECTION_LABEL_PROPERTY: &str = "org.freedesktop.Secret.Collection.Label";
+pub(crate) const ITEM_LABEL_PROPERTY: &str = "org.freedesktop.Secret.Item.Label";
+pub(crate) const ITEM_ATTRIBUTES_PROPERTY: &str = "org.freedesktop.Secret.Item.Attributes";
 
 /// The DH session algorithm identifier from the Secret Service spec.
 pub const ALGORITHM_DH: &str = "dh-ietf1024-sha256-aes128-cbc-pkcs7";
@@ -64,7 +74,9 @@ pub fn alias_path(name: &str) -> zbus::Result<OwnedObjectPath> {
 /// Extract the collection id from a collection path, if it is one.
 #[must_use]
 pub fn parse_collection_path(path: &str) -> Option<String> {
-    let rest = path.strip_prefix("/org/freedesktop/secrets/collection/")?;
+    let rest = path
+        .strip_prefix(SERVICE_PATH)?
+        .strip_prefix("/collection/")?;
     if rest.is_empty() || rest.contains('/') {
         return None;
     }
@@ -74,7 +86,9 @@ pub fn parse_collection_path(path: &str) -> Option<String> {
 /// Extract `(collection_id, item_id)` from an item path, if it is one.
 #[must_use]
 pub fn parse_item_path(path: &str) -> Option<(String, String)> {
-    let rest = path.strip_prefix("/org/freedesktop/secrets/collection/")?;
+    let rest = path
+        .strip_prefix(SERVICE_PATH)?
+        .strip_prefix("/collection/")?;
     let (collection, item) = rest.split_once('/')?;
     if collection.is_empty() || item.is_empty() || item.contains('/') {
         return None;

@@ -18,8 +18,6 @@ use crate::service::objects::root_path;
 use crate::service::session::Secret;
 use crate::service::{SESSION_COLLECTION_ID, SecretError, ServiceState, item_path, message_sender};
 
-pub(crate) const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
-
 /// A `org.freedesktop.Secret.Item` D-Bus object.
 #[derive(Clone)]
 pub struct Item {

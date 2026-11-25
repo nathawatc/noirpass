@@ -31,8 +31,6 @@ use crate::service::objects::root_path;
 use crate::service::session::Secret;
 use crate::service::{SESSION_COLLECTION_ID, SecretError, ServiceState, item_path, message_sender};
 
-const COLLECTION_INTERFACE: &str = "org.freedesktop.Secret.Collection";
-
 /// What a served collection object points at.
 #[derive(Clone)]
 enum Target {

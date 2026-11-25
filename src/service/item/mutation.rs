@@ -6,13 +6,13 @@ use zbus::fdo;
 use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::{OwnedObjectPath, Variant};
 
-use super::{ITEM_INTERFACE, Item, root_path};
+use super::{Item, root_path};
 use crate::service::collection::{
     Collection, emit_collection_items_and_modified, emit_collection_modified,
 };
 use crate::service::session::Secret;
 use crate::service::{
-    SESSION_COLLECTION_ID, SecretError, collection_path, emit_property_changed,
+    ITEM_INTERFACE, SESSION_COLLECTION_ID, SecretError, collection_path, emit_property_changed,
     object_removed_or_absent,
 };
 

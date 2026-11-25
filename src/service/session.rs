@@ -70,13 +70,13 @@ impl Session {
         F: Future<Output = zbus::Result<bool>>,
     {
         if self.state.session_cipher(&self.path, owner).is_none() {
-            return Err(SecretError::NoSession(format!("no session {}", self.path)));
+            return Err(SecretError::no_session(&self.path));
         }
         if !removal.await.map_err(SecretError::ZBus)? {
-            return Err(SecretError::NoSession(format!("no session {}", self.path)));
+            return Err(SecretError::no_session(&self.path));
         }
         if !self.state.remove_session(&self.path, owner) {
-            return Err(SecretError::NoSession(format!("no session {}", self.path)));
+            return Err(SecretError::no_session(&self.path));
         }
         Ok(())
     }

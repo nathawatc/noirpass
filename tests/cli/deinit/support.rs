@@ -1,7 +1,9 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+use crate::common::noirpass_command;
 
 use noirpass::store::Store;
 use sequoia_openpgp::cert::CertBuilder;
@@ -55,8 +57,7 @@ pub(super) fn write_recipient(store: &Path, file_name: &str, userid: &str) -> Pa
 }
 
 pub(super) fn run_init(store: &Path, recipient: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    noirpass_command()
         .arg("--store-dir")
         .arg(store)
         .args(["init", "--recipient"])
@@ -66,8 +67,7 @@ pub(super) fn run_init(store: &Path, recipient: &Path) -> Output {
 }
 
 pub(super) fn run_piped(store: &Path, args: &[&str], input: &[u8]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let mut child = noirpass_command()
         .arg("--store-dir")
         .arg(store)
         .args(args)

@@ -16,12 +16,10 @@ use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 use zbus::export::futures_core::Stream;
 
-use noirpass::config::{init_store_from_path, open_startup_store};
+use noirpass::config::{MIN_IDLE_EXIT_SECONDS, init_store_from_path, open_startup_store};
 use noirpass::gpg::Gpg;
 use noirpass::service::session::Session;
-use noirpass::service::{SERVICE_PATH, Service, ServiceState, register_existing};
-
-const SERVICE_NAME: &str = "org.freedesktop.secrets";
+use noirpass::service::{SERVICE_NAME, SERVICE_PATH, Service, ServiceState, register_existing};
 
 const CLI_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().bold())
@@ -53,7 +51,7 @@ struct Cli {
     #[arg(
         long,
         allow_negative_numbers = true,
-        value_parser = clap::value_parser!(i64).range(-1..)
+        value_parser = clap::value_parser!(i64).range(MIN_IDLE_EXIT_SECONDS..)
     )]
     idle_exit: Option<i64>,
 

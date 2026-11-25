@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::process::Command;
+
+use crate::common::noirpass_command;
 
 use noirpass::store::{ItemMeta, Store};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -39,8 +40,7 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     .unwrap();
     drop(store);
 
-    let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let listed = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .arg("list")
@@ -57,8 +57,7 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     assert!(stdout.contains(&missing.id));
     assert!(stdout.contains("ciphertext: missing"));
 
-    let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let checked = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .args(["check", "--yes"])
@@ -77,8 +76,7 @@ fn cli_lists_deletes_and_repairs_stale_items() {
     assert!(store.get_item(&missing.id).is_err());
     drop(store);
 
-    let deleted = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let deleted = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .arg("delete")
@@ -132,8 +130,7 @@ fn cli_rejects_mismatched_item_id_without_deleting_valid_item() {
     txn.commit().unwrap();
     drop(db);
 
-    let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let listed = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .arg("list")
@@ -144,8 +141,7 @@ fn cli_rejects_mismatched_item_id_without_deleting_valid_item() {
         "list must reject mismatched item ids"
     );
 
-    let deleted = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let deleted = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .arg("delete")
@@ -191,8 +187,7 @@ fn cli_check_repairs_noncanonical_item_key() {
     txn.commit().unwrap();
     drop(db);
 
-    let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let checked = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .args(["check", "--yes"])
@@ -233,8 +228,7 @@ fn cli_check_recovers_quarantined_ciphertext_before_repair() {
     std::fs::rename(&canonical, &quarantine).unwrap();
     drop(store);
 
-    let checked = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let checked = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .args(["check", "--yes"])
@@ -294,8 +288,7 @@ fn cli_delete_removes_rows_files_and_preserves_other_items() {
             std::fs::remove_file(&target_file).unwrap();
         }
         drop(store);
-        let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-            .env_remove("NOIRPASS_STORE")
+        let output = noirpass_command()
             .arg("--store-dir")
             .arg(dir.path())
             .args(["delete", &target.id, "--yes"])
@@ -340,8 +333,7 @@ fn cli_delete_removes_rows_files_and_preserves_other_items() {
             assert_eq!(table.len().unwrap(), 1);
         }
         drop(db);
-        let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-            .env_remove("NOIRPASS_STORE")
+        let output = noirpass_command()
             .arg("--store-dir")
             .arg(dir.path())
             .args(["delete", &survivor.id, "--yes"])
@@ -381,8 +373,7 @@ fn cli_list_checks_ciphertext_presence_without_full_integrity_scan() {
     // but `list` only checks presence of indexed items' ciphertext files.
     std::fs::create_dir(dir.path().join("secrets").join("unrelated.gpg")).unwrap();
 
-    let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let listed = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .arg("list")

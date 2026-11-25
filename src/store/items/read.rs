@@ -5,9 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::error::{Error, Result};
-use crate::store::{
-    COLLECTIONS, ITEMS, ItemMeta, Store, decode_collection, decode_item, is_valid_collection_id,
-};
+use crate::store::{COLLECTIONS, ITEMS, ItemMeta, Store, decode_item};
 
 impl Store {
     /// Fetch a single item by id.
@@ -76,14 +74,8 @@ impl Store {
         let _read_guard = self.read_guard_checked_after_initial_check(|| {})?;
         let txn = self.db.begin_read()?;
         if require_collection && let Some(id) = collection {
-            if !is_valid_collection_id(id) {
-                return Err(Error::NotFound(format!("collection {id}")));
-            }
             let collections = txn.open_table(COLLECTIONS)?;
-            let value = collections
-                .get(id)?
-                .ok_or_else(|| Error::NotFound(format!("collection {id}")))?;
-            decode_collection(id, value.value())?;
+            Self::decode_collection_from_table(&collections, id)?;
         }
         let items = txn.open_table(ITEMS)?;
         let matches = |metadata: &ItemMeta| {

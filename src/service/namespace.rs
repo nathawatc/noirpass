@@ -11,8 +11,9 @@ use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::objects::root_path;
 use super::{
-    SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError, Service, collection,
-    collection_path, parse_collection_path, register_alias, register_collection, unregister_alias,
+    COLLECTION_LABEL_PROPERTY, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError,
+    Service, collection, collection_path, parse_collection_path, register_alias,
+    register_collection, unregister_alias,
 };
 
 impl Service {
@@ -23,12 +24,10 @@ impl Service {
         server: &ObjectServer,
         emitter: &SignalEmitter<'_>,
     ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
-        let label = match properties.get("org.freedesktop.Secret.Collection.Label") {
+        let label = match properties.get(COLLECTION_LABEL_PROPERTY) {
             None => None,
             Some(value) => Some(String::try_from(value.clone()).map_err(|_| {
-                fdo::Error::InvalidArgs(
-                    "org.freedesktop.Secret.Collection.Label must be a string".into(),
-                )
+                fdo::Error::InvalidArgs(format!("{COLLECTION_LABEL_PROPERTY} must be a string"))
             })?),
         };
         let lifecycle = self.state.lock_owned_namespace_lifecycle().await;

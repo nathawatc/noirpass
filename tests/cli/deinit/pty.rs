@@ -3,7 +3,9 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::FromRawFd;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+use crate::common::noirpass_command;
 
 unsafe extern "C" {
     fn posix_openpt(flags: c_int) -> c_int;
@@ -50,8 +52,7 @@ pub(super) fn run_tty_eof(store: &Path, input: &[u8]) -> Output {
 
 pub(super) fn run_tty_with_input(store: &Path, input: &[u8]) -> Output {
     let (mut master, slave) = open_pty();
-    let child = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let child = noirpass_command()
         .arg("--store-dir")
         .arg(store)
         .arg("deinit")

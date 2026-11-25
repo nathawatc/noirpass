@@ -8,9 +8,20 @@ use sequoia_openpgp::Cert;
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
 use crate::gpg::{has_usable_encryption_key, parse_recipient_cert};
-use crate::store::Store;
+use crate::store::{INTEGRITY_CHECK_FAILED_ERROR, Store};
 
-use super::{CONFIG_FILE, CONFIG_VERSION, Config, INIT_HINT, Recipient, Status};
+use super::{
+    CONFIG_FILE, CONFIG_VERSION, Config, INIT_HINT, NO_USABLE_ENCRYPTION_KEY_ERROR, Recipient,
+    Status,
+};
+
+fn unsupported_config_version_msg(version: i64) -> String {
+    format!("unsupported config version {version}; expected {CONFIG_VERSION}")
+}
+
+fn fingerprint_mismatch_msg(configured: &str, actual: &str) -> String {
+    format!("recipient fingerprint mismatch: config has {configured}, cert has {actual}")
+}
 
 fn read_and_parse_recipient_cert(
     data_dir: &Path,
@@ -39,18 +50,17 @@ pub(super) fn load_configured_recipient_in(
 ) -> Result<(Config, Cert, String)> {
     let config = Config::load_in(root)?;
     if config.version != CONFIG_VERSION {
-        return Err(Error::Config(format!(
-            "unsupported config version {}; expected {CONFIG_VERSION}",
-            config.version
+        return Err(Error::Config(unsupported_config_version_msg(
+            config.version,
         )));
     }
 
     let cert = read_and_parse_recipient_cert(data_dir, root, &config.recipient_cert)?;
     let actual = cert.fingerprint().to_hex();
     if actual != config.recipient_fingerprint {
-        return Err(Error::Config(format!(
-            "recipient fingerprint mismatch: config has {}, cert has {}",
-            config.recipient_fingerprint, actual
+        return Err(Error::Config(fingerprint_mismatch_msg(
+            &config.recipient_fingerprint,
+            &actual,
         )));
     }
     Ok((config, cert, actual))
@@ -66,9 +76,7 @@ pub fn load_recipient(data_dir: &Path) -> Result<Recipient> {
 pub(super) fn load_recipient_in(data_dir: &Path, root: &Directory) -> Result<(Config, Recipient)> {
     let (config, cert, fingerprint) = load_configured_recipient_in(data_dir, root)?;
     if !has_usable_encryption_key(&cert) {
-        return Err(Error::Config(
-            "recipient certificate has no usable encryption-capable key".into(),
-        ));
+        return Err(Error::Config(NO_USABLE_ENCRYPTION_KEY_ERROR.into()));
     }
     Ok((config, Recipient { cert, fingerprint }))
 }
@@ -113,10 +121,8 @@ pub fn status_with_cert(data_dir: &Path) -> (Status, Option<Cert>) {
             out.config_valid = true;
             out.configured_fingerprint = Some(config.recipient_fingerprint.clone());
             if config.version != CONFIG_VERSION {
-                out.errors.push(format!(
-                    "unsupported config version {}; expected {CONFIG_VERSION}",
-                    config.version
-                ));
+                out.errors
+                    .push(unsupported_config_version_msg(config.version));
             }
             Some(config)
         }
@@ -142,14 +148,13 @@ pub fn status_with_cert(data_dir: &Path) -> (Status, Option<Cert>) {
                 out.fingerprint_matches = Some(actual == config.recipient_fingerprint);
                 out.cert_has_encryption_key = Some(has_key);
                 if out.fingerprint_matches != Some(true) {
-                    out.errors.push(format!(
-                        "recipient fingerprint mismatch: config has {}, cert has {}",
-                        config.recipient_fingerprint, actual
+                    out.errors.push(fingerprint_mismatch_msg(
+                        &config.recipient_fingerprint,
+                        &actual,
                     ));
                 }
                 if !has_key {
-                    out.errors
-                        .push("recipient certificate has no usable encryption-capable key".into());
+                    out.errors.push(NO_USABLE_ENCRYPTION_KEY_ERROR.into());
                 }
                 if out.fingerprint_matches == Some(true) && has_key {
                     validated_cert = Some(cert);
@@ -166,9 +171,7 @@ pub fn status_with_cert(data_dir: &Path) -> (Status, Option<Cert>) {
     {
         match Store::probe_integrity_in(data_dir, &root) {
             Ok(report) if report.is_healthy() => {}
-            Ok(_) => out.errors.push(
-                "store integrity check failed; run `noirpass check` before starting daemon".into(),
-            ),
+            Ok(_) => out.errors.push(INTEGRITY_CHECK_FAILED_ERROR.into()),
             Err(err) => out
                 .errors
                 .push(format!("store integrity check failed: {err}")),

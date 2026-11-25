@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use noirpass::store::Store;
 
@@ -75,8 +74,7 @@ fn cli_status_rejects_missing_ciphertext_without_repairing() {
     let ciphertext = dir.path().join(format!("secrets/{}.gpg", item.id));
     fs::remove_file(&ciphertext).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let output = noirpass_command()
         .arg("--store-dir")
         .arg(dir.path())
         .arg("status")

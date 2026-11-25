@@ -34,10 +34,18 @@ mod persistence;
 mod records;
 mod recovery;
 
+pub(crate) use integrity::INTEGRITY_CHECK_FAILED_ERROR;
 pub use records::{
     CollectionMeta, CorruptCollection, CorruptItem, DeletedCollection, IndexedItem,
     IntegrityReport, ItemMeta,
 };
+
+pub(crate) fn store_in_use_error(index_path: &Path) -> Error {
+    Error::Config(format!(
+        "store is in use by another noirpass process: {}; stop the daemon before running maintenance commands",
+        index_path.display()
+    ))
+}
 
 /// id → `serde_json(CollectionMeta)`
 const COLLECTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("collections");
@@ -486,10 +494,7 @@ impl Store {
         let db = match Database::builder().create_with_backend(FileBackend::new(index)) {
             Ok(db) => db,
             Err(DatabaseError::DatabaseAlreadyOpen) => {
-                return Err(Error::Config(format!(
-                    "store is in use by another noirpass process: {}; stop the daemon before running maintenance commands",
-                    index_path.display()
-                )));
+                return Err(store_in_use_error(&index_path));
             }
             Err(err) => return Err(err.into()),
         };

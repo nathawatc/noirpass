@@ -61,7 +61,7 @@ pub(super) async fn get_secrets(
     owner: &str,
 ) -> Result<HashMap<OwnedObjectPath, Secret>, SecretError> {
     if state.session_cipher(session, owner).is_none() {
-        return Err(SecretError::NoSession(format!("no session {session}")));
+        return Err(SecretError::no_session(session));
     }
 
     let mut out = HashMap::new();

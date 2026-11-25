@@ -3,7 +3,6 @@
 use std::fs;
 use std::io;
 use std::ops::Bound;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::format::{parse_config, validate_recipient_cert_path};
@@ -12,7 +11,9 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
-use crate::store::{is_lower_hex, is_valid_item_id, parse_recovery_secret_name};
+use crate::store::{
+    is_lower_hex, is_valid_item_id, parse_recovery_secret_name, store_in_use_error,
+};
 use redb::{StorageBackend, backends::FileBackend};
 
 fn is_canonical_secret_name(name: &str) -> bool {
@@ -91,16 +92,13 @@ pub(super) fn remove_empty_directory(
     directory: &Directory,
     name: &Path,
 ) -> Result<()> {
-    let current = match root.metadata(name) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err.into()),
-    };
-    let owned = directory.metadata(Path::new("."))?;
     // A renamed child may have been replaced, even with another empty directory.
     // Only the child we inspected and emptied is eligible for removal.
-    if (current.dev(), current.ino()) != (owned.dev(), owned.ino()) {
-        return Ok(());
+    match root.same_entry_as(name, directory) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
     }
     match root.remove_directory(name) {
         Ok(()) => Ok(()),
@@ -180,11 +178,22 @@ fn preflight_deinit(root: &Directory, recipient_rel: &Path) -> Result<()> {
     Ok(())
 }
 
+fn preflight_deinit_state(root: &Directory) -> Result<PathBuf> {
+    let config = load_deinit_config(root)?;
+    let recipient_rel = config.as_ref().map_or_else(
+        || PathBuf::from(RECIPIENT_REL),
+        |config| config.recipient_cert.clone(),
+    );
+    preflight_deinit(root, &recipient_rel)?;
+    Ok(recipient_rel)
+}
+
 fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<FileBackend>> {
     let has_index = checked_owned_file(root, Path::new(INDEX_FILE), "the metadata database")?;
     if !has_index {
         return Ok(None);
     }
+    let index_path = data_dir.join(INDEX_FILE);
     // Claim redb ownership without parsing, initializing, or recovering the index:
     // explicit destructive cleanup must also work for corrupt databases. A daemon
     // may retain a renamed secrets directory, so every existing index needs a lock.
@@ -193,12 +202,7 @@ fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<FileBack
     // Hold both on this descriptor until destructive cleanup finishes.
     match file.try_lock() {
         Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            return Err(Error::Config(format!(
-                "store is in use by another noirpass process: {}; stop the daemon before running maintenance commands",
-                data_dir.join(INDEX_FILE).display()
-            )));
-        }
+        Err(std::fs::TryLockError::WouldBlock) => return Err(store_in_use_error(&index_path)),
         Err(std::fs::TryLockError::Error(err)) => {
             return Err(Error::Config(format!(
                 "cannot acquire index ownership: {err}"
@@ -210,10 +214,7 @@ fn open_store_guard(data_dir: &Path, root: &Directory) -> Result<Option<FileBack
         .try_lock_range(Bound::Unbounded, Bound::Unbounded)
         .map_err(|err| Error::Config(format!("cannot acquire index ownership: {err}")))?
     {
-        return Err(Error::Config(format!(
-            "store is in use by another noirpass process: {}; stop the daemon before running maintenance commands",
-            data_dir.join(INDEX_FILE).display()
-        )));
+        return Err(store_in_use_error(&index_path));
     }
     Ok(Some(index))
 }
@@ -234,21 +235,11 @@ pub(super) fn deinit_with_hooks(
     }
     let root = Directory::open(data_dir)?;
     after_open();
-    let config = load_deinit_config(&root)?;
-    let recipient_rel = config.as_ref().map_or_else(
-        || PathBuf::from(RECIPIENT_REL),
-        |config| config.recipient_cert.clone(),
-    );
-    preflight_deinit(&root, &recipient_rel)?;
+    preflight_deinit_state(&root)?;
     let preopened_store = open_store_guard(data_dir, &root)?;
     let _lifecycle_lock = super::LifecycleLock::acquire_in(&root)?;
 
-    let config = load_deinit_config(&root)?;
-    let recipient_rel = config.as_ref().map_or_else(
-        || PathBuf::from(RECIPIENT_REL),
-        |config| config.recipient_cert.clone(),
-    );
-    preflight_deinit(&root, &recipient_rel)?;
+    let recipient_rel = preflight_deinit_state(&root)?;
     let _store_guard = match preopened_store {
         Some(store) => Some(store),
         None => open_store_guard(data_dir, &root)?,

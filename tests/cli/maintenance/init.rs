@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use noirpass::config::{Config, LifecycleLock, load_recipient};
@@ -169,8 +169,7 @@ fn cli_init_rejects_busy_existing_store_before_writing() {
         .join(format!("{}.gpg", item.id));
     let ciphertext_before = fs::read(&ciphertext_path).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let output = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .args(["init", "--recipient"])
@@ -211,8 +210,7 @@ fn cli_init_refreshes_unlocked_existing_store() {
     add_encryption_subkey(gnupg.path());
     let recipient_path = store.path().join("recipient-refresh.asc");
     fs::write(&recipient_path, export_public_cert(gnupg.path())).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let output = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .args(["init", "--recipient"])
@@ -246,8 +244,7 @@ fn cli_init_rejects_different_primary_without_writing() {
     let recipient_path = store.path().join("different-recipient.asc");
     fs::write(&recipient_path, export_public_cert(second_gnupg.path())).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let output = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .args(["init", "--recipient"])
@@ -284,8 +281,7 @@ fn cli_init_rejects_store_with_missing_index() {
     let recipient_path = store.path().join("recipient.asc");
     std::fs::write(&recipient_path, &cert).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let output = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .arg("init")
@@ -318,8 +314,7 @@ fn cli_init_invalid_recipient_does_not_create_store() {
     let recipient_path = store.path().join("not-openpgp.asc");
     std::fs::write(&recipient_path, b"not openpgp").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let output = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .arg("init")
@@ -346,8 +341,7 @@ fn cli_init_stdin_and_status_exit_codes() {
     let cert = export_public_cert(gnupg.path());
     let store = tempfile::tempdir().unwrap();
 
-    let uninitialized = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let uninitialized = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .arg("status")
@@ -360,8 +354,7 @@ fn cli_init_stdin_and_status_exit_codes() {
 
     init_noirpass_store_from_stdin(store.path(), &cert);
 
-    let usable = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let usable = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .arg("status")
@@ -390,8 +383,7 @@ fn cli_init_stdin_and_status_exit_codes() {
     );
     wait_for_name(&address);
 
-    let live = Command::new(env!("CARGO_BIN_EXE_noirpass"))
-        .env_remove("NOIRPASS_STORE")
+    let live = noirpass_command()
         .arg("--store-dir")
         .arg(store.path())
         .arg("status")

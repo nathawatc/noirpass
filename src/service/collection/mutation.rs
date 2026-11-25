@@ -10,12 +10,11 @@ use super::{
     Collection, emit_collection_items_and_modified, emit_collection_label_modified,
     emit_collection_modified, root_path,
 };
-use crate::service::item::ITEM_INTERFACE;
 use crate::service::session::Secret;
 use crate::service::{
-    SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError, Service,
-    alias_path, collection_path, emit_property_changed, item_path, object_removed_or_absent,
-    register_item,
+    ITEM_ATTRIBUTES_PROPERTY, ITEM_INTERFACE, ITEM_LABEL_PROPERTY, SERVICE_PATH,
+    SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError, Service, alias_path,
+    collection_path, emit_property_changed, item_path, object_removed_or_absent, register_item,
 };
 use zbus::Variant;
 
@@ -29,20 +28,18 @@ impl Collection {
         connection: &zbus::Connection,
         owner: &str,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
-        let label = match properties.get("org.freedesktop.Secret.Item.Label") {
+        let label = match properties.get(ITEM_LABEL_PROPERTY) {
             None => String::new(),
             Some(value) => String::try_from(value.clone()).map_err(|_| {
-                SecretError::InvalidArgs(
-                    "org.freedesktop.Secret.Item.Label must be a string".into(),
-                )
+                SecretError::InvalidArgs(format!("{ITEM_LABEL_PROPERTY} must be a string"))
             })?,
         };
-        let attributes = match properties.get("org.freedesktop.Secret.Item.Attributes") {
+        let attributes = match properties.get(ITEM_ATTRIBUTES_PROPERTY) {
             None => HashMap::new(),
             Some(value) => HashMap::<String, String>::try_from(value.clone()).map_err(|_| {
-                SecretError::InvalidArgs(
-                    "org.freedesktop.Secret.Item.Attributes must be a string dictionary".into(),
-                )
+                SecretError::InvalidArgs(format!(
+                    "{ITEM_ATTRIBUTES_PROPERTY} must be a string dictionary"
+                ))
             })?,
         };
 

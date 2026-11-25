@@ -1,6 +1,6 @@
 //! Public Secret Service D-Bus error mapping.
 
-use zbus::fdo;
+use zbus::{OwnedObjectPath, fdo};
 
 /// Secret Service and standard D-Bus method errors.
 #[derive(Debug, zbus::DBusError)]
@@ -32,6 +32,12 @@ pub enum SecretError {
     NoSuchObject(String),
 }
 
+impl SecretError {
+    pub(crate) fn no_session(session: &OwnedObjectPath) -> Self {
+        Self::NoSession(format!("no session {session}"))
+    }
+}
+
 impl From<fdo::Error> for SecretError {
     fn from(err: fdo::Error) -> Self {
         match err {
@@ -49,7 +55,7 @@ impl From<crate::Error> for SecretError {
     fn from(err: crate::Error) -> Self {
         match err {
             crate::Error::NotFound(msg) => Self::NoSuchObject(msg),
-            other => fdo::Error::Failed(other.to_string()).into(),
+            other => Self::Failed(other.to_string()),
         }
     }
 }

@@ -9,11 +9,11 @@ use zbus::names::InterfaceName;
 use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::{OwnedObjectPath, Variant};
 
-use super::{COLLECTION_INTERFACE, Collection};
+use super::Collection;
 use crate::service::state::MutationGuard;
 use crate::service::{
-    SERVICE_PATH, SESSION_COLLECTION_ID, Service, ServiceState, alias_path, collection_path,
-    emit_property_changed, item_path,
+    COLLECTION_INTERFACE, SERVICE_PATH, SESSION_COLLECTION_ID, Service, ServiceState, alias_path,
+    collection_path, emit_property_changed, item_path,
 };
 
 /// Return the canonical path and every valid persisted alias path for `id`.

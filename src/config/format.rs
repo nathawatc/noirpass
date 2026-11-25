@@ -16,7 +16,10 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(test)]
 use super::RECIPIENT_REL;
-use super::{CONFIG_FILE, CONFIG_TMP_PREFIX, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT};
+use super::{
+    CONFIG_FILE, CONFIG_TMP_PREFIX, Config, DEFAULT_IDLE_EXIT_SECONDS, INIT_HINT,
+    MIN_IDLE_EXIT_SECONDS,
+};
 
 impl Config {
     /// Load `config.toml`.
@@ -176,10 +179,10 @@ pub(super) fn restore_optional_in(
     }
 }
 fn validate_idle_exit(idle_exit: i64) -> Result<()> {
-    if idle_exit < -1 {
-        return Err(Error::Config(
-            "config.toml `idle_exit` must be -1 or greater".into(),
-        ));
+    if idle_exit < MIN_IDLE_EXIT_SECONDS {
+        return Err(Error::Config(format!(
+            "config.toml `idle_exit` must be {MIN_IDLE_EXIT_SECONDS} or greater"
+        )));
     }
     Ok(())
 }

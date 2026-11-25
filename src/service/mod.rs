@@ -30,13 +30,17 @@ mod state;
 use bulk::MAX_BULK_SECRET_BYTES;
 pub use error::SecretError;
 pub use objects::{
-    ALGORITHM_DH, ALGORITHM_PLAIN, SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID,
-    alias_path, collection_path, item_path, parse_collection_path, parse_item_path, register_alias,
-    register_collection, register_existing, register_item, session_path, unregister_alias,
+    ALGORITHM_DH, ALGORITHM_PLAIN, SERVICE_NAME, SERVICE_PATH, SESSION_COLLECTION_ALIAS,
+    SESSION_COLLECTION_ID, alias_path, collection_path, item_path, parse_collection_path,
+    parse_item_path, register_alias, register_collection, register_existing, register_item,
+    session_path, unregister_alias,
 };
 pub use state::ServiceState;
 
-pub(crate) use objects::object_removed_or_absent;
+pub(crate) use objects::{
+    COLLECTION_INTERFACE, COLLECTION_LABEL_PROPERTY, ITEM_ATTRIBUTES_PROPERTY, ITEM_INTERFACE,
+    ITEM_LABEL_PROPERTY, object_removed_or_absent,
+};
 use objects::{register_session_object_with, root_path, validate_session_owner};
 
 use std::borrow::Cow;

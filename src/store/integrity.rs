@@ -15,6 +15,9 @@ use super::{
     is_valid_item_id, parse_recovery_secret_name, recovery_kind,
 };
 
+pub(crate) const INTEGRITY_CHECK_FAILED_ERROR: &str =
+    "store integrity check failed; run `noirpass check` before starting daemon";
+
 impl Store {
     /// Refuse daemon startup while unresolved integrity problems exist.
     pub fn ensure_safe_to_serve(&self) -> Result<()> {
@@ -47,9 +50,7 @@ impl Store {
             .item_index
             .write()
             .map_err(|_| Error::Config("item lookup index is poisoned".into()))? = None;
-        Err(Error::Config(
-            "store integrity check failed; run `noirpass check` before starting daemon".into(),
-        ))
+        Err(Error::Config(INTEGRITY_CHECK_FAILED_ERROR.into()))
     }
 
     /// Cross-check every redb item against ciphertext files on disk.

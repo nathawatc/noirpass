@@ -90,6 +90,13 @@ impl Directory {
             .metadata()
     }
 
+    /// True when the current directory entry `name` refers to the same inode as `other`.
+    pub(crate) fn same_entry_as(&self, name: &Path, other: &Self) -> io::Result<bool> {
+        let current = self.metadata(name)?;
+        let owned = other.metadata(Path::new("."))?;
+        Ok((current.dev(), current.ino()) == (owned.dev(), owned.ino()))
+    }
+
     pub(crate) fn validate_regular_or_absent(&self, name: &Path) -> io::Result<()> {
         match self.metadata(name) {
             Ok(metadata) if metadata.is_file() => Ok(()),

@@ -20,7 +20,7 @@ impl ServiceState {
     ) -> Result<Zeroizing<Vec<u8>>, SecretError> {
         let cipher = self
             .session_cipher(&secret.session, owner)
-            .ok_or_else(|| SecretError::NoSession(format!("no session {}", secret.session)))?;
+            .ok_or_else(|| SecretError::no_session(&secret.session))?;
         if matches!(cipher.as_ref(), SessionCipher::Plain) && !secret.parameters.is_empty() {
             return Err(
                 fdo::Error::InvalidArgs("plain Secret parameters must be empty".into()).into(),
@@ -48,7 +48,7 @@ impl ServiceState {
     ) -> Result<Secret, SecretError> {
         let cipher = self
             .session_cipher(session, owner)
-            .ok_or_else(|| SecretError::NoSession(format!("no session {session}")))?;
+            .ok_or_else(|| SecretError::no_session(session))?;
         let (parameters, value) = cipher.encrypt(plaintext);
         Ok(Secret {
             session: session.clone(),
@@ -68,7 +68,7 @@ impl ServiceState {
         maximum: Option<usize>,
     ) -> Result<Secret, SecretError> {
         if self.session_cipher(session, owner).is_none() {
-            return Err(SecretError::NoSession(format!("no session {session}")));
+            return Err(SecretError::no_session(session));
         }
         let collection = collection.to_owned();
         let item = item.to_owned();
@@ -76,7 +76,7 @@ impl ServiceState {
         let owner = owner.to_owned();
         self.blocking(None, move |state| {
             if state.session_cipher(&session, &owner).is_none() {
-                return Err(SecretError::NoSession(format!("no session {session}")));
+                return Err(SecretError::no_session(&session));
             }
             let (meta, ciphertext) = state.store().read_item_secret(&item)?;
             if meta.collection != collection {
@@ -86,7 +86,7 @@ impl ServiceState {
             }
             // The session can close during the filesystem read.
             if state.session_cipher(&session, &owner).is_none() {
-                return Err(SecretError::NoSession(format!("no session {session}")));
+                return Err(SecretError::no_session(&session));
             }
             let plaintext = state.gpg.decrypt_blocking(&ciphertext)?;
             if maximum.is_some_and(|maximum| plaintext.len() > maximum) {
@@ -107,7 +107,7 @@ impl ServiceState {
         owner: &str,
     ) -> Result<Option<Secret>, SecretError> {
         if self.session_cipher(session, owner).is_none() {
-            return Err(SecretError::NoSession(format!("no session {session}")));
+            return Err(SecretError::no_session(session));
         }
         let Some((collection_id, item_id)) = parse_item_path(path.as_str()) else {
             return Ok(None);
