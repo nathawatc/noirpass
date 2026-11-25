@@ -273,9 +273,9 @@ async fn wait_for_shutdown(
                     return;
                 }
             }
-            _ = ticker.tick() => {
+            _ = ticker.tick(), if idle_exit > 0 => {
                 debug!(idle_exit, "idle check");
-                if idle_exit > 0 && state.try_begin_idle_shutdown(idle_exit) {
+                if state.try_begin_idle_shutdown(idle_exit) {
                     info!(idle_exit, "idle limit reached");
                     return;
                 }
