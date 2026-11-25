@@ -235,3 +235,18 @@ fn status_detects_broken_secrets_dir() {
     assert!(!status.usable());
     assert!(status.errors.iter().any(|e| e.contains("store integrity")));
 }
+
+#[test]
+fn status_succeeds_with_readonly_index_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (tmp, _) = initialized_store_with_item();
+    let index = tmp.path().join(INDEX_FILE);
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o400)).unwrap();
+
+    let status = status(tmp.path());
+    // Restore write mode before tempdir drop.
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(status.usable(), "{status:?}");
+}

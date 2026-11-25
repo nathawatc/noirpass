@@ -266,7 +266,6 @@ fn open_existing_secrets(dir: &Path, root: &Directory) -> Result<(PathBuf, Direc
     }
     let secrets_directory = root.child(Path::new("secrets"))?;
     let _ = secrets_directory.read_dir()?;
-    let _ = root.open_regular(Path::new("index.redb"), libc::O_RDWR, 0)?;
     Ok((secrets_dir, secrets_directory))
 }
 
@@ -453,15 +452,13 @@ impl Store {
     /// while the daemon is using the same index.
     pub fn open_existing(dir: &Path) -> Result<Self> {
         let root = open_existing_root(dir)?;
-        let _ = open_existing_secrets(dir, &root)?;
         Self::open_existing_in(dir, &root)
     }
 
     /// Share a pinned root with configuration lifecycle operations.
     pub(crate) fn open_existing_in(dir: &Path, root: &Directory) -> Result<Self> {
-        let secrets_dir = dir.join("secrets");
+        let (secrets_dir, secrets_directory) = open_existing_secrets(dir, root)?;
         let index_path = dir.join("index.redb");
-        let secrets_directory = root.child(Path::new("secrets"))?;
         let index = root.open_regular(Path::new("index.redb"), libc::O_RDWR, 0)?;
         if index.metadata()?.len() == 0 {
             return Err(Error::Config(format!(
