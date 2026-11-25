@@ -7,20 +7,18 @@
 
 mod mutation;
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zbus::names::InterfaceName;
-use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::{OwnedObjectPath, Variant};
+use zbus::OwnedObjectPath;
+use zbus::object_server::ObjectServer;
 use zbus::{fdo, interface};
 
 use crate::service::objects::root_path;
 use crate::service::session::Secret;
 use crate::service::{SESSION_COLLECTION_ID, SecretError, ServiceState, item_path, message_sender};
 
-const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
+pub(crate) const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
 
 /// A `org.freedesktop.Secret.Item` D-Bus object.
 #[derive(Clone)]
@@ -66,37 +64,6 @@ impl Item {
                 .get_item(&self.id)
                 .map_err(fdo::Error::from)
         }
-    }
-
-    /// Emit the changed signal for Attributes while mutation serialization remains held.
-    pub(crate) async fn emit_attributes_changed(
-        &self,
-        emitter: &SignalEmitter<'_>,
-    ) -> fdo::Result<()> {
-        let mut changed = HashMap::new();
-        changed.insert("Attributes", Variant::from(self.attributes()?));
-        fdo::Properties::properties_changed(
-            emitter,
-            InterfaceName::from_static_str_unchecked(ITEM_INTERFACE),
-            changed,
-            Cow::Borrowed(&[]),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Emit the changed signal for Label while mutation serialization remains held.
-    pub(crate) async fn emit_label_changed(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
-        let mut changed = HashMap::new();
-        changed.insert("Label", Variant::from(self.label()?));
-        fdo::Properties::properties_changed(
-            emitter,
-            InterfaceName::from_static_str_unchecked(ITEM_INTERFACE),
-            changed,
-            Cow::Borrowed(&[]),
-        )
-        .await?;
-        Ok(())
     }
 }
 

@@ -13,18 +13,18 @@
 mod mutation;
 mod signals;
 
+#[cfg(test)]
+pub(crate) use signals::emit_collection_items_changed;
 pub(crate) use signals::{
-    emit_alias_target_invalidated, emit_collection_items_changed, emit_collection_label_modified,
-    emit_collection_modified,
+    emit_alias_target_invalidated, emit_collection_items_and_modified,
+    emit_collection_label_modified, emit_collection_modified,
 };
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zbus::names::InterfaceName;
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::{OwnedObjectPath, OwnedVariant, Variant};
+use zbus::{OwnedObjectPath, OwnedVariant};
 use zbus::{fdo, interface};
 
 use crate::service::objects::root_path;
@@ -111,20 +111,6 @@ impl Collection {
             .into_iter()
             .map(|meta| item_path(&meta.collection, &meta.id))
             .collect())
-    }
-
-    /// Emit the changed signal for Label while mutation serialization remains held.
-    async fn emit_label_changed(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
-        let mut changed = HashMap::new();
-        changed.insert("Label", Variant::from(self.label()?));
-        fdo::Properties::properties_changed(
-            emitter,
-            InterfaceName::from_static_str_unchecked(COLLECTION_INTERFACE),
-            changed,
-            Cow::Borrowed(&[]),
-        )
-        .await?;
-        Ok(())
     }
 
     #[cfg(test)]

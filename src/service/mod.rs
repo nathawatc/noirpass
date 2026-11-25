@@ -39,9 +39,11 @@ pub use state::ServiceState;
 pub(crate) use objects::object_removed_or_absent;
 use objects::{register_session_object_with, root_path, validate_session_owner};
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use zbus::names::InterfaceName;
 use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zbus::{fdo, interface};
@@ -74,6 +76,23 @@ fn message_sender_fdo(header: &zbus::message::Header<'_>) -> fdo::Result<String>
 /// Require message-bus sender identity before accessing client-owned state.
 pub(crate) fn message_sender(header: &zbus::message::Header<'_>) -> Result<String, SecretError> {
     message_sender_fdo(header).map_err(Into::into)
+}
+
+/// Emit one `PropertiesChanged` entry for an already-known updated value.
+pub(crate) async fn emit_property_changed(
+    emitter: &SignalEmitter<'_>,
+    interface: &'static str,
+    name: &'static str,
+    value: Variant<'_>,
+) -> fdo::Result<()> {
+    fdo::Properties::properties_changed(
+        emitter,
+        InterfaceName::from_static_str_unchecked(interface),
+        HashMap::from([(name, value)]),
+        Cow::Borrowed(&[]),
+    )
+    .await?;
+    Ok(())
 }
 
 #[interface(name = "org.freedesktop.Secret.Service")]
@@ -137,6 +156,7 @@ impl Service {
                 )));
             }
         };
+
         let state = self.state.clone();
         let server = server.clone();
         let connection = connection.clone();

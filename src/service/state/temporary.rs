@@ -83,7 +83,10 @@ impl ServiceState {
     }
 
     /// Update the session collection label without persisting it.
-    pub(crate) fn set_session_collection_label(&self, label: &str) -> crate::Result<()> {
+    pub(crate) fn set_session_collection_label(
+        &self,
+        label: &str,
+    ) -> crate::Result<CollectionMeta> {
         if label.len() > MAX_SESSION_STRING_BYTES {
             return Err(crate::Error::Config(
                 "temporary collection label exceeds size limit".into(),
@@ -95,7 +98,7 @@ impl ServiceState {
             .expect("session collection lock poisoned");
         collection.metadata.label = label.to_string();
         collection.metadata.modified = now_secs();
-        Ok(())
+        Ok(collection.metadata.clone())
     }
 
     /// List temporary items in stable id order.

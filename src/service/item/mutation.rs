@@ -2,17 +2,18 @@
 
 use std::collections::HashMap;
 
-use zbus::OwnedObjectPath;
 use zbus::fdo;
 use zbus::object_server::{ObjectServer, SignalEmitter};
+use zbus::{OwnedObjectPath, Variant};
 
-use super::{Item, root_path};
+use super::{ITEM_INTERFACE, Item, root_path};
 use crate::service::collection::{
-    Collection, emit_collection_items_changed, emit_collection_modified,
+    Collection, emit_collection_items_and_modified, emit_collection_modified,
 };
 use crate::service::session::Secret;
 use crate::service::{
-    SESSION_COLLECTION_ID, SecretError, collection_path, object_removed_or_absent,
+    SESSION_COLLECTION_ID, SecretError, collection_path, emit_property_changed,
+    object_removed_or_absent,
 };
 
 impl Item {
@@ -32,14 +33,14 @@ impl Item {
             .state
             .lock_owned_collection_lifecycle(&self.collection_id)
             .await;
-        if self.collection_id == SESSION_COLLECTION_ID {
+        let meta = if self.collection_id == SESSION_COLLECTION_ID {
             self.state.update_session_item(
                 &self.id,
                 None,
                 None,
                 Some(&secret.content_type),
                 plaintext,
-            )?;
+            )?
         } else {
             let id = self.id.clone();
             self.state
@@ -52,8 +53,8 @@ impl Item {
                         ciphertext.as_deref(),
                     )?)
                 })
-                .await?;
-        }
+                .await?
+        };
 
         let item_path = self.path();
         let item_emitter =
@@ -61,9 +62,13 @@ impl Item {
         let collection_emitter =
             SignalEmitter::new(connection, collection_path(&self.collection_id))
                 .map_err(SecretError::ZBus)?;
-        self.modified_changed(&item_emitter)
-            .await
-            .map_err(SecretError::ZBus)?;
+        emit_property_changed(
+            &item_emitter,
+            ITEM_INTERFACE,
+            "Modified",
+            Variant::from(meta.modified),
+        )
+        .await?;
         Collection::item_changed(&collection_emitter, item_path)
             .await
             .map_err(SecretError::ZBus)?;
@@ -71,6 +76,7 @@ impl Item {
             &self.state,
             connection,
             &self.collection_id,
+            meta.modified,
             lifecycle.clone(),
         )
         .await?;
@@ -107,17 +113,9 @@ impl Item {
         Collection::item_deleted(&emitter, self.path())
             .await
             .map_err(SecretError::ZBus)?;
-        emit_collection_items_changed(
+        emit_collection_items_and_modified(
             &self.state,
             server,
-            connection,
-            &self.collection_id,
-            lifecycle.clone(),
-        )
-        .await
-        .map_err(SecretError::from)?;
-        emit_collection_modified(
-            &self.state,
             connection,
             &self.collection_id,
             lifecycle.clone(),
@@ -149,11 +147,11 @@ impl Item {
                 .lock_owned_collection_lifecycle(&object.collection_id)
                 .await;
             let relabel = label.is_some();
-            if object.collection_id == SESSION_COLLECTION_ID {
+            let meta = if object.collection_id == SESSION_COLLECTION_ID {
                 object
                     .state
                     .update_session_item(&object.id, label.as_deref(), attributes, None, None)
-                    .map_err(fdo::Error::from)?;
+                    .map_err(fdo::Error::from)?
             } else {
                 let id = object.id.clone();
                 object
@@ -167,23 +165,42 @@ impl Item {
                             None,
                         )?)
                     })
-                    .await?;
-            }
+                    .await?
+            };
             let path = object.path();
             let item_emitter = SignalEmitter::new(&connection, path.clone())?;
             let collection_emitter =
                 SignalEmitter::new(&connection, collection_path(&object.collection_id))?;
             if relabel {
-                object.emit_label_changed(&item_emitter).await?;
+                emit_property_changed(
+                    &item_emitter,
+                    ITEM_INTERFACE,
+                    "Label",
+                    Variant::from(meta.label.as_str()),
+                )
+                .await?;
             } else {
-                object.emit_attributes_changed(&item_emitter).await?;
+                emit_property_changed(
+                    &item_emitter,
+                    ITEM_INTERFACE,
+                    "Attributes",
+                    Variant::from(meta.attributes),
+                )
+                .await?;
             }
-            object.modified_changed(&item_emitter).await?;
+            emit_property_changed(
+                &item_emitter,
+                ITEM_INTERFACE,
+                "Modified",
+                Variant::from(meta.modified),
+            )
+            .await?;
             Collection::item_changed(&collection_emitter, path).await?;
             emit_collection_modified(
                 &object.state,
                 &connection,
                 &object.collection_id,
+                meta.modified,
                 lifecycle.clone(),
             )
             .await?;

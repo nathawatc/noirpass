@@ -31,10 +31,9 @@ impl Service {
                 )
             })?),
         };
-        let relabel = label.is_some();
         let lifecycle = self.state.lock_owned_namespace_lifecycle().await;
         let alias_for_worker = alias.to_string();
-        let (id, created) = self
+        let (id, created, relabelled) = self
             .state
             .blocking(Some(lifecycle.clone()), move |state| {
                 if !alias_for_worker.is_empty()
@@ -42,30 +41,35 @@ impl Service {
                     && (existing == SESSION_COLLECTION_ID
                         || state.store().get_collection(&existing).is_ok())
                 {
-                    if let Some(label) = label.as_deref() {
-                        if existing == SESSION_COLLECTION_ID {
-                            state.set_session_collection_label(label)?;
+                    let relabelled = if let Some(label) = label.as_deref() {
+                        Some(if existing == SESSION_COLLECTION_ID {
+                            state.set_session_collection_label(label)?
                         } else {
-                            state.store().set_collection_label(&existing, label)?;
-                        }
-                    }
-                    return Ok((existing, false));
+                            state.store().set_collection_label(&existing, label)?
+                        })
+                    } else {
+                        None
+                    };
+                    return Ok((existing, false, relabelled));
                 }
                 let alias = (!alias_for_worker.is_empty()).then_some(alias_for_worker.as_str());
                 let meta = state
                     .store()
                     .create_collection(label.as_deref().unwrap_or(""), alias)?;
-                Ok((meta.id, true))
+                Ok((meta.id, true, None))
             })
             .await?;
         let path = collection_path(&id);
         if !created {
-            if relabel {
+            if let Some(meta) = relabelled {
                 collection::emit_collection_label_modified(
                     &self.state,
                     server,
                     emitter.connection(),
                     &id,
+                    &meta.label,
+                    meta.modified,
+                    lifecycle,
                 )
                 .await?;
                 Self::collection_changed(emitter, path.clone()).await?;

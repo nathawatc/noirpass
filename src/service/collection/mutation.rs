@@ -7,15 +7,17 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::{
-    Collection, emit_collection_items_changed, emit_collection_label_modified,
+    Collection, emit_collection_items_and_modified, emit_collection_label_modified,
     emit_collection_modified, root_path,
 };
-use crate::service::item::Item;
+use crate::service::item::ITEM_INTERFACE;
 use crate::service::session::Secret;
 use crate::service::{
     SERVICE_PATH, SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError, Service,
-    alias_path, collection_path, item_path, object_removed_or_absent, register_item,
+    alias_path, collection_path, emit_property_changed, item_path, object_removed_or_absent,
+    register_item,
 };
+use zbus::Variant;
 
 impl Collection {
     pub(super) async fn create_item_inner(
@@ -99,18 +101,34 @@ impl Collection {
             .map_err(SecretError::ZBus)?;
         if replaced {
             let item_emitter = SignalEmitter::new(connection, path.clone())?;
-            let item_ref = server.interface::<_, Item>(&path).await?;
-            let item = item_ref.get().await;
-            item.emit_label_changed(&item_emitter).await?;
-            item.modified_changed(&item_emitter).await?;
+            emit_property_changed(
+                &item_emitter,
+                ITEM_INTERFACE,
+                "Label",
+                Variant::from(meta.label.as_str()),
+            )
+            .await?;
+            emit_property_changed(
+                &item_emitter,
+                ITEM_INTERFACE,
+                "Modified",
+                Variant::from(meta.modified),
+            )
+            .await?;
             Self::item_changed(&emitter, path.clone()).await?;
-            emit_collection_modified(&self.state, connection, &id, lifecycle.clone()).await?;
+            emit_collection_modified(
+                &self.state,
+                connection,
+                &id,
+                meta.modified,
+                lifecycle.clone(),
+            )
+            .await?;
             return Ok((path, root_path()));
         }
         Self::item_created(&emitter, path.clone()).await?;
-        emit_collection_items_changed(&self.state, server, connection, &id, lifecycle.clone())
+        emit_collection_items_and_modified(&self.state, server, connection, &id, lifecycle.clone())
             .await?;
-        emit_collection_modified(&self.state, connection, &id, lifecycle.clone()).await?;
         Ok((path, root_path()))
     }
 }
@@ -205,10 +223,10 @@ impl Collection {
         if id != initial_id {
             return Err(fdo::Error::Failed("collection alias changed; retry".into()));
         }
-        if id == SESSION_COLLECTION_ID {
+        let meta = if id == SESSION_COLLECTION_ID {
             self.state
                 .set_session_collection_label(label)
-                .map_err(fdo::Error::from)?;
+                .map_err(fdo::Error::from)?
         } else {
             let collection_id = id.clone();
             let label = label.to_string();
@@ -216,9 +234,18 @@ impl Collection {
                 .blocking(Some(lifecycle.clone()), move |state| {
                     Ok(state.store().set_collection_label(&collection_id, &label)?)
                 })
-                .await?;
-        }
-        emit_collection_label_modified(&self.state, server, connection, &id).await?;
+                .await?
+        };
+        emit_collection_label_modified(
+            &self.state,
+            server,
+            connection,
+            &id,
+            &meta.label,
+            meta.modified,
+            lifecycle,
+        )
+        .await?;
         let emitter = SignalEmitter::new(connection, SERVICE_PATH)?;
         Service::collection_changed(&emitter, collection_path(&id)).await?;
         Ok(())
