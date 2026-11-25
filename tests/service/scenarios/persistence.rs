@@ -49,10 +49,7 @@ pub(super) async fn s7_persistence_across_restart() {
 /// Scenario 8: a real libsecret client (`secret-tool`) stores and looks up.
 #[cfg(feature = "secret-tool-smoke")]
 async fn secret_service_available_at(address: &str) -> bool {
-    let Ok(builder) = zbus::connection::Builder::address(address) else {
-        return false;
-    };
-    let Ok(connection) = builder.build().await else {
+    let Ok(connection) = zbus::connection::Builder::address(address).build().await else {
         return false;
     };
     let Ok(proxy) = zbus::fdo::DBusProxy::new(&connection).await else {
