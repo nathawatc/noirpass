@@ -230,3 +230,54 @@ fn deinit_stays_on_pinned_root_and_children_after_replacement() {
         }
     }
 }
+
+#[test]
+fn deinit_cleans_up_store_with_corrupt_or_non_utf8_config() {
+    let (certificate, _) = generated_recipient();
+    let escape_cert = "version = 1\nrecipient_fingerprint = \"test\"\nrecipient_cert = \"../escape.pgp\"\n";
+    let bad_idle = "version = 1\nrecipient_fingerprint = \"test\"\nrecipient_cert = \"keys/recipient.pgp\"\nidle_exit = -2\n";
+    for bad_config in [
+        b"not toml".as_slice(),
+        bad_idle.as_bytes(),
+        escape_cert.as_bytes(),
+        b"\xff\xfe",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        init_from_bytes(&store, &certificate).unwrap();
+        drop(Store::open(&store).unwrap());
+        fs::create_dir_all(store.join(SECRETS_DIR)).unwrap();
+        fs::write(store.join("keep.txt"), b"unrelated").unwrap();
+        fs::write(store.join(SECRETS_DIR).join("keep.txt"), b"unrelated").unwrap();
+        let outside_escape = tmp.path().join("escape.pgp");
+        fs::write(&outside_escape, b"untouched").unwrap();
+        fs::write(store.join(CONFIG_FILE), bad_config).unwrap();
+
+        crate::config::deinit(&store).unwrap();
+
+        assert!(!store.join(CONFIG_FILE).exists());
+        assert!(!store.join(RECIPIENT_REL).exists());
+        assert!(!store.join(INDEX_FILE).exists());
+        assert_eq!(fs::read(store.join("keep.txt")).unwrap(), b"unrelated");
+        assert_eq!(
+            fs::read(store.join(SECRETS_DIR).join("keep.txt")).unwrap(),
+            b"unrelated"
+        );
+        assert_eq!(fs::read(outside_escape).unwrap(), b"untouched");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("store");
+    let outside = tmp.path().join("outside.toml");
+    init_from_bytes(&store, &certificate).unwrap();
+    drop(Store::open(&store).unwrap());
+    fs::write(&outside, b"outside").unwrap();
+    fs::remove_file(store.join(CONFIG_FILE)).unwrap();
+    symlink(&outside, store.join(CONFIG_FILE)).unwrap();
+
+    let err = crate::config::deinit(&store).unwrap_err();
+    assert!(err.to_string().contains("symlink"));
+    assert!(store.join(RECIPIENT_REL).exists());
+    assert!(store.join(INDEX_FILE).exists());
+    assert_eq!(fs::read(outside).unwrap(), b"outside");
+}

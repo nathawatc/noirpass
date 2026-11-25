@@ -150,9 +150,10 @@ fn load_deinit_config(root: &Directory) -> Result<Option<Config>> {
         return Ok(None);
     }
     let bytes = root.read_regular(Path::new(CONFIG_FILE))?;
-    let text =
-        String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    Ok(Some(parse_config(&text)?))
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text).ok())
 }
 
 fn preflight_known_secret_files(secrets: &Directory) -> Result<()> {
