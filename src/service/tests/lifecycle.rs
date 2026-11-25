@@ -525,8 +525,7 @@ async fn cancelled_create_waiter_still_commits_and_registers_item() {
     assert_eq!(
         state
             .gpg()
-            .decrypt(&state.store().read_item_secret(&items[0].id).unwrap().1)
-            .await
+            .decrypt_blocking(&state.store().read_item_secret(&items[0].id).unwrap().1)
             .unwrap()
             .as_slice(),
         b"test cancellation"

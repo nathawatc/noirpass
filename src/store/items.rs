@@ -29,24 +29,15 @@ impl Store {
         content_type: &str,
         secret_ciphertext: &[u8],
     ) -> Result<ItemMeta> {
-        if !is_valid_collection_id(collection) {
-            return Err(Error::NotFound(format!("collection {collection}")));
-        }
-        let (mut mutation_guard, txn) = self.begin_write_checked()?;
-        Self::validate_collection_in_txn(&txn, collection)?;
-        let metadata = self.create_item_locked(
-            txn,
+        self.create_or_replace_item(
             collection,
             label,
             attributes,
             content_type,
             secret_ciphertext,
-        )?;
-        if let Some(index) = mutation_guard.index.as_mut() {
-            index.insert(&metadata);
-        }
-        mutation_guard.preserve_index();
-        Ok(metadata)
+            false,
+        )
+        .map(|(metadata, _)| metadata)
     }
 
     /// Create an item or atomically replace an exact attribute match.

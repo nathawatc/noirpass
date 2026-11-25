@@ -89,17 +89,4 @@ impl Gpg {
     pub(crate) fn decrypt_blocking(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         agent::decrypt_blocking(self.homedir.as_deref(), &self.cert, ciphertext)
     }
-
-    /// Decrypt `ciphertext` produced by `encrypt` via the
-    /// running `gpg-agent`.
-    #[cfg(test)]
-    pub(crate) async fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        let cert = self.cert.clone();
-        let homedir = self.homedir.clone();
-        let ct = ciphertext.to_vec();
-
-        tokio::task::spawn_blocking(move || agent::decrypt_blocking(homedir.as_deref(), &cert, &ct))
-            .await
-            .map_err(|e| Error::OpenPgp(format!("decrypt task failed: {e}")))?
-    }
 }

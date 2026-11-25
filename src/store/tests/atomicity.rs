@@ -213,47 +213,6 @@ fn item_secret_reader_waits_for_update_rollback() {
 }
 
 #[test]
-fn raw_ciphertext_reader_waits_for_rollback() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = std::sync::Arc::new(Store::open(tmp.path()).unwrap());
-    let collection = store.create_collection("c", None).unwrap();
-    let item = store
-        .create_item(&collection.id, "item", HashMap::new(), "text/plain", b"old")
-        .unwrap();
-    let path = store.secret_path(&item.id).unwrap();
-    let write_guard = store.write_guard_checked().unwrap();
-    let reader_store = std::sync::Arc::clone(&store);
-    let reader_id = item.id.clone();
-    let passed_initial_check = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let reader_barrier = std::sync::Arc::clone(&passed_initial_check);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let result = reader_store.read_secret_file_after_initial_check(&reader_id, || {
-            reader_barrier.wait();
-        });
-        sender.send(result).unwrap();
-    });
-
-    passed_initial_check.wait();
-    fs::write(&path, b"uncommitted").unwrap();
-    assert!(matches!(
-        receiver.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
-    ));
-    fs::write(&path, b"old").unwrap();
-    drop(write_guard);
-
-    assert_eq!(
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap()
-            .unwrap(),
-        b"old"
-    );
-    reader.join().unwrap();
-}
-
-#[test]
 fn create_persist_ciphertext_cleanup_failure_poisons_store() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();

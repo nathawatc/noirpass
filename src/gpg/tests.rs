@@ -16,16 +16,16 @@ async fn encrypt_decrypt_roundtrip_via_agent() {
     assert_ne!(&ciphertext[..], &plaintext[..]);
     assert!(!ciphertext.starts_with(b"-----BEGIN"));
 
-    let recovered = gpg.decrypt(&ciphertext).await.unwrap();
+    let recovered = gpg.decrypt_blocking(&ciphertext).unwrap();
     assert_eq!(&recovered[..], &plaintext[..]);
 }
 
-#[tokio::test]
-async fn decrypt_rejects_garbage() {
+#[test]
+fn decrypt_rejects_garbage() {
     let gnupg = TestGnupg::new();
     let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
     let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
-    assert!(gpg.decrypt(b"not a pgp message at all").await.is_err());
+    assert!(gpg.decrypt_blocking(b"not a pgp message at all").is_err());
 }
 
 #[test]
@@ -79,28 +79,28 @@ fn has_usable_encryption_key_accepts_transport_only_subkey() {
     assert!(has_usable_encryption_key(&transport_only_cert()));
 }
 
-#[tokio::test]
-async fn encrypt_decrypt_roundtrip_via_agent_with_storage_only_subkey() {
+#[test]
+fn encrypt_decrypt_roundtrip_via_agent_with_storage_only_subkey() {
     let cert = storage_only_cert();
     let gnupg = TestGnupg::import(&cert);
     let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
 
     let plaintext = b"storage-only secret";
     let ciphertext = gpg.encrypt(plaintext).unwrap();
-    let recovered = gpg.decrypt(&ciphertext).await.unwrap();
+    let recovered = gpg.decrypt_blocking(&ciphertext).unwrap();
 
     assert_eq!(&recovered[..], &plaintext[..]);
 }
 
-#[tokio::test]
-async fn encrypt_decrypt_roundtrip_via_agent_with_transport_only_subkey() {
+#[test]
+fn encrypt_decrypt_roundtrip_via_agent_with_transport_only_subkey() {
     let cert = transport_only_cert();
     let gnupg = TestGnupg::import(&cert);
     let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
 
     let plaintext = b"transport-only secret";
     let ciphertext = gpg.encrypt(plaintext).unwrap();
-    let recovered = gpg.decrypt(&ciphertext).await.unwrap();
+    let recovered = gpg.decrypt_blocking(&ciphertext).unwrap();
 
     assert_eq!(&recovered[..], &plaintext[..]);
 }

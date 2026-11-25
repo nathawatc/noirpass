@@ -4,7 +4,7 @@
 //! layers behind a single `thiserror`-derived enum. Sequoia's public API
 //! returns `anyhow::Error` values; rather than take a direct dependency on
 //! `anyhow`, those are flattened into [`Error::OpenPgp`] via their `Display`
-//! representation at the call site (see `gpg.rs`).
+//! representation at the call site (see `src/gpg/`).
 
 use thiserror::Error;
 

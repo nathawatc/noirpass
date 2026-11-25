@@ -89,45 +89,6 @@ pub(crate) async fn emit_collection_label_modified(
     Ok(())
 }
 
-/// Emit Items using the mutation's existing worker reservation. Calling the
-/// generated property getter here could wait forever when all worker slots are
-/// held by mutations that have reached publication.
-#[cfg(test)]
-pub(crate) async fn emit_collection_items_changed(
-    state: &Arc<ServiceState>,
-    server: &ObjectServer,
-    connection: &zbus::Connection,
-    id: &str,
-    lifecycle: Arc<MutationGuard>,
-) -> fdo::Result<()> {
-    let (items, paths) = if id == SESSION_COLLECTION_ID {
-        (
-            state
-                .list_session_items()
-                .into_iter()
-                .map(|meta| item_path(&meta.collection, &meta.id))
-                .collect::<Vec<_>>(),
-            collection_object_paths_for_id(state, id)?,
-        )
-    } else {
-        let id = id.to_owned();
-        state
-            .blocking(Some(lifecycle), move |state| {
-                Ok((
-                    state
-                        .store()
-                        .list_items(&id)?
-                        .into_iter()
-                        .map(|meta| item_path(&meta.collection, &meta.id))
-                        .collect::<Vec<_>>(),
-                    collection_object_paths_for_id(state, &id)?,
-                ))
-            })
-            .await?
-    };
-    emit_items_to_paths(server, connection, &paths, &items).await
-}
-
 async fn emit_items_to_paths(
     server: &ObjectServer,
     connection: &zbus::Connection,

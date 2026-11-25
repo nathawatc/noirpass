@@ -31,16 +31,7 @@ impl Store {
     /// Read the raw ciphertext of item `id`'s secret file.
     #[cfg(test)]
     pub(super) fn read_secret_file(&self, id: &str) -> Result<Vec<u8>> {
-        self.read_secret_file_after_initial_check(id, || {})
-    }
-
-    #[cfg(test)]
-    pub(super) fn read_secret_file_after_initial_check(
-        &self,
-        id: &str,
-        after_initial_check: impl FnOnce(),
-    ) -> Result<Vec<u8>> {
-        let _read_guard = self.read_guard_checked_after_initial_check(after_initial_check)?;
+        let _read_guard = self.read_guard_checked_after_initial_check(|| {})?;
         self.read_secret_file_unlocked(id)
     }
 }

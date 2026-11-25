@@ -25,26 +25,6 @@ impl Store {
         self.search_items_matching(Some(collection), &HashMap::new(), false)
     }
 
-    /// Find an item in `collection` whose attribute set is *exactly* `attrs`.
-    #[cfg(test)]
-    pub(in crate::store) fn find_item_by_attrs_exact(
-        &self,
-        collection: &str,
-        attrs: &HashMap<String, String>,
-    ) -> Result<Option<ItemMeta>> {
-        self.ensure_not_poisoned()?;
-        let txn = self.db.begin_read()?;
-        let items = txn.open_table(ITEMS)?;
-        for entry in items.iter()? {
-            let (key, value) = entry?;
-            let metadata = decode_item(key.value(), value.value())?;
-            if metadata.collection == collection && &metadata.attributes == attrs {
-                return Ok(Some(metadata));
-            }
-        }
-        Ok(None)
-    }
-
     /// Search all items for those whose attributes are a superset of `attrs`.
     ///
     /// An item matches when every `(k, v)` in `attrs` is present with the same

@@ -13,8 +13,6 @@
 mod mutation;
 mod signals;
 
-#[cfg(test)]
-pub(crate) use signals::emit_collection_items_changed;
 pub(crate) use signals::{
     emit_alias_target_invalidated, emit_collection_items_and_modified,
     emit_collection_label_modified, emit_collection_modified,

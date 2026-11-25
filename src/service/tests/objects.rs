@@ -742,7 +742,7 @@ async fn items_signals_reuse_reserved_workers_and_match_canonical_and_alias_valu
     // invoking the generated async Items getter would deadlock here.
     tokio::time::timeout(
         Duration::from_secs(2),
-        super::super::collection::emit_collection_items_changed(
+        super::super::collection::emit_collection_items_and_modified(
             &state,
             server.object_server(),
             &server,
@@ -753,14 +753,16 @@ async fn items_signals_reuse_reserved_workers_and_match_canonical_and_alias_valu
     .await
     .unwrap()
     .unwrap();
-    let mut paths = std::collections::HashSet::new();
-    for _ in 0..2 {
+    let expected_modified = state.store().get_collection("default").unwrap().modified;
+    let mut item_paths = std::collections::HashSet::new();
+    let mut modified_paths = std::collections::HashSet::new();
+    for _ in 0..4 {
         let signal = tokio::time::timeout(Duration::from_secs(2), next_stream_item(&mut signals))
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        paths.insert(signal.header().path().unwrap().as_str().to_string());
+        let path = signal.header().path().unwrap().as_str().to_string();
         let (interface, mut changed, invalidated): (
             String,
             HashMap<String, OwnedVariant>,
@@ -769,18 +771,24 @@ async fn items_signals_reuse_reserved_workers_and_match_canonical_and_alias_valu
         assert_eq!(interface, "org.freedesktop.Secret.Collection");
         assert_eq!(invalidated.len(), 0);
         assert_eq!(changed.len(), 1);
-        assert_eq!(
-            Vec::<OwnedObjectPath>::try_from(changed.remove("Items").unwrap()).unwrap(),
-            vec![item_path("default", &item.id)]
-        );
+        if let Some(items_val) = changed.remove("Items") {
+            assert_eq!(
+                Vec::<OwnedObjectPath>::try_from(items_val).unwrap(),
+                vec![item_path("default", &item.id)]
+            );
+            item_paths.insert(path);
+        } else {
+            let modified_val = changed.remove("Modified").unwrap();
+            assert_eq!(u64::try_from(modified_val).unwrap(), expected_modified);
+            modified_paths.insert(path);
+        }
     }
-    assert_eq!(
-        paths,
-        std::collections::HashSet::from([
-            collection_path("default").to_string(),
-            alias_path("default").unwrap().to_string()
-        ])
-    );
+    let expected_paths = std::collections::HashSet::from([
+        collection_path("default").to_string(),
+        alias_path("default").unwrap().to_string(),
+    ]);
+    assert_eq!(item_paths, expected_paths);
+    assert_eq!(modified_paths, expected_paths);
     drop(workers);
     drop(lifecycle);
 }

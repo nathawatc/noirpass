@@ -207,31 +207,33 @@ fn create_item_in_missing_collection_fails() {
 }
 
 #[test]
-fn find_item_by_attrs_exact_matches_full_set_only() {
+fn create_or_replace_item_matches_full_attribute_set_only() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let c = store.create_collection("c", None).unwrap();
     let a = attrs(&[("service", "mail"), ("user", "a")]);
     let item = store
-        .create_item(&c.id, "mail", a.clone(), "text/plain", b"c")
+        .create_item(&c.id, "mail", a.clone(), "text/plain", b"c1")
         .unwrap();
 
-    assert_eq!(
-        store
-            .find_item_by_attrs_exact(&c.id, &a)
-            .unwrap()
-            .unwrap()
-            .id,
-        item.id
-    );
-    // A strict subset is not an exact match.
+    // Warm the lookup index so exact matching is exercised on both paths.
+    assert_eq!(store.list_items(&c.id).unwrap().len(), 1);
+
+    // Exact attribute set replaces in place.
+    let (updated, replaced) = store
+        .create_or_replace_item(&c.id, "mail-updated", a, "text/plain", b"c2", true)
+        .unwrap();
+    assert!(replaced);
+    assert_eq!(updated.id, item.id);
+
+    // A strict subset is not an exact match and creates a distinct item.
     let subset = attrs(&[("service", "mail")]);
-    assert!(
-        store
-            .find_item_by_attrs_exact(&c.id, &subset)
-            .unwrap()
-            .is_none()
-    );
+    let (other, replaced) = store
+        .create_or_replace_item(&c.id, "mail-subset", subset, "text/plain", b"c3", true)
+        .unwrap();
+    assert!(!replaced);
+    assert_ne!(other.id, item.id);
+    assert_eq!(store.list_items(&c.id).unwrap().len(), 2);
 }
 
 #[test]
