@@ -354,3 +354,42 @@ async fn property_worker_admission_drains_after_shutdown_and_rejects_foreign_sta
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn blocking_with_session_mutation_guard_still_waits_for_worker_slot() {
+    let gnupg = TestGnupg::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(&gnupg, tmp.path());
+    let mut workers = Vec::new();
+    for i in 0..MAX_BLOCKING_WORKERS {
+        workers.push(
+            state
+                .lock_owned_collection_lifecycle(&format!("busy{i}"))
+                .await,
+        );
+    }
+    let session_guard = state
+        .lock_owned_collection_lifecycle(super::super::SESSION_COLLECTION_ID)
+        .await;
+    let worker_state = state.clone();
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        worker_state
+            .blocking(Some(session_guard), |_| Ok(()))
+            .await
+            .unwrap();
+        done_tx.send(()).unwrap();
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut done_rx)
+            .await
+            .is_err(),
+        "session MutationGuard holds no worker permit and must wait for a blocking slot"
+    );
+    drop(workers);
+    tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    task.await.unwrap();
+}

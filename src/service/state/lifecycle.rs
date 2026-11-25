@@ -66,7 +66,7 @@ impl ServiceState {
                 fdo::Error::Failed("blocking admission belongs to another service".into()).into(),
             );
         }
-        let permit = if lifecycle.is_none() {
+        let permit = if lifecycle.as_ref().is_none_or(|guard| !guard.has_permit()) {
             Some(
                 self.blocking_slots
                     .clone()
@@ -103,7 +103,7 @@ impl ServiceState {
         let lifecycle = self.lock_collection_lifecycle(id).await;
         Arc::new(MutationGuard {
             _lifecycle: LifecycleGuard::Collection { _guard: lifecycle },
-            _permit: permit,
+            permit,
         })
     }
 
@@ -118,7 +118,7 @@ impl ServiceState {
         let namespace = self.object_lifecycle.clone().write_owned().await;
         Arc::new(MutationGuard {
             _lifecycle: LifecycleGuard::Namespace { _guard: namespace },
-            _permit: Some(permit),
+            permit: Some(permit),
         })
     }
 }

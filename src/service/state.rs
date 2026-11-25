@@ -194,7 +194,13 @@ pub(crate) struct CollectionGuard {
 /// Reserve persistent worker capacity before taking lifecycle serialization.
 pub(crate) struct MutationGuard {
     _lifecycle: LifecycleGuard,
-    _permit: Option<OwnedSemaphorePermit>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl MutationGuard {
+    pub(super) fn has_permit(&self) -> bool {
+        self.permit.is_some()
+    }
 }
 
 enum LifecycleGuard {
