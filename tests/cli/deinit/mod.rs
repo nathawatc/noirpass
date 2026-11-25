@@ -8,5 +8,5 @@ mod busy;
 mod confirmation;
 mod init_boundary;
 mod preservation;
-mod pty;
+pub(crate) mod pty;
 mod support;

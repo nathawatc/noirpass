@@ -14,7 +14,7 @@ unsafe extern "C" {
     fn ptsname_r(fd: c_int, buffer: *mut c_char, length: usize) -> c_int;
 }
 
-pub(super) fn open_pty() -> (File, File) {
+pub(crate) fn open_pty() -> (File, File) {
     let master_fd = unsafe { posix_openpt(0o2) };
     assert!(
         master_fd >= 0,

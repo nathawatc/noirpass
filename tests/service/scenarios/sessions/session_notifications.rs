@@ -56,6 +56,10 @@ pub(in super::super) async fn s6d_session_collection_notifications() {
         .await
         .unwrap();
     collection_notifications(path.as_str(), "modified_test").await;
+    let collection = zbus::Proxy::new(&conn, SERVICE_NAME, path, COLLECTION_IFACE)
+        .await
+        .unwrap();
+    let _: OwnedObjectPath = collection.call("Delete", &()).await.unwrap();
 }
 
 /// Every item mutation must update cached collection timestamps on both served paths.
