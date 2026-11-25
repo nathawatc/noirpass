@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 description = "Minimal on-demand GPG-backed freedesktop Secret Service"
 readme = "README.md"
-repository = "https://codeberg.org/koharu/noirpass"
+repository = "https://github.com/nathawatc/noirpass"
 license = "Apache-2.0"
 keywords = [
     "secret-service",

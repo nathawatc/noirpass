@@ -61,7 +61,7 @@
 
             meta = {
               description = "Minimal on-demand GPG-backed freedesktop Secret Service";
-              homepage = "https://codeberg.org/koharu/noirpass";
+              homepage = "https://github.com/nathawatc/noirpass";
               license = pkgs.lib.licenses.asl20;
               mainProgram = "noirpass";
               platforms = systems;

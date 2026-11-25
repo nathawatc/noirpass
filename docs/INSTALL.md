@@ -8,10 +8,10 @@ Do not enable `noirpass.service`. Session D-Bus starts it on demand.
 ## Install from Flake
 
 Flake supports `x86_64-linux` and `aarch64-linux`. Enable `nix-command` and `flakes`, then install
-directly from Codeberg:
+directly from GitHub:
 
 ```sh
-nix profile install git+https://codeberg.org/koharu/noirpass.git#noirpass
+nix profile install github:nathawatc/noirpass#noirpass
 systemctl --user daemon-reload
 ```
 

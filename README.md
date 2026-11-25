@@ -20,7 +20,7 @@ Secret Service component of GNOME Keyring, KWallet, or another provider first.
 Nix:
 
 ```sh
-nix profile install git+https://codeberg.org/koharu/noirpass.git#noirpass
+nix profile install github:nathawatc/noirpass#noirpass
 systemctl --user daemon-reload
 ```
 

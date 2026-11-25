@@ -28,7 +28,7 @@ system-specific, so use `noirpass.packages.${system}.noirpass` (or
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     noirpass = {
-      url = "git+https://codeberg.org/koharu/noirpass.git";
+      url = "github:nathawatc/noirpass";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -91,10 +91,10 @@ nix profile install .#noirpass
 systemctl --user daemon-reload
 ```
 
-Install directly from Codeberg:
+Install directly from GitHub:
 
 ```sh
-nix profile install git+https://codeberg.org/koharu/noirpass.git#noirpass
+nix profile install github:nathawatc/noirpass#noirpass
 systemctl --user daemon-reload
 ```
 
