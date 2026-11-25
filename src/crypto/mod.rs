@@ -55,8 +55,8 @@ fn prime() -> BigUint {
 fn pad_be(value: &BigUint) -> Vec<u8> {
     let raw = Zeroizing::new(value.to_bytes_be());
     debug_assert!(raw.len() <= GROUP_BYTES);
-    let mut out = vec![0u8; GROUP_BYTES - raw.len()];
-    out.extend_from_slice(raw.as_slice());
+    let mut out = vec![0u8; GROUP_BYTES];
+    out[GROUP_BYTES - raw.len()..].copy_from_slice(raw.as_slice());
     out
 }
 
@@ -170,14 +170,13 @@ impl SessionCipher {
                 let padded_len = (plaintext.len() / 16 + 1) * 16;
                 let mut buf = Zeroizing::new(vec![0u8; padded_len]);
                 buf[..plaintext.len()].copy_from_slice(plaintext);
-                let ct = Zeroizing::new(
-                    Aes128CbcEnc::new_from_slices(&dh.key[..], &iv)
-                        .expect("fixed-size AES key and IV")
-                        .encrypt_padded::<Pkcs7>(&mut buf[..], plaintext.len())
-                        .expect("buffer sized for PKCS7 padding")
-                        .to_vec(),
-                );
-                (iv.to_vec(), ct)
+                let encrypted_len = Aes128CbcEnc::new_from_slices(&dh.key[..], &iv)
+                    .expect("fixed-size AES key and IV")
+                    .encrypt_padded::<Pkcs7>(&mut buf[..], plaintext.len())
+                    .expect("buffer sized for PKCS7 padding")
+                    .len();
+                debug_assert_eq!(encrypted_len, padded_len);
+                (iv.to_vec(), buf)
             }
         }
     }

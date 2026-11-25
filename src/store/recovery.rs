@@ -34,6 +34,7 @@ impl Store {
             }
         });
 
+        let mut changed = false;
         for recovery in recovery_files {
             let Some(file_name) = recovery.file_name().and_then(|name| name.to_str()) else {
                 continue;
@@ -56,6 +57,7 @@ impl Store {
             }
             if file_metadata.len() == 0 {
                 self.remove_secret_file(&recovery)?;
+                changed = true;
                 continue;
             }
 
@@ -78,6 +80,7 @@ impl Store {
                             )));
                         }
                         self.remove_secret_file(&recovery)?;
+                        changed = true;
                     }
                     Err(Error::NotFound(_)) => match self.secret_metadata(&canonical) {
                         Ok(canonical_metadata)
@@ -88,6 +91,7 @@ impl Store {
                             self.remove_secret_file(&canonical)?;
                             self.sync_secrets_dir()?;
                             self.remove_secret_file(&recovery)?;
+                            changed = true;
                         }
                         Ok(_) => {
                             return Err(Error::Config(format!(
@@ -97,6 +101,7 @@ impl Store {
                         }
                         Err(err) if err.kind() == io::ErrorKind::NotFound => {
                             self.remove_secret_file(&recovery)?;
+                            changed = true;
                         }
                         Err(err) => return Err(err.into()),
                     },
@@ -106,6 +111,7 @@ impl Store {
             }
             if kind == "update" {
                 self.remove_secret_file(&recovery)?;
+                changed = true;
                 continue;
             }
 
@@ -117,6 +123,7 @@ impl Store {
                 } else {
                     self.remove_secret_file(&recovery)?;
                 }
+                changed = true;
                 continue;
             }
 
@@ -132,20 +139,28 @@ impl Store {
             };
             let Some(expected_hash) = metadata.ciphertext_sha256 else {
                 self.rename_secret_file(&recovery, &canonical)?;
+                changed = true;
                 continue;
             };
             match self.read_secret_path(&canonical) {
                 Ok(ciphertext) if ciphertext_sha256(&ciphertext) == expected_hash => {
                     self.remove_secret_file(&recovery)?;
+                    changed = true;
                 }
-                Ok(_) => self.rename_secret_file(&recovery, &canonical)?,
+                Ok(_) => {
+                    self.rename_secret_file(&recovery, &canonical)?;
+                    changed = true;
+                }
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {
                     self.rename_secret_file(&recovery, &canonical)?;
+                    changed = true;
                 }
                 Err(err) => return Err(err.into()),
             }
         }
-        self.sync_secrets_dir()?;
+        if changed {
+            self.sync_secrets_dir()?;
+        }
         // Recovery changes only ciphertext files; validated metadata and its
         // derived lookup index still describe the same committed transaction.
         recovery_guard.preserve_index();
