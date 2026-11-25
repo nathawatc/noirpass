@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use noirpass::store::{ItemMeta, Store};
@@ -21,18 +21,13 @@ fn print_items(store: &Store) -> noirpass::Result<()> {
         .into_iter()
         .map(|collection| (collection.id, collection.label))
         .collect();
-    let missing: HashSet<String> = store
-        .check_integrity()?
-        .missing_secret_items
-        .into_iter()
-        .map(|item| item.table_key)
-        .collect();
 
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             println!();
         }
-        print_item(item, &collections, missing.contains(&item.id))?;
+        let missing_ciphertext = !store.has_secret_file(&item.id)?;
+        print_item(item, &collections, missing_ciphertext)?;
     }
     Ok(())
 }

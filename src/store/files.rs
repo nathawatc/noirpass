@@ -70,6 +70,21 @@ impl Store {
         }
     }
 
+    /// Whether item `id` currently has a regular ciphertext file on disk.
+    pub fn has_secret_file(&self, id: &str) -> Result<bool> {
+        self.ensure_not_poisoned()?;
+        let path = self.secret_path(id)?;
+        match self.secret_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Ok(true),
+            Ok(_) => Err(Error::Config(format!(
+                "secret path is not a regular file: {}",
+                path.display()
+            ))),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub(super) fn create_secret_file(&self, path: &Path) -> io::Result<File> {
         self.secrets_directory.open_file(
             self.secret_entry(path)?,

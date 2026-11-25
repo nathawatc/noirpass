@@ -359,3 +359,42 @@ fn cli_delete_removes_rows_files_and_preserves_other_items() {
         );
     }
 }
+
+#[test]
+fn cli_list_checks_ciphertext_presence_without_full_integrity_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let collection = store.ensure_default().unwrap();
+    let item = store
+        .create_or_replace_item(
+            &collection.id,
+            "present",
+            HashMap::new(),
+            "text/plain",
+            b"original ciphertext",
+            false,
+        )
+        .unwrap()
+        .0;
+    drop(store);
+    // An unrelated directory in secrets/ would fail a full check_integrity scan,
+    // but `list` only checks presence of indexed items' ciphertext files.
+    std::fs::create_dir(dir.path().join("secrets").join("unrelated.gpg")).unwrap();
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_noirpass"))
+        .env_remove("NOIRPASS_STORE")
+        .arg("--store-dir")
+        .arg(dir.path())
+        .arg("list")
+        .output()
+        .expect("spawn noirpass list");
+    assert!(
+        listed.status.success(),
+        "list failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&listed.stdout),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains(&item.id));
+    assert!(stdout.contains("ciphertext: present"));
+}
