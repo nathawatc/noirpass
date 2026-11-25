@@ -134,10 +134,10 @@ fn cli_default_store_dir_precedence_and_fail_closed() {
         .output()
         .unwrap();
     assert!(!xdg_wins.status.success());
-    assert!(
-        String::from_utf8_lossy(&xdg_wins.stdout)
-            .contains(&format!("data directory: {}", xdg_dir.join("noirpass").display()))
-    );
+    assert!(String::from_utf8_lossy(&xdg_wins.stdout).contains(&format!(
+        "data directory: {}",
+        xdg_dir.join("noirpass").display()
+    )));
 
     let relative_xdg_falls_back_to_home = noirpass_command()
         .arg("status")

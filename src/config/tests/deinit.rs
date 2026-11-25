@@ -234,7 +234,8 @@ fn deinit_stays_on_pinned_root_and_children_after_replacement() {
 #[test]
 fn deinit_cleans_up_store_with_corrupt_or_non_utf8_config() {
     let (certificate, _) = generated_recipient();
-    let escape_cert = "version = 1\nrecipient_fingerprint = \"test\"\nrecipient_cert = \"../escape.pgp\"\n";
+    let escape_cert =
+        "version = 1\nrecipient_fingerprint = \"test\"\nrecipient_cert = \"../escape.pgp\"\n";
     let bad_idle = "version = 1\nrecipient_fingerprint = \"test\"\nrecipient_cert = \"keys/recipient.pgp\"\nidle_exit = -2\n";
     for bad_config in [
         b"not toml".as_slice(),

@@ -104,7 +104,10 @@ fn quarantine_recovery_refuses_to_overwrite_mismatched_existing_ciphertext() {
     fs::write(&quarantine, b"quarantined").unwrap();
 
     let err = store.recover_interrupted_operations().unwrap_err();
-    assert!(err.to_string().contains("conflicts with existing ciphertext"));
+    assert!(
+        err.to_string()
+            .contains("conflicts with existing ciphertext")
+    );
     assert_eq!(fs::read(&canonical).unwrap(), b"unexpected canonical");
     assert_eq!(fs::read(&quarantine).unwrap(), b"quarantined");
 }

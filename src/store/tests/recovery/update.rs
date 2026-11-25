@@ -92,10 +92,9 @@ fn backup_recovery_refuses_to_overwrite_when_backup_digest_also_mismatches() {
         .unwrap();
     let canonical = store.secret_path(&item.id).unwrap();
     fs::write(&canonical, b"corrupt canonical").unwrap();
-    let backup = store.secrets_dir.join(format!(
-        ".noirpass-backup-{}-0000000000000001.gpg",
-        item.id
-    ));
+    let backup = store
+        .secrets_dir
+        .join(format!(".noirpass-backup-{}-0000000000000001.gpg", item.id));
     fs::write(&backup, b"corrupt backup").unwrap();
 
     let err = store.recover_interrupted_operations().unwrap_err();
