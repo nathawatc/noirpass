@@ -24,15 +24,17 @@ Every Noirpass application method and property handler holds the activity guard 
 lifetime. Admission, active-call count, completion time, and shutdown selection share one activity
 state. Once shutdown is selected, new application handlers fail. Admitted owned tasks carry
 their request scope into internal workers and signal property reads so draining can finish. Only a
-request belonging to the same ServiceState may bypass closed internal admission. Idle shutdown requires no sessions, no temporary items, and no active application handler.
+request belonging to the same ServiceState may bypass closed internal admission. Idle shutdown
+requires no sessions, no temporary items, and no active application handler.
 
 Session negotiation, searches, secret retrieval, and mutations additionally reserve nonblocking
 request capacity: 64 active or queued requests and 32 MiB of combined D-Bus-encoded input payload.
 Check capacity before copying arguments or spawning owned work; reject exhaustion with
-`org.freedesktop.DBus.Error.LimitsExceeded`. Owned tasks retain both reservations through publication
-after caller cancellation. A started blocking worker retains request count and byte reservations
-until completion even when its async waiter is cancelled. Property reads and internal worker/publication activity do not reserve
-request capacity, so saturation cannot interrupt an admitted mutation's required signals.
+`org.freedesktop.DBus.Error.LimitsExceeded`. Owned tasks retain both reservations through
+publication after caller cancellation. A started blocking worker retains request count and byte
+reservations until completion even when its async waiter is cancelled. Property reads and internal
+worker/publication activity do not reserve request capacity, so saturation cannot interrupt an
+admitted mutation's required signals.
 
 Encryption, persistent reads/writes (including namespace metadata), and agent decryption share four
 blocking worker slots.

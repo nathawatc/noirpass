@@ -65,9 +65,9 @@ impl From<Error> for zbus::fdo::Error {
     /// [`Error::NotFound`] maps to `UnknownObject`, which is the nearest
     /// standard analogue to the Secret Service `NoSuchObject` error. The
     /// dedicated `org.freedesktop.Secret.Error.NoSuchObject` code is a custom
-    /// error name that is handled at the D-Bus interface layer (added later);
-    /// this conversion intentionally stays on the standard error set so it is
-    /// always usable. Everything else becomes `Failed`, carrying the original
+    /// error name that is handled at the D-Bus interface layer (see
+    /// `crate::service::SecretError::NoSuchObject`); this conversion
+    /// intentionally stays on the standard error set so it is always usable. Everything else becomes `Failed`, carrying the original
     /// message for debugging.
     fn from(err: Error) -> Self {
         match err {

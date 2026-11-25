@@ -82,12 +82,12 @@ selected store, refuses unsafe symlinks, preserves unknown files, and leaves the
 interactive confirmation policy to [`../cli/AGENTS.md`](../cli/AGENTS.md).
 
 Deinitialization pins the selected root before preflight, then claims redb's full-file backend lock
-and acquires lifecycle ownership relative to that same descriptor. Pin the recipient parent, secrets,
-and keys directories before destructive work. Enumerate and unlink through the same pinned directory; pathname replacement
-must not redirect file deletion. Before removing an emptied child, compare its directory entry with
-the pinned descriptor and preserve replacements when identities differ. Regression tests must replace
-roots and children with both ordinary directories and symlinks and verify replacement state remains
-intact.
+and acquires lifecycle ownership relative to that same descriptor. Pin the recipient parent,
+secrets, and keys directories before destructive work. Enumerate and unlink through the same pinned
+directory; pathname replacement must not redirect file deletion. Before removing an emptied child,
+compare its directory entry with the pinned descriptor and preserve replacements when identities
+differ. Regression tests must replace roots and children with both ordinary directories and symlinks
+and verify replacement state remains intact.
 
 Every existing index requires ownership before lifecycle-file creation, including when `secrets/`
 is missing. Acquire ownership without parsing, initializing, recovering, or writing the index so

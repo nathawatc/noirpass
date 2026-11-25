@@ -12,7 +12,8 @@ Root rules. Read nearest `AGENTS.md` for narrower ownership guidance.
 - [src/crypto/AGENTS.md](src/crypto/AGENTS.md): Secret Service transport cryptography and secret-memory handling
 - [src/gpg/AGENTS.md](src/gpg/AGENTS.md): OpenPGP encryption, certificate validation, and GPG-agent integration
 - [src/service/AGENTS.md](src/service/AGENTS.md): Secret Service D-Bus API, sessions, objects, signals, and lifecycle
-- [src/service/state/AGENTS.md](src/service/state/AGENTS.md): handler admission, shutdown, mutation locking, workers, and temporary storage
+- [src/service/state/AGENTS.md](src/service/state/AGENTS.md): handler admission, shutdown, mutation
+  locking, workers, and temporary storage
 - [src/store/AGENTS.md](src/store/AGENTS.md): redb persistence, ciphertext storage, durability, recovery, and integrity
 - [systemd/AGENTS.md](systemd/AGENTS.md): `flake.nix` packaging, systemd activation, and sandbox hardening
 - [tests/AGENTS.md](tests/AGENTS.md): hermetic tests and production-isolation requirements
