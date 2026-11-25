@@ -24,7 +24,7 @@ use tokio::sync::{
 use zbus::OwnedObjectPath;
 use zeroize::Zeroizing;
 
-use super::SESSION_COLLECTION_ID;
+use super::{SESSION_COLLECTION_ID, SecretError};
 use crate::crypto::SessionCipher;
 use crate::gpg::Gpg;
 use crate::now_secs;
@@ -65,7 +65,7 @@ pub(super) fn session_item_bytes(
     attributes: &HashMap<String, String>,
     content_type: &str,
     secret_len: usize,
-) -> crate::Result<usize> {
+) -> Result<usize, SecretError> {
     if secret_len > MAX_SESSION_SECRET_BYTES
         || attributes.len() > MAX_SESSION_ATTRIBUTES
         || label.len() > MAX_SESSION_STRING_BYTES
@@ -74,7 +74,7 @@ pub(super) fn session_item_bytes(
             key.len() > MAX_SESSION_STRING_BYTES || value.len() > MAX_SESSION_STRING_BYTES
         })
     {
-        return Err(crate::Error::Config(
+        return Err(SecretError::LimitsExceeded(
             "temporary item exceeds size limits".into(),
         ));
     }
@@ -85,7 +85,7 @@ pub(super) fn session_item_bytes(
             .map(|(key, value)| key.len() + value.len())
             .sum::<usize>();
     if metadata_bytes > MAX_SESSION_METADATA_BYTES {
-        return Err(crate::Error::Config(
+        return Err(SecretError::LimitsExceeded(
             "temporary item metadata exceeds size limit".into(),
         ));
     }
@@ -120,12 +120,14 @@ struct SessionCollectionState {
 }
 
 impl SessionCollectionState {
-    fn check_capacity(&self, previous: usize, replacement: usize) -> crate::Result<usize> {
+    fn check_capacity(&self, previous: usize, replacement: usize) -> Result<usize, SecretError> {
         self.retained_bytes
             .checked_sub(previous)
             .and_then(|retained| retained.checked_add(replacement))
             .filter(|retained| *retained <= MAX_SESSION_BYTES)
-            .ok_or_else(|| crate::Error::Config("temporary collection exceeds memory limit".into()))
+            .ok_or_else(|| {
+                SecretError::LimitsExceeded("temporary collection exceeds memory limit".into())
+            })
     }
 
     fn new() -> Self {

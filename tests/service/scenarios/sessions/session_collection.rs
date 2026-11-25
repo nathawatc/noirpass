@@ -144,11 +144,11 @@ async fn exercise_temporary_item(
         value: Zeroizing::new(vec![0; 1024 * 1024 + 1]),
         ..secret
     };
-    assert!(
-        item.call::<_, _, ()>("SetSecret", &(&oversized,))
-            .await
-            .is_err()
-    );
+    let error = item
+        .call::<_, _, ()>("SetSecret", &(&oversized,))
+        .await
+        .unwrap_err();
+    assert_method_error(&error, "org.freedesktop.DBus.Error.LimitsExceeded");
     let (after,): (WireSecret,) = item.call("GetSecret", &(session,)).await.unwrap();
     assert_eq!(after.value.as_slice(), b"replacement");
     let (duplicate, _): (OwnedObjectPath, OwnedObjectPath) = collection

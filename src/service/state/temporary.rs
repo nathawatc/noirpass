@@ -9,7 +9,7 @@ use super::{
     SESSION_ITEM_ALLOCATION_ATTEMPTS, ServiceState, SessionItem, now_secs, session_item_bytes,
 };
 use crate::random_hex_id;
-use crate::service::{SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID};
+use crate::service::{SESSION_COLLECTION_ALIAS, SESSION_COLLECTION_ID, SecretError};
 use crate::store::{CollectionMeta, ItemMeta};
 
 impl ServiceState {
@@ -45,7 +45,7 @@ impl ServiceState {
 
     /// Replace any persisted target with a bounded, process-local session target.
     /// The caller holds object lifecycle serialization through registration and signals.
-    pub(crate) fn set_session_alias(&self, name: &str) -> crate::Result<()> {
+    pub(crate) fn set_session_alias(&self, name: &str) -> Result<(), SecretError> {
         {
             let collection = self
                 .session_collection
@@ -55,7 +55,7 @@ impl ServiceState {
                 || (!collection.aliases.contains(name)
                     && collection.aliases.len() >= MAX_SESSION_ALIASES)
             {
-                return Err(crate::Error::Config(
+                return Err(SecretError::LimitsExceeded(
                     "temporary collection exceeds alias limits".into(),
                 ));
             }
@@ -69,7 +69,7 @@ impl ServiceState {
             .lock()
             .expect("session collection lock poisoned");
         if !collection.aliases.contains(name) && collection.aliases.len() >= MAX_SESSION_ALIASES {
-            return Err(crate::Error::Config(
+            return Err(SecretError::LimitsExceeded(
                 "temporary collection exceeds alias limits".into(),
             ));
         }
@@ -98,9 +98,9 @@ impl ServiceState {
     pub(crate) fn set_session_collection_label(
         &self,
         label: &str,
-    ) -> crate::Result<CollectionMeta> {
+    ) -> Result<CollectionMeta, SecretError> {
         if label.len() > MAX_SESSION_STRING_BYTES {
-            return Err(crate::Error::Config(
+            return Err(SecretError::LimitsExceeded(
                 "temporary collection label exceeds size limit".into(),
             ));
         }
@@ -184,7 +184,7 @@ impl ServiceState {
         content_type: &str,
         secret: Zeroizing<Vec<u8>>,
         replace: bool,
-    ) -> crate::Result<(ItemMeta, bool)> {
+    ) -> Result<(ItemMeta, bool), SecretError> {
         let replacement_bytes = session_item_bytes(label, &attributes, content_type, secret.len())?;
         let mut collection = self
             .session_collection
@@ -206,7 +206,7 @@ impl ServiceState {
             .map_or(0, |id| collection.items[id].bytes);
         let retained_bytes = collection.check_capacity(previous_bytes, replacement_bytes)?;
         if existing_id.is_none() && collection.items.len() >= MAX_SESSION_ITEMS {
-            return Err(crate::Error::Config(
+            return Err(SecretError::LimitsExceeded(
                 "temporary collection exceeds item limit".into(),
             ));
         }
@@ -231,7 +231,7 @@ impl ServiceState {
             .map(|_| random_hex_id())
             .find(|candidate| !collection.items.contains_key(candidate))
             .ok_or_else(|| {
-                crate::Error::Config(format!(
+                SecretError::Failed(format!(
                     "could not allocate temporary item id after {SESSION_ITEM_ALLOCATION_ATTEMPTS} attempts"
                 ))
             })?;
@@ -266,7 +266,7 @@ impl ServiceState {
         attributes: Option<HashMap<String, String>>,
         content_type: Option<&str>,
         secret: Option<Zeroizing<Vec<u8>>>,
-    ) -> crate::Result<ItemMeta> {
+    ) -> Result<ItemMeta, SecretError> {
         let mut collection = self
             .session_collection
             .lock()
@@ -274,7 +274,7 @@ impl ServiceState {
         let item = collection
             .items
             .get(id)
-            .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))?;
+            .ok_or_else(|| SecretError::NoSuchObject(format!("item {id}")))?;
         let replacement_bytes = session_item_bytes(
             label.unwrap_or(&item.metadata.label),
             attributes.as_ref().unwrap_or(&item.metadata.attributes),
@@ -289,7 +289,7 @@ impl ServiceState {
             let item = collection
                 .items
                 .get_mut(id)
-                .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))?;
+                .ok_or_else(|| SecretError::NoSuchObject(format!("item {id}")))?;
             if let Some(label) = label {
                 item.metadata.label = label.to_string();
             }
@@ -312,7 +312,7 @@ impl ServiceState {
     }
 
     /// Delete a temporary item; dropping it zeroizes the secret bytes.
-    pub(crate) fn delete_session_item(&self, id: &str) -> crate::Result<()> {
+    pub(crate) fn delete_session_item(&self, id: &str) -> Result<(), SecretError> {
         let mut collection = self
             .session_collection
             .lock()
@@ -320,7 +320,7 @@ impl ServiceState {
         let previous = collection
             .items
             .get(id)
-            .ok_or_else(|| crate::Error::NotFound(format!("item {id}")))?
+            .ok_or_else(|| SecretError::NoSuchObject(format!("item {id}")))?
             .bytes;
         let retained_bytes = collection.check_capacity(previous, 0)?;
         collection.items.remove(id);
