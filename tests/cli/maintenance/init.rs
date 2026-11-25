@@ -5,7 +5,7 @@ use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use noirpass::config::{Config, LifecycleLock, load_recipient};
-use noirpass::gpg::parse_recipient_cert;
+use noirpass::gpg::parse_recipient;
 use noirpass::store::Store;
 
 use crate::common::{
@@ -107,15 +107,12 @@ fn cli_serializes_concurrent_fresh_init_before_writing() {
     );
 
     let stored_cert = fs::read(store.path().join("keys/recipient.pgp")).unwrap();
-    let stored_fingerprint = parse_recipient_cert(&stored_cert)
+    let stored_fingerprint = parse_recipient(&stored_cert)
         .unwrap()
         .fingerprint()
         .to_hex();
-    let first_fingerprint = parse_recipient_cert(&first_cert)
-        .unwrap()
-        .fingerprint()
-        .to_hex();
-    let second_fingerprint = parse_recipient_cert(&second_cert)
+    let first_fingerprint = parse_recipient(&first_cert).unwrap().fingerprint().to_hex();
+    let second_fingerprint = parse_recipient(&second_cert)
         .unwrap()
         .fingerprint()
         .to_hex();

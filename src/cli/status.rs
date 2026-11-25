@@ -1,11 +1,11 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use noirpass::config::{Status, status_with_cert};
+use noirpass::config::{Status, status_with_recipient};
 use noirpass::gpg::Gpg;
 
 pub(super) async fn run(store_dir: &Path) -> noirpass::Result<ExitCode> {
-    let (mut status, cert) = status_with_cert(store_dir);
+    let (mut status, cert) = status_with_recipient(store_dir);
     if status.usable()
         && let Some(cert) = cert
         && let Err(err) = Gpg::from_cert(cert)

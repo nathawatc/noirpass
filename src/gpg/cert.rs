@@ -40,7 +40,7 @@ pub(super) fn usable_encryption_keys<'a>(
 }
 
 /// Parse an armored or binary `OpenPGP` recipient certificate.
-pub fn parse_recipient_cert(bytes: &[u8]) -> Result<Cert> {
+pub fn parse_recipient(bytes: &[u8]) -> Result<Cert> {
     Cert::from_bytes(bytes).map_err(pgp_err)
 }
 

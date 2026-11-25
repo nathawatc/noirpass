@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::filesystem::Directory;
 #[cfg(test)]
 use crate::filesystem::validate_no_symlink_components;
-use crate::gpg::{cert_to_binary, has_usable_encryption_key, parse_recipient_cert};
+use crate::gpg::{cert_to_binary, has_usable_encryption_key, parse_recipient};
 use crate::store::Store;
 use sequoia_openpgp::Cert;
 
@@ -88,7 +88,7 @@ fn reject_missing_index_for_initialized_store(root: &Directory) -> Result<()> {
 }
 
 fn parse_usable_recipient(bytes: &[u8]) -> Result<Cert> {
-    let cert = parse_recipient_cert(bytes)?;
+    let cert = parse_recipient(bytes)?;
     if !has_usable_encryption_key(&cert) {
         return Err(Error::Config(NO_USABLE_ENCRYPTION_KEY_ERROR.into()));
     }
@@ -133,7 +133,7 @@ pub(super) fn init_store_with_hook(
         None
     };
     after_open();
-    let config = init_from_cert_in_with_hooks(
+    let config = init_from_recipient_in_with_hooks(
         data_dir,
         &root,
         cert,
@@ -154,7 +154,7 @@ pub(super) fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     validate_no_symlink_components(data_dir)?;
     let cert = parse_usable_recipient(bytes)?;
     let root = super::open_lifecycle_directory(data_dir)?;
-    init_from_cert_in_with_hooks(
+    init_from_recipient_in_with_hooks(
         data_dir,
         &root,
         &cert,
@@ -163,7 +163,7 @@ pub(super) fn init_from_bytes(data_dir: &Path, bytes: &[u8]) -> Result<Config> {
     )
 }
 
-pub(super) fn init_from_cert_in_with_hooks(
+pub(super) fn init_from_recipient_in_with_hooks(
     data_dir: &Path,
     root: &Directory,
     cert: &Cert,

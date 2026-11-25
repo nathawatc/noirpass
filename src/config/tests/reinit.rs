@@ -2,7 +2,7 @@ use super::super::{
     Config, DEFAULT_IDLE_EXIT_SECONDS, INDEX_FILE, config_path, init_from_bytes, load_recipient,
     recipient_cert_path,
 };
-use crate::gpg::{parse_recipient_cert, test_support::TestGnupg};
+use crate::gpg::{parse_recipient, test_support::TestGnupg};
 use crate::store::Store;
 use sequoia_openpgp::cert::CertBuilder;
 use sequoia_openpgp::serialize::Serialize;
@@ -230,7 +230,7 @@ fn reinit_different_recipient_fails_with_existing_secret_files() {
         load_recipient(tmp.path()).unwrap().fingerprint,
         one.fingerprint()
     );
-    let stored = parse_recipient_cert(&fs::read(recipient_cert_path(tmp.path())).unwrap()).unwrap();
+    let stored = parse_recipient(&fs::read(recipient_cert_path(tmp.path())).unwrap()).unwrap();
     assert_eq!(stored.fingerprint().to_hex(), one.fingerprint());
 }
 
@@ -291,6 +291,6 @@ fn reinit_preserves_existing_cert_when_config_write_fails() {
 
     let _err = init_from_bytes(tmp.path(), &two.export_public_binary()).unwrap_err();
 
-    let stored = parse_recipient_cert(&fs::read(recipient_cert_path(tmp.path())).unwrap()).unwrap();
+    let stored = parse_recipient(&fs::read(recipient_cert_path(tmp.path())).unwrap()).unwrap();
     assert_eq!(stored.fingerprint().to_hex(), one.fingerprint());
 }

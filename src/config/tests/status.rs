@@ -244,7 +244,7 @@ fn status_succeeds_with_readonly_index_file() {
     let index = tmp.path().join(INDEX_FILE);
     fs::set_permissions(&index, fs::Permissions::from_mode(0o400)).unwrap();
 
-    let (status, cert) = super::super::status_with_cert(tmp.path());
+    let (status, cert) = super::super::status_with_recipient(tmp.path());
     // Restore write mode before tempdir drop.
     fs::set_permissions(&index, fs::Permissions::from_mode(0o600)).unwrap();
 

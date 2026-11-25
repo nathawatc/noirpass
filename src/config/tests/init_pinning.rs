@@ -5,17 +5,17 @@ use std::path::Path;
 use sequoia_openpgp::serialize::Serialize;
 
 use super::super::format::{atomic_write_in, atomic_write_in_with_sync};
-use super::super::init::{init_from_cert_in_with_hooks, init_store_with_hook};
+use super::super::init::{init_from_recipient_in_with_hooks, init_store_with_hook};
 use super::super::{CONFIG_FILE, Config, INDEX_FILE, KEYS_DIR, RECIPIENT_REL, init_from_bytes};
 use super::support::generated_recipient;
 use crate::filesystem::Directory;
-use crate::gpg::parse_recipient_cert;
+use crate::gpg::parse_recipient;
 use crate::store::Store;
 
 #[test]
 fn complete_initialization_stays_on_selected_root_after_replacement() {
     let (bytes, _) = generated_recipient();
-    let cert = parse_recipient_cert(&bytes).unwrap();
+    let cert = parse_recipient(&bytes).unwrap();
     let (other, _) = generated_recipient();
     for existing in [false, true] {
         for link in [false, true] {
@@ -69,7 +69,7 @@ fn complete_initialization_stays_on_selected_root_after_replacement() {
 #[test]
 fn refresh_rolls_back_on_pinned_keys_after_directory_replacement() {
     let (bytes, _) = generated_recipient();
-    let cert = parse_recipient_cert(&bytes).unwrap();
+    let cert = parse_recipient(&bytes).unwrap();
     let (other, _) = generated_recipient();
     let mut previous = Vec::new();
     cert.armored().serialize(&mut previous).unwrap();
@@ -94,7 +94,7 @@ fn refresh_rolls_back_on_pinned_keys_after_directory_replacement() {
                     fs::rename(outside.join(KEYS_DIR), selected.join(KEYS_DIR)).unwrap();
                 }
             };
-            let err = init_from_cert_in_with_hooks(
+            let err = init_from_recipient_in_with_hooks(
                 &selected,
                 &root,
                 &cert,
@@ -135,14 +135,14 @@ fn refresh_rolls_back_on_pinned_keys_after_directory_replacement() {
 fn config_failure_after_certificate_publication_restores_previous_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let (bytes, _) = generated_recipient();
-    let cert = parse_recipient_cert(&bytes).unwrap();
+    let cert = parse_recipient(&bytes).unwrap();
     init_from_bytes(tmp.path(), &bytes).unwrap();
     drop(Store::open(tmp.path()).unwrap());
     let mut previous = Vec::new();
     cert.armored().serialize(&mut previous).unwrap();
     fs::write(tmp.path().join(RECIPIENT_REL), &previous).unwrap();
     let root = Directory::open(tmp.path()).unwrap();
-    let err = init_from_cert_in_with_hooks(
+    let err = init_from_recipient_in_with_hooks(
         tmp.path(),
         &root,
         &cert,
@@ -165,7 +165,7 @@ fn config_failure_after_certificate_publication_restores_previous_bytes() {
 #[test]
 fn certificate_sync_failure_rolls_back_fresh_and_existing_initialization() {
     let (bytes, _) = generated_recipient();
-    let cert = parse_recipient_cert(&bytes).unwrap();
+    let cert = parse_recipient(&bytes).unwrap();
     for existing in [false, true] {
         let tmp = tempfile::tempdir().unwrap();
         let previous = if existing {
@@ -180,7 +180,7 @@ fn certificate_sync_failure_rolls_back_fresh_and_existing_initialization() {
         };
         let previous_config = fs::read(tmp.path().join(CONFIG_FILE)).ok();
         let root = Directory::open(tmp.path()).unwrap();
-        let err = init_from_cert_in_with_hooks(
+        let err = init_from_recipient_in_with_hooks(
             tmp.path(),
             &root,
             &cert,

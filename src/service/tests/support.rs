@@ -2,7 +2,7 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::gpg::{Gpg, parse_recipient_cert, test_support::TestGnupg};
+use crate::gpg::{Gpg, parse_recipient, test_support::TestGnupg};
 use crate::store::Store;
 use zbus::connection::Builder;
 use zbus::export::futures_core::Stream;
@@ -17,7 +17,7 @@ pub(in crate::service) fn test_state(
 ) -> Arc<ServiceState> {
     let store = Store::open(dir).unwrap();
     store.ensure_default().unwrap();
-    let cert = parse_recipient_cert(&gnupg.export_public_binary()).unwrap();
+    let cert = parse_recipient(&gnupg.export_public_binary()).unwrap();
     let gpg = Gpg::from_cert_with_homedir(cert, Some(gnupg.path().to_path_buf()));
     ServiceState::new(store, gpg)
 }

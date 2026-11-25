@@ -100,7 +100,7 @@ pub use init::init_store_from_path;
 pub use startup::open_startup_store;
 #[cfg(test)]
 use status::status;
-pub use status::{load_recipient, status_with_cert};
+pub use status::{load_recipient, status_with_recipient};
 
 /// Minimal persisted config.
 #[derive(Debug, Clone, PartialEq, Eq)]

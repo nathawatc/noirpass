@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 
-pub use cert::{cert_to_binary, has_usable_encryption_key, parse_recipient_cert};
+pub use cert::{cert_to_binary, has_usable_encryption_key, parse_recipient};
 
 /// A recipient certificate plus enough context to decrypt via `gpg-agent`.
 pub struct Gpg {

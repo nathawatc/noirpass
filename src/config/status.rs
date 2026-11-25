@@ -7,7 +7,7 @@ use sequoia_openpgp::Cert;
 
 use crate::error::{Error, Result};
 use crate::filesystem::{Directory, validate_no_symlink_components};
-use crate::gpg::{has_usable_encryption_key, parse_recipient_cert};
+use crate::gpg::{has_usable_encryption_key, parse_recipient};
 use crate::store::{INTEGRITY_CHECK_FAILED_ERROR, Store};
 
 use super::{
@@ -23,11 +23,7 @@ fn fingerprint_mismatch_msg(configured: &str, actual: &str) -> String {
     format!("recipient fingerprint mismatch: config has {configured}, cert has {actual}")
 }
 
-fn read_and_parse_recipient_cert(
-    data_dir: &Path,
-    root: &Directory,
-    rel_path: &Path,
-) -> Result<Cert> {
+fn read_and_parse_recipient(data_dir: &Path, root: &Directory, rel_path: &Path) -> Result<Cert> {
     super::format::validate_recipient_cert_path(rel_path)?;
     root.validate_regular_or_absent(rel_path)?;
     let path = data_dir.join(rel_path);
@@ -41,7 +37,7 @@ fn read_and_parse_recipient_cert(
             Error::Io(e)
         }
     })?;
-    parse_recipient_cert(&bytes)
+    parse_recipient(&bytes)
 }
 
 pub(super) fn load_configured_recipient_in(
@@ -55,7 +51,7 @@ pub(super) fn load_configured_recipient_in(
         )));
     }
 
-    let cert = read_and_parse_recipient_cert(data_dir, root, &config.recipient_cert)?;
+    let cert = read_and_parse_recipient(data_dir, root, &config.recipient_cert)?;
     let actual = cert.fingerprint().to_hex();
     if actual != config.recipient_fingerprint {
         return Err(Error::Config(fingerprint_mismatch_msg(
@@ -85,13 +81,13 @@ pub(super) fn load_recipient_in(data_dir: &Path, root: &Directory) -> Result<(Co
 #[cfg(test)]
 #[must_use]
 pub(super) fn status(data_dir: &Path) -> Status {
-    status_with_cert(data_dir).0
+    status_with_recipient(data_dir).0
 }
 
-/// Compute status and return the already-validated certificate when usable,
+/// Compute status and return the already-validated recipient certificate when usable,
 /// avoiding a second path resolution and certificate parse in `noirpass status`.
 #[must_use]
-pub fn status_with_cert(data_dir: &Path) -> (Status, Option<Cert>) {
+pub fn status_with_recipient(data_dir: &Path) -> (Status, Option<Cert>) {
     let mut out = Status {
         data_dir: data_dir.to_path_buf(),
         config_present: false,
@@ -141,7 +137,7 @@ pub fn status_with_cert(data_dir: &Path) -> (Status, Option<Cert>) {
         {
             out.recipient_cert_present = root.entry_exists(&config.recipient_cert).unwrap_or(false);
         }
-        match read_and_parse_recipient_cert(data_dir, &root, &config.recipient_cert) {
+        match read_and_parse_recipient(data_dir, &root, &config.recipient_cert) {
             Ok(cert) => {
                 let actual = cert.fingerprint().to_hex();
                 let has_key = has_usable_encryption_key(&cert);
