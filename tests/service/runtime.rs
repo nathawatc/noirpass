@@ -18,7 +18,10 @@ pub(super) fn daemon_runtime_does_not_spawn_gpg() {
     assert!(
         !h.fake_gpg_log.exists(),
         "daemon spawned gpg: {}",
-        std::fs::read_to_string(&h.fake_gpg_log).unwrap_or_default()
+        std::fs::read_to_string(&h.fake_gpg_log)
+            .unwrap_or_default()
+            .replace('\n', " ")
+            .replace('\r', " ")
     );
 }
 
@@ -161,7 +164,10 @@ async fn idle_exit_daemon_exits() {
     assert!(
         !h.fake_gpg_log.exists(),
         "daemon spawned gpg during idle-exit test: {}",
-        std::fs::read_to_string(&h.fake_gpg_log).unwrap_or_default()
+        std::fs::read_to_string(&h.fake_gpg_log)
+            .unwrap_or_default()
+            .replace('\n', " ")
+            .replace('\r', " ")
     );
 
     dbus.kill().expect("kill private dbus-daemon");

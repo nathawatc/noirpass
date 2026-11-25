@@ -100,11 +100,12 @@ fn malformed_ciphertext_fails() {
     let server = DhHandshake::generate();
     let client = DhHandshake::generate();
     let cipher = server.derive(&client.public_bytes()).unwrap();
+    let (iv, _) = cipher.encrypt(b"");
 
-    assert!(cipher.decrypt(&[0u8; 16], &[]).is_err());
-    assert!(cipher.decrypt(&[0u8; 16], &[0u8; 15]).is_err());
-    assert!(cipher.decrypt(&[0u8; 16], &[0u8; 17]).is_err());
-    assert!(cipher.decrypt(&[0u8; 15], &[]).is_err());
+    assert!(cipher.decrypt(&iv, &[]).is_err());
+    assert!(cipher.decrypt(&iv, &[0u8; 15]).is_err());
+    assert!(cipher.decrypt(&iv, &[0u8; 17]).is_err());
+    assert!(cipher.decrypt(&iv[..15], &[]).is_err());
 }
 
 #[test]

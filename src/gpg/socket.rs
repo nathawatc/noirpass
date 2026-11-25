@@ -58,8 +58,10 @@ fn account_home(user: Option<&[u8]>) -> Result<Option<OsString>> {
         if found.is_null() {
             return Ok(None);
         }
-        // SAFETY: success with a non-null result initializes the passwd record.
-        let directory = unsafe { (*found).pw_dir };
+        // SAFETY: POSIX getpwnam_r/getpwuid_r writes the passwd record into
+        // `account` when returning success with a non-null result pointer.
+        let account = unsafe { account.assume_init() };
+        let directory = account.pw_dir;
         if directory.is_null() {
             return Ok(None);
         }
@@ -222,12 +224,13 @@ mod tests {
             assert!(!found.is_null());
             break;
         }
-        // SAFETY: the successful lookup supplies NUL-terminated fields backed
-        // by buffer, which remains live until both fields have been copied.
+        // SAFETY: the successful lookup initializes `account` with NUL-terminated
+        // fields backed by `buffer`, which remains live until both fields are copied.
+        let account = unsafe { account.assume_init() };
         let (name, directory) = unsafe {
             (
-                CStr::from_ptr((*found).pw_name).to_bytes().to_vec(),
-                CStr::from_ptr((*found).pw_dir).to_bytes().to_vec(),
+                CStr::from_ptr(account.pw_name).to_bytes().to_vec(),
+                CStr::from_ptr(account.pw_dir).to_bytes().to_vec(),
             )
         };
         let mut named = b"~".to_vec();
